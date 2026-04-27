@@ -8,48 +8,46 @@ import fs from "fs";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load firebase config
+// Try to load firebase config using direct import (better for Vercel bundling)
 let firebaseConfig: any;
 try {
-  const configPaths = [
-    path.join(process.cwd(), "firebase-applet-config.json"),
-    path.join(__dirname, "firebase-applet-config.json"),
-    path.join(__dirname, "..", "firebase-applet-config.json"),
-    "/var/task/firebase-applet-config.json"
-  ];
-  
-  let configContent = null;
-  for (const p of configPaths) {
-    if (fs.existsSync(p)) {
-      console.log("Found firebase config at:", p);
-      configContent = fs.readFileSync(p, "utf8");
-      break;
+  // Use a dynamic import to allow it to be optional/handled
+  const config = await import("./firebase-applet-config.json", { assert: { type: "json" } });
+  firebaseConfig = config.default;
+  console.log("Firebase config loaded via direct import");
+} catch (importErr) {
+  console.warn("Failed to import config directly, falling back to fs.readFileSync");
+  try {
+    const configPaths = [
+      path.join(process.cwd(), "firebase-applet-config.json"),
+      path.join(__dirname, "firebase-applet-config.json"),
+      path.join(__dirname, "..", "firebase-applet-config.json"),
+      "/var/task/firebase-applet-config.json"
+    ];
+    
+    let configContent = null;
+    for (const p of configPaths) {
+      if (fs.existsSync(p)) {
+        console.log("Found firebase config at:", p);
+        configContent = fs.readFileSync(p, "utf8");
+        break;
+      }
     }
-  }
 
-  // Vercel / environment variable backup if file is truly missing in some builds
-  if (!configContent && process.env.FIREBASE_CONFIG_JSON) {
-    console.log("Using configuration from FIREBASE_CONFIG_JSON env var");
-    configContent = process.env.FIREBASE_CONFIG_JSON;
-  }
-
-  if (!configContent) {
-    console.warn("firebase-applet-config.json not found in common paths. Checking current directory...");
-    const files = fs.readdirSync(process.cwd());
-    if (files.includes("firebase-applet-config.json")) {
-      configContent = fs.readFileSync(path.join(process.cwd(), "firebase-applet-config.json"), "utf8");
+    if (!configContent && process.env.FIREBASE_CONFIG_JSON) {
+      console.log("Using configuration from FIREBASE_CONFIG_JSON env var");
+      configContent = process.env.FIREBASE_CONFIG_JSON;
     }
-  }
 
-  if (!configContent) {
-    throw new Error("firebase-applet-config.json missing. Please ensure it is uploaded to Vercel.");
+    if (!configContent) {
+      throw new Error("firebase-applet-config.json missing.");
+    }
+    
+    firebaseConfig = JSON.parse(configContent);
+  } catch (err: any) {
+    console.error("CRITICAL Error loading firebase config:", err.message);
+    firebaseConfig = { error: err.message };
   }
-  
-  firebaseConfig = JSON.parse(configContent);
-} catch (err: any) {
-  console.error("CRITICAL Error loading firebase config:", err.message);
-  // We'll catch this later in the serverless handler
-  firebaseConfig = { error: err.message };
 }
 
 // Set environment variables for firebase-admin
@@ -58,20 +56,26 @@ if (firebaseConfig.projectId) {
 }
 
 // Initialize Firebase Admin (for token verification and administrative tasks)
-let adminApp: admin.app.App | null = null;
-if (!firebaseConfig.error) {
-  try {
-    if (admin.apps.length === 0) {
-      adminApp = admin.initializeApp({ 
-        projectId: firebaseConfig.projectId 
-      });
-      console.log(`Firebase Admin initialized for project: ${firebaseConfig.projectId}`);
-    } else {
-      adminApp = admin.apps[0]!;
+let adminApp: any = null;
+function getAdminApp() {
+  if (adminApp) return adminApp;
+  if (firebaseConfig && firebaseConfig.projectId && !firebaseConfig.error) {
+    try {
+      if (admin.apps.length === 0) {
+        adminApp = admin.initializeApp({ 
+          projectId: firebaseConfig.projectId 
+        });
+        console.log(`[Firebase Admin] Lazy-initialized for project: ${firebaseConfig.projectId}`);
+      } else {
+        adminApp = admin.apps[0]!;
+      }
+      return adminApp;
+    } catch (e: any) {
+      console.error("[Firebase Admin] Lazy-initialization failed:", e.message);
+      return null;
     }
-  } catch (e: any) {
-    console.error("Failed to initialize Firebase Admin:", e.message);
   }
+  return null;
 }
 
 // Initialize Firestore Helper using REST API
@@ -143,27 +147,33 @@ const firestoreRest = {
   }
 };
 
-// Helper to parse Firestore REST fields
-function parseFirestoreFields(fields: any) {
-  if (!fields) return {};
-  const result: any = {};
-  for (const key in fields) {
-    const valueObj = fields[key];
-    if ('stringValue' in valueObj) result[key] = valueObj.stringValue;
-    else if ('integerValue' in valueObj) result[key] = parseInt(valueObj.integerValue);
-    else if ('doubleValue' in valueObj) result[key] = valueObj.doubleValue;
-    else if ('booleanValue' in valueObj) result[key] = valueObj.booleanValue;
-    else if ('timestampValue' in valueObj) result[key] = valueObj.timestampValue;
-    else if ('mapValue' in valueObj) result[key] = parseFirestoreFields(valueObj.mapValue.fields);
-    else if ('arrayValue' in valueObj) {
-      result[key] = (valueObj.arrayValue.values || []).map((v: any) => {
-        const temp = parseFirestoreFields({ temp: v });
-        return temp.temp;
-      });
+  // Helper to parse Firestore REST fields
+  function parseFirestoreFields(fields: any) {
+    if (!fields) return {};
+    const result: any = {};
+    try {
+      for (const key in fields) {
+        const valueObj = fields[key];
+        if (!valueObj) continue;
+        
+        if ('stringValue' in valueObj) result[key] = valueObj.stringValue;
+        else if ('integerValue' in valueObj) result[key] = parseInt(valueObj.integerValue);
+        else if ('doubleValue' in valueObj) result[key] = valueObj.doubleValue;
+        else if ('booleanValue' in valueObj) result[key] = valueObj.booleanValue;
+        else if ('timestampValue' in valueObj) result[key] = valueObj.timestampValue;
+        else if ('mapValue' in valueObj && valueObj.mapValue.fields) result[key] = parseFirestoreFields(valueObj.mapValue.fields);
+        else if ('arrayValue' in valueObj) {
+          result[key] = (valueObj.arrayValue.values || []).map((v: any) => {
+            const temp = parseFirestoreFields({ temp: v });
+            return temp.temp;
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Error parsing Firestore fields:", e);
     }
+    return result;
   }
-  return result;
-}
 
 // Helper to encode Firestore REST fields
 function encodeFirestoreFields(data: any) {
@@ -227,10 +237,17 @@ async function startServer() {
         body: JSON.stringify({ idToken })
       });
       
-      const verifyData: any = await verifyRes.json();
+      let verifyData: any;
+      try {
+        const text = await verifyRes.text();
+        verifyData = JSON.parse(text);
+      } catch (e) {
+        console.error("[Admin Check] Failed to parse verification response:", e);
+        throw new Error("Dịch vụ xác thực phản hồi không mong muốn.");
+      }
       
       if (!verifyRes.ok || !verifyData.users || verifyData.users.length === 0) {
-        throw new Error(verifyData.error?.message || "Token verification failed");
+        throw new Error(verifyData.error?.message || "Xác thực token thất bại.");
       }
 
       const decodedToken = verifyData.users[0];
@@ -248,9 +265,10 @@ async function startServer() {
 
       let userData: any = null;
       try {
+        const currentAdminApp = getAdminApp();
         // Only use Admin SDK for server-side checks if initialized
-        if (adminApp) {
-          const db = getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId);
+        if (currentAdminApp) {
+          const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
           const userDoc = await db.collection("users").doc(decodedToken.uid).get();
           
           if (userDoc.exists) {
@@ -313,35 +331,42 @@ async function startServer() {
 
   // Diagnostic Endpoint
   app.get("/api/admin/diagnostics", checkAdmin, async (req, res) => {
-    const idToken = req.headers.authorization.split("Bearer ")[1];
-    const results: any = {
-      projectId: firebaseConfig.projectId,
-      databaseId: firebaseConfig.firestoreDatabaseId,
-      auth: { status: "unknown" },
-      firestore: { status: "unknown" },
-      env: {
-        GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
-        NODE_ENV: process.env.NODE_ENV
-      }
-    };
-
     try {
-      // Test Auth REST API
-      const verifyRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken })
-      });
-      if (verifyRes.ok) {
-        results.auth.status = "ok";
-      } else {
+      const idToken = req.headers.authorization!.split("Bearer ")[1];
+      const results: any = {
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        auth: { status: "unknown" },
+        firestore: { status: "unknown" },
+        env: {
+          GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
+          NODE_ENV: process.env.NODE_ENV,
+          VERCEL: process.env.VERCEL
+        }
+      };
+
+      try {
+        // Test Auth REST API
+        const verifyRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken })
+        });
+        if (verifyRes.ok) {
+          results.auth.status = "ok";
+        } else {
+          results.auth.status = "error";
+          try {
+            const errBody = await verifyRes.json();
+            results.auth.message = errBody.error?.message;
+          } catch (pe) {
+            results.auth.message = "Non-JSON error from Auth API";
+          }
+        }
+      } catch (e: any) {
         results.auth.status = "error";
-        results.auth.message = (await verifyRes.json()).error?.message;
+        results.auth.message = e.message;
       }
-    } catch (e: any) {
-      results.auth.status = "error";
-      results.auth.message = e.message;
-    }
 
     try {
       // Test Firestore REST API
@@ -353,6 +378,20 @@ async function startServer() {
     }
 
     res.json(results);
+    } catch (err: any) {
+      console.error("[Diagnostics] Failed:", err);
+      res.status(500).json({ error: "Diagnostics failed", details: err.message });
+    }
+  });
+
+  // Global error handler
+  app.use((err: any, req: any, res: any, next: any) => {
+    console.error("Global Server Error:", err);
+    res.status(500).json({ 
+      error: "Internal Server Error", 
+      message: err.message,
+      path: req.url 
+    });
   });
 
   // Proxy TinyVault Upload (Vercel-style proxy for local dev/Cloud Run)
@@ -485,8 +524,9 @@ async function startServer() {
           await firestoreRest.setDoc("users", uid, userData, adminToken);
         } else {
           // Attempt using admin SDK if token missing
-          if (adminApp) {
-            const db = getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId);
+          const currentAdminApp = getAdminApp();
+          if (currentAdminApp) {
+            const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
             await db.collection("users").doc(uid).set(userData);
           } else {
             throw new Error("No authorization token or Admin SDK available");
@@ -540,9 +580,10 @@ async function startServer() {
   app.get("/api/admin/list-users", checkAdmin, async (req, res) => {
     try {
       // 1. Try Admin SDK first (fastest, bypasses rules)
-      if (adminApp) {
+      const currentAdminApp = getAdminApp();
+      if (currentAdminApp) {
         try {
-          const usersSnapshot = await getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId).collection("users").get();
+          const usersSnapshot = await getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId).collection("users").get();
           const users = usersSnapshot.docs.map(doc => ({
             id: doc.id,
             ...(doc.data() as any)
@@ -617,8 +658,9 @@ async function startServer() {
       }
 
       // 2. Delete Firestore document
-      if (adminApp) {
-        const db = getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId);
+      const currentAdminApp = getAdminApp();
+      if (currentAdminApp) {
+        const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
         await db.collection("users").doc(uid).delete();
         
         // 3. Add to blacklist to prevent re-registration or access if Auth delete failed
@@ -633,6 +675,7 @@ async function startServer() {
         }
       } else {
         // Fallback to REST for deletion if possible
+        const idToken = req.headers.authorization.split("Bearer ")[1];
         await firestoreRest.deleteDoc("users", uid, idToken);
         if (email) {
           await firestoreRest.setDoc("blacklist", email.toLowerCase(), {
@@ -681,11 +724,17 @@ async function startServer() {
     });
   }
 
-  // Always listen on port 3000 in this environment
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  });
+  // Only listen if not running in a serverless environment (like Vercel)
+  const isServerless = process.env.VERCEL === '1' || process.env.LAMBDA_TASK_ROOT || process.env.AWS_LAMBDA_FUNCTION_NAME;
+  
+  if (!isServerless) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    });
+  } else {
+    console.log("Running in serverless environment, skipping app.listen()");
+  }
 
   return app;
 }
