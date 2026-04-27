@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "tsx server.ts",
+    "start": "NODE_ENV=production node server.ts",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",

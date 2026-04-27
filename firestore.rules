@@ -180,10 +180,12 @@ service cloud.firestore {
 
     // System/Debug
     match /test_connection/{docId} {
-      allow read, write: if isSignedIn();
+      allow read: if true;
+      allow write: if isSignedIn();
     }
     match /test/{docId} {
-      allow read, write: if isSignedIn();
+      allow read: if true;
+      allow write: if isSignedIn();
     }
   }
 }

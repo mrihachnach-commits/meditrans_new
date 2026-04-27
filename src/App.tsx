@@ -319,17 +319,31 @@ export default function App() {
   useEffect(() => {
     async function testConnection() {
       try {
-        await getDocFromServer(doc(db, 'test', 'connection'));
+        console.log("[Firebase] Testing connection to database:", db.app.options.projectId);
+        const testRef = doc(db, 'test', 'connection');
+        await getDocFromServer(testRef);
+        console.log("[Firebase] Connection successful.");
         setIsFirebaseConnected(true);
-      } catch (error) {
-        if(error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration.");
+      } catch (error: any) {
+        console.warn("[Firebase] Connection test failed:", error.message);
+        
+        if (error.message.includes('the client is offline')) {
+          console.error("Firebase is offline. Check network.");
+          setIsFirebaseConnected(false);
+        } else if (error.message.includes('permission-denied')) {
+          // If it's permission denied, it might mean the test doc doesn't exist or rules are strict
+          // But it also means we ARE connected to the database!
+          console.log("[Firebase] Connected, but access to test doc denied (expected if not public).");
+          setIsFirebaseConnected(true); 
+        } else {
           setIsFirebaseConnected(false);
         }
-        // Skip logging for other errors, as this is simply a connection test.
       }
     }
-    testConnection();
+    
+    // Small delay to ensure everything is initialized
+    const timer = setTimeout(testConnection, 2000);
+    return () => clearTimeout(timer);
   }, []);
 
   // Sync folders for late upload selection
