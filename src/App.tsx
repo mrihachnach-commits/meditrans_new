@@ -593,7 +593,7 @@ export default function App() {
   const [showTranslationPanel, setShowTranslationPanel] = useState(false);
   const [mobileViewMode, setMobileViewMode] = useState<'pdf' | 'translation' | 'split'>('pdf');
   const [autoTranslate, setAutoTranslate] = useState(false);
-  const [autoTranslateLookAhead, setAutoTranslateLookAhead] = useState(10); // Increased to 10 pages lookahead for better parallelization
+  const [autoTranslateLookAhead, setAutoTranslateLookAhead] = useState(5); // Default to 5 pages lookahead
   const [zoom, setZoom] = useState(0.82); // Default to 82% as requested
   const [isAutoFit, setIsAutoFit] = useState(true);
   
@@ -2387,16 +2387,12 @@ export default function App() {
   useEffect(() => {
     if (pdfDoc && autoTranslate) {
       // Find all pages in the look-ahead window that need translation
-      // Instead of just a fixed window, we look for the NEXT 'autoTranslateLookAhead' pages that are not done.
+      // We only look at a strict window of 'autoTranslateLookAhead' pages from the current page.
       const pagesToBuffer: number[] = [];
       const currentTranslatingCount = translatingPagesRef.current.size;
-      const spaceInPipeline = Math.max(0, autoTranslateLookAhead - currentTranslatingCount);
       
-      if (spaceInPipeline <= 0) return;
-
-      // Scan up to 50 pages ahead to find candidates that need translation
-      // to maintain a full pipeline even if some subsequent pages are already cached.
-      for (let i = 1; i <= Math.min(numPages - currentPage, 50); i++) {
+      // Strict window: Current page + autoTranslateLookAhead
+      for (let i = 1; i <= Math.min(numPages - currentPage, autoTranslateLookAhead); i++) {
         const pageNum = currentPage + i;
         const state = translationsRef.current[pageNum];
         const isDone = state?.status === 'success';
@@ -2404,7 +2400,6 @@ export default function App() {
 
         if (!isDone && !isTranslating) {
           pagesToBuffer.push(pageNum);
-          if (pagesToBuffer.length >= spaceInPipeline) break;
         }
       }
 
@@ -2412,7 +2407,7 @@ export default function App() {
 
       // Limit concurrent translations to avoid browser/network congestion.
       // We allow space for the current page + the lookahead pool.
-      const MAX_CONCURRENT_PRE_TRANSLATION = autoTranslateLookAhead + 1;
+      const MAX_CONCURRENT_PRE_TRANSLATION = 5; // Fixed reasonable concurrency limit
       const currentConcurrency = translatingPagesRef.current.size;
       const spaceLeft = MAX_CONCURRENT_PRE_TRANSLATION - currentConcurrency;
 
@@ -4637,7 +4632,7 @@ export default function App() {
                       <input 
                         type="range"
                         min="0"
-                        max="5"
+                        max="20"
                         step="1"
                         value={autoTranslateLookAhead}
                         onChange={(e) => setAutoTranslateLookAhead(parseInt(e.target.value))}
@@ -4661,20 +4656,6 @@ export default function App() {
                         <span className="text-[8px] font-black uppercase tracking-tighter">Luân phiên: BẬT ({currentKeyRef.current?.split(',').length})</span>
                       </div>
                     )}
-                  </div>
-                  <div className="mt-2 p-3 bg-indigo-50 rounded-lg border border-indigo-100">
-                    <p className="text-[10px] text-indigo-700 leading-relaxed mb-2">
-                      Sử dụng các Key từ kho lưu trữ (Vault) bên dưới để dịch tài liệu. Các Key sẽ tự động luân phiên khi hết hạn mức.
-                    </p>
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-indigo-100 rounded-lg">
-                        <span className="text-[9px] font-bold text-slate-500 uppercase whitespace-nowrap">Tài khoản:</span>
-                        <span className="text-[10px] font-black text-indigo-600 truncate">{user.email}</span>
-                      </div>
-                      <p className="text-[8px] text-slate-400 italic px-1">
-                        Khả dụng: {userKeys.length} keys ({userKeys.filter(k => k.ownerId !== user.uid).length} shared)
-                      </p>
-                    </div>
                   </div>
                 </div>
                 
