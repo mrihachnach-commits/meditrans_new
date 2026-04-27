@@ -548,8 +548,20 @@ export default function App() {
     checkKey();
   }, [selectedEngine, engineKeys]);
 
+  const [serviceStatus, setServiceStatus] = useState<{model: string, totalKeys: number, activeKeys: number, lastUsedSuffix: string} | null>(null);
   const [isFullScreen, setIsFullScreen] = useState(false);
   const isFullScreenRef = useRef(false);
+
+  // Periodic status update
+  useEffect(() => {
+    const updateStatus = () => {
+      if (translationService.current instanceof GeminiService) {
+        setServiceStatus((translationService.current as GeminiService).getStatusInfo());
+      }
+    };
+    const interval = setInterval(updateStatus, 2000);
+    return () => clearInterval(interval);
+  }, []);
 
   const toggleFullScreen = async () => {
     try {
@@ -581,7 +593,7 @@ export default function App() {
   const [showTranslationPanel, setShowTranslationPanel] = useState(false);
   const [mobileViewMode, setMobileViewMode] = useState<'pdf' | 'translation' | 'split'>('pdf');
   const [autoTranslate, setAutoTranslate] = useState(false);
-  const [autoTranslateLookAhead, setAutoTranslateLookAhead] = useState(5); // Increased to 5 pages lookahead
+  const [autoTranslateLookAhead, setAutoTranslateLookAhead] = useState(10); // Increased to 10 pages lookahead for better parallelization
   const [zoom, setZoom] = useState(0.82); // Default to 82% as requested
   const [isAutoFit, setIsAutoFit] = useState(true);
   
@@ -708,7 +720,7 @@ export default function App() {
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
-          const vService = new GeminiService(vKey.value, "gemini-3.1-flash-lite-preview");
+          const vService = new GeminiService(vKey.value, "gemini-3-flash-preview");
           const vRes = await vService.checkAvailableKeys();
           const isActive = vRes.manualKey;
           
@@ -2306,7 +2318,7 @@ export default function App() {
           if (signal) signal.removeEventListener('abort', abortHandler);
         }
 
-        const imageBuffer = canvas.toDataURL('image/jpeg', 0.7);
+        const imageBuffer = canvas.toDataURL('image/jpeg', 0.6); // Reduced for faster upload, still great for OCR
         canvas.width = 0; canvas.height = 0; // memory cleanup
 
         // 2. Start translation stream
@@ -2548,9 +2560,9 @@ export default function App() {
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
     if (selectedEngine === 'gemini-flash') {
-      translationService.current = new GeminiService(allKeys, "gemini-flash-latest");
-    } else if (selectedEngine === 'gemini-pro') {
       translationService.current = new GeminiService(allKeys, "gemini-3-flash-preview");
+    } else if (selectedEngine === 'gemini-pro') {
+      translationService.current = new GeminiService(allKeys, "gemini-3-pro-preview");
     }
 
     // Enhanced logging for diagnostics
@@ -3716,8 +3728,35 @@ export default function App() {
 
                   <div className="h-4 w-px bg-slate-200 hidden xs:block" />
 
+                  <AnimatePresence>
+                    {translationPanelMode === 'translation' && serviceStatus && (
+                      <motion.div 
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="hidden xs:flex items-center gap-2 px-2.5 py-1.5 bg-indigo-50 border border-indigo-100/50 rounded-xl"
+                      >
+                        <Zap className={cn("w-3 h-3", serviceStatus.activeKeys > 0 ? "text-amber-500 animate-pulse" : "text-slate-400")} />
+                        <div className="flex flex-col">
+                          <span className="text-[8px] leading-none font-black uppercase tracking-tight text-indigo-700 mb-0.5">
+                            {serviceStatus.model.replace('gemini-1.5-', '')}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <span className="text-[7px] font-bold text-indigo-400 leading-none">
+                              {serviceStatus.activeKeys}/{serviceStatus.totalKeys} Keys
+                            </span>
+                            {serviceStatus.lastUsedSuffix !== '...' && (
+                              <span className="text-[7px] px-1 bg-white rounded-sm text-indigo-600 font-mono leading-none border border-indigo-100">
+                                *{serviceStatus.lastUsedSuffix}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
                   {(translationPanelMode === 'translation' ? translations[currentPage]?.content : summaryText) && (
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 ml-auto">
                       <button 
                         onClick={() => handleCopyTranslation(translationPanelMode === 'translation' ? translations[currentPage].content : summaryText, currentPage)}
                         className={cn(

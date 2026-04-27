@@ -6,8 +6,9 @@ export class GeminiService implements TranslationService {
   private modelName: string;
   private exhaustedKeys: Set<string> = new Set();
   private static globalKeyLastUsed: Map<string, number> = new Map();
+  private static lastSuccessfulKey: string | null = null;
 
-  constructor(apiKeys?: string | string[], modelName: string = "gemini-flash-latest") {
+  constructor(apiKeys?: string | string[], modelName: string = "gemini-3-flash-preview") {
     this.modelName = modelName;
     
     if (Array.isArray(apiKeys)) {
@@ -26,15 +27,20 @@ export class GeminiService implements TranslationService {
   }
 
   private getMIN_REQUEST_INTERVAL(): number {
-    return 1000;
+    // If we have many keys, we can be more aggressive with each key's individual interval
+    // Default is usually 4s/RPM for free tier, but 1s is safe for most paid/high-tier keys.
+    // We'll set a lower individual interval if we have many keys.
+    return this.apiKeys.length > 5 ? 500 : 800;
   }
 
   private getBestAvailableKey(): string | null {
     if (this.apiKeys.length === 0) return null;
 
+    const now = Date.now();
     const validKeys = this.apiKeys.filter(k => !this.exhaustedKeys.has(k));
     if (validKeys.length === 0) return null;
 
+    // Least recently used selection
     validKeys.sort((a, b) => (GeminiService.globalKeyLastUsed.get(a) || 0) - (GeminiService.globalKeyLastUsed.get(b) || 0));
 
     return validKeys[0];
@@ -76,17 +82,28 @@ export class GeminiService implements TranslationService {
 
   private rotateKey(exhaustedKey: string, isQuotaError: boolean = true): boolean {
     if (exhaustedKey) {
-      const duration = isQuotaError ? 60000 : 2000;
-      console.warn(`[MediTrans] Rotating key ...${exhaustedKey.substring(exhaustedKey.length - 4)}. Reason: ${isQuotaError ? 'Quota/Exhausted' : 'Error'}. Backoff: ${duration}ms`);
+      const waitTime = isQuotaError ? 30000 : 5000; // 30s for quota, 5s for other errors
+      console.warn(`[MediTrans] Key ...${exhaustedKey.slice(-4)} ${isQuotaError ? 'QUOTA EXHAUSTED' : 'ERROR'}. Backoff: ${waitTime}ms`);
       this.exhaustedKeys.add(exhaustedKey);
+      
       setTimeout(() => {
         this.exhaustedKeys.delete(exhaustedKey);
-        console.log(`[MediTrans] Key ...${exhaustedKey.substring(exhaustedKey.length - 4)} is back in service.`);
-      }, duration);
+        console.log(`[MediTrans] Key ...${exhaustedKey.slice(-4)} recovered.`);
+      }, waitTime);
     }
     
-    const nextKey = this.getBestAvailableKey();
-    return nextKey !== null;
+    return this.getBestAvailableKey() !== null;
+  }
+
+  public getStatusInfo() {
+    const total = this.apiKeys.length;
+    const active = this.apiKeys.filter(k => !this.exhaustedKeys.has(k)).length;
+    return {
+      model: this.modelName,
+      totalKeys: total,
+      activeKeys: active,
+      lastUsedSuffix: GeminiService.lastSuccessfulKey ? GeminiService.lastSuccessfulKey.slice(-4) : '...'
+    };
   }
 
   async hasApiKey(): Promise<boolean> {
@@ -114,17 +131,16 @@ export class GeminiService implements TranslationService {
       throw new Error("Translation aborted");
     }
 
-    const systemInstruction = `BẠN LÀ MỘT CHUYÊN GIA DỊCH THUẬT Y KHOA OCR.
-NHIỆM VỤ: Trích xuất và dịch TOÀN BỘ văn bản từ TRANG SỐ ${pageNumber} trong hình ảnh sang tiếng Việt.
+    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA (OCR + DỊCH).
+NHIỆM VỤ: Dịch TRANG ${pageNumber} sang tiếng Việt.
 
-YÊU CẦU QUAN TRỌNG:
-1. CHỈ DỊCH nội dung của trang này, không thêm nội dung từ các trang trước hoặc sau.
-2. Sử dụng Markdown, giữ nguyên cấu trúc (bảng, danh sách, tiêu đề).
-3. Sử dụng thuật ngữ y khoa chuyên môn chuẩn tiếng Việt. 
-4. KHÔNG THÊM lời dẫn hoặc kết luận.
-5. Rút gọn chuỗi dấu chấm (.) dài thành tối đa 3-5 dấu.`;
+YÊU CẦU:
+1. Markdown: Giữ cấu trúc (bảng, tiêu đề).
+2. Thuật ngữ y khoa chuẩn.
+3. KHÔNG THÊM lời dẫn.
+4. Rút gọn chuỗi dấu chấm dài (. . .) thành 3 chấm (...)`;
 
-    const prompt = `Hãy dịch văn bản trong hình ảnh (Trang ${pageNumber}) sang tiếng Việt.`;
+    const prompt = `Dịch trang ${pageNumber} (Medical PDF page) sang tiếng Việt (Professional Medical Vietnamese).`;
 
     const MAX_RETRIES = 5;
     let retryCount = 0;
@@ -176,6 +192,7 @@ YÊU CẦU QUAN TRỌNG:
           }
         }
 
+        GeminiService.lastSuccessfulKey = key;
         if (!fullText) {
           throw new Error("Model returned no text.");
         }
@@ -201,13 +218,14 @@ YÊU CẦU QUAN TRỌNG:
         
         if ((isQuotaError || isUnavailableError || isPermissionDeniedError || isNetworkError) && retryCount < MAX_RETRIES) {
           const canRotate = this.rotateKey(key, isQuotaError || isPermissionDeniedError);
+          retryCount++;
           if (canRotate) {
-            retryCount++;
-            await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 500));
+            // Immediate retry with different key
+            await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
             continue;
           }
-          retryCount++;
-          const delay = Math.pow(2, retryCount) * 1000 + Math.random() * 1000;
+          // Backoff if no keys left or fallback
+          const delay = Math.pow(1.5, retryCount) * 1000 + Math.random() * 500;
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
