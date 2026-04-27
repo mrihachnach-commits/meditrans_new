@@ -24,6 +24,7 @@ import {
   Download, 
   Languages,
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   Maximize2,
   Minimize2,
@@ -2523,7 +2524,7 @@ export default function App() {
 
     if (allKeysExhausted) {
       const percentage = Math.floor((completedCount / totalToTranslate) * 100);
-      showToast(`Dừng dịch vì tất cả API Key đều hết hạn mức. Đã hoàn thành ${percentage}% (${completedCount}/${totalToTranslate} trang).`, 'warning');
+      showToast(`Dừng dịch vì tất cả API Key đều hết hạn mức. Đã hoàn thành ${percentage}% (${completedCount}/${totalToTranslate} trang).`, 'error');
       setBulkTranslateStatus('failed');
     } else if (bulkCancelRef.current) {
       showToast("Đã dừng dịch toàn bộ tài liệu.", 'info');
