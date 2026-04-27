@@ -22,7 +22,8 @@ import {
   Clock,
   Type,
   Share2,
-  Users
+  Users,
+  Zap
 } from 'lucide-react';
 import { 
   db, 
@@ -71,9 +72,10 @@ interface FileExplorerProps {
   onFileSelect: (file: FileData) => void;
   onUploadStart: (file: File, folderId: string | null) => void;
   onLocalFileOpen: (file: File) => void;
+  onBulkTranslate?: (file: FileData) => void;
 }
 
-export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen }) => {
+export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate }) => {
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'my' | 'shared'>('my');
   const [myFolders, setMyFolders] = useState<FolderData[]>([]);
@@ -673,6 +675,19 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                     >
                       <Download className="w-3.5 h-3.5" />
                     </button>
+                    {onBulkTranslate && viewMode === 'my' && (
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onBulkTranslate(file);
+                          setActiveMenuId(null);
+                        }}
+                        className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
+                        title="Dịch toàn bộ tài liệu"
+                      >
+                        <Zap className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     {viewMode === 'my' && (
                       <>
                         <button 

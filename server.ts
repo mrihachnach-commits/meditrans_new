@@ -27,6 +27,12 @@ try {
     }
   }
 
+  // Vercel / environment variable backup if file is truly missing in some builds
+  if (!configContent && process.env.FIREBASE_CONFIG_JSON) {
+    console.log("Using configuration from FIREBASE_CONFIG_JSON env var");
+    configContent = process.env.FIREBASE_CONFIG_JSON;
+  }
+
   if (!configContent) {
     console.warn("firebase-applet-config.json not found in common paths. Checking current directory...");
     const files = fs.readdirSync(process.cwd());
@@ -534,36 +540,38 @@ async function startServer() {
   app.get("/api/admin/list-users", checkAdmin, async (req, res) => {
     try {
       // 1. Try Admin SDK first (fastest, bypasses rules)
-      try {
-        const usersSnapshot = await getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId).collection("users").get();
-        const users = usersSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...(doc.data() as any)
-        }));
-        
-        return res.json({ 
-          success: true, 
-          users,
-          projectId: firebaseConfig.projectId,
-          databaseId: firebaseConfig.firestoreDatabaseId,
-          source: "admin-sdk"
-        });
-      } catch (adminError: any) {
-        console.warn("[Admin] Admin SDK list-users failed, falling back to REST API:", adminError.message);
-        
-        // 2. Fallback to REST API using the admin's token
-        // This works because the admin's token HAS list permissions in security rules
-        const idToken = req.headers.authorization.split("Bearer ")[1];
-        const users = await firestoreRest.listDocs("users", idToken);
-        
-        res.json({ 
-          success: true, 
-          users,
-          projectId: firebaseConfig.projectId,
-          databaseId: firebaseConfig.firestoreDatabaseId,
-          source: "rest-api-fallback"
-        });
+      if (adminApp) {
+        try {
+          const usersSnapshot = await getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId).collection("users").get();
+          const users = usersSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...(doc.data() as any)
+          }));
+          
+          return res.json({ 
+            success: true, 
+            users,
+            projectId: firebaseConfig.projectId,
+            databaseId: firebaseConfig.firestoreDatabaseId,
+            source: "admin-sdk"
+          });
+        } catch (adminError: any) {
+          console.warn("[Admin] Admin SDK list-users failed, falling back to REST API:", adminError.message);
+        }
       }
+      
+      // 2. Fallback to REST API using the admin's token
+      // This works because the admin's token HAS list permissions in security rules
+      const idToken = req.headers.authorization.split("Bearer ")[1];
+      const users = await firestoreRest.listDocs("users", idToken);
+      
+      res.json({ 
+        success: true, 
+        users,
+        projectId: firebaseConfig.projectId,
+        databaseId: firebaseConfig.firestoreDatabaseId,
+        source: "rest-api-fallback"
+      });
     } catch (error: any) {
       console.error("[Admin] List users failed:", error.message);
       res.status(500).json({ error: "Không thể lấy danh sách người dùng: " + error.message });
@@ -609,18 +617,32 @@ async function startServer() {
       }
 
       // 2. Delete Firestore document
-      const db = getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId);
-      await db.collection("users").doc(uid).delete();
-      
-      // 3. Add to blacklist to prevent re-registration or access if Auth delete failed
-      if (email) {
-        await db.collection("blacklist").doc(email.toLowerCase()).set({
-          email: email.toLowerCase(),
-          uid: uid,
-          reason: "Deleted by admin",
-          authDeleted,
-          createdAt: new Date().toISOString()
-        });
+      if (adminApp) {
+        const db = getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId);
+        await db.collection("users").doc(uid).delete();
+        
+        // 3. Add to blacklist to prevent re-registration or access if Auth delete failed
+        if (email) {
+          await db.collection("blacklist").doc(email.toLowerCase()).set({
+            email: email.toLowerCase(),
+            uid: uid,
+            reason: "Deleted by admin",
+            authDeleted,
+            createdAt: new Date().toISOString()
+          });
+        }
+      } else {
+        // Fallback to REST for deletion if possible
+        await firestoreRest.deleteDoc("users", uid, idToken);
+        if (email) {
+          await firestoreRest.setDoc("blacklist", email.toLowerCase(), {
+            email: email.toLowerCase(),
+            uid: uid,
+            reason: "Deleted by admin",
+            authDeleted,
+            createdAt: new Date().toISOString()
+          }, idToken);
+        }
       }
       
       res.json({ 

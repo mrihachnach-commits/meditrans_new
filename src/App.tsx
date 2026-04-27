@@ -609,6 +609,7 @@ export default function App() {
   const [isBulkTranslating, setIsBulkTranslating] = useState(false);
   const [bulkTranslateProgress, setBulkTranslateProgress] = useState(0);
   const bulkCancelRef = useRef(false);
+  const shouldAutoBulkRef = useRef(false);
   
   const [autoTranslate, setAutoTranslate] = useState(false);
   const [autoTranslateLookAhead, setAutoTranslateLookAhead] = useState(5); // Default to 5 pages lookahead
@@ -1783,6 +1784,12 @@ export default function App() {
     }
   };
 
+  const handleBulkTranslateFromExplorer = (fileData: FileData) => {
+    shouldAutoBulkRef.current = true;
+    setShowTranslationPanel(true);
+    handleFileSelectFromExplorer(fileData);
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     // Reset input value so the same file can be selected again
@@ -2503,6 +2510,13 @@ export default function App() {
     console.log(`[MediTrans] Bulk translation finished.`);
     setIsBulkTranslating(false);
   };
+
+  useEffect(() => {
+    if (pdfDoc && shouldAutoBulkRef.current && numPages > 0) {
+      shouldAutoBulkRef.current = false;
+      startBulkTranslation();
+    }
+  }, [pdfDoc, numPages]);
 
   useEffect(() => {
     if (user && fileId && fileOwnerId) {
@@ -3367,6 +3381,7 @@ export default function App() {
               onFileSelect={handleFileSelectFromExplorer} 
               onUploadStart={startUpload} 
               onLocalFileOpen={handleLocalFileOpen}
+              onBulkTranslate={handleBulkTranslateFromExplorer}
             />
           </div>
         ) : (
