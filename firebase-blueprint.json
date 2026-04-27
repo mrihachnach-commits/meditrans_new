@@ -1,0 +1,127 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique identifier for the user." },
+        "email": { "type": "string", "format": "email", "description": "The user's email address." },
+        "displayName": { "type": "string", "description": "The user's display name." },
+        "photoURL": { "type": "string", "format": "uri", "description": "The user's profile picture URL." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the user account was created." },
+        "role": { "type": "string", "enum": ["admin", "user"], "description": "The user's role." },
+        "isBlocked": { "type": "boolean", "description": "Whether the user is blocked." }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "ApiKey": {
+      "title": "API Key",
+      "description": "Stored API key for translation engines.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "description": "The UID of the user who owns this key." },
+        "sharedWith": { "type": "array", "items": { "type": "string" }, "description": "List of user emails this key is shared with." },
+        "name": { "type": "string", "description": "A friendly name for the key." },
+        "value": { "type": "string", "description": "The actual API key value." },
+        "engine": { "type": "string", "enum": ["gemini", "openai", "anthropic", "medical-specialized"], "description": "The translation engine." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the key was added." },
+        "lastUsed": { "type": "string", "format": "date-time", "description": "When the key was last used." },
+        "status": { "type": "string", "enum": ["active", "error"], "description": "The current status." }
+      },
+      "required": ["ownerId", "name", "value", "engine", "createdAt"]
+    },
+    "Translation": {
+      "title": "Translation",
+      "description": "Stored translation for a page.",
+      "type": "object",
+      "properties": {
+        "content": { "type": "string", "description": "The translated text content." },
+        "status": { "type": "string", "enum": ["success", "error", "loading"], "description": "The status of the translation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "When the translation was last updated." }
+      },
+      "required": ["content", "status", "updatedAt"]
+    },
+    "Folder": {
+      "title": "Folder",
+      "description": "Folder metadata.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the folder." },
+        "parentId": { "type": "string", "description": "The ID of the parent folder." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When created." }
+      },
+      "required": ["name", "createdAt"]
+    },
+    "Document": {
+      "title": "Document",
+      "description": "Document metadata.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the file." },
+        "folderId": { "type": "string", "description": "Parent folder ID." },
+        "ownerId": { "type": "string", "description": "Owner UID." },
+        "sharedWith": { "type": "array", "items": { "type": "string" }, "description": "Emails shared with." },
+        "token": { "type": "string", "description": "TinyVault token." },
+        "downloadUrl": { "type": "string", "format": "uri", "description": "Download URL." },
+        "size": { "type": "number", "description": "File size." },
+        "type": { "type": "string", "description": "MIME type." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp." }
+      },
+      "required": ["name", "ownerId", "token", "downloadUrl", "createdAt"]
+    },
+    "Blacklist": {
+      "title": "Blacklist",
+      "description": "Blacklisted user emails.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "description": "Blacklisted email." },
+        "addedBy": { "type": "string", "description": "Admin UID." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp." }
+      },
+      "required": ["email", "addedBy", "createdAt"]
+    },
+    "Summary": {
+      "title": "Summary",
+      "description": "Document summary.",
+      "type": "object",
+      "properties": {
+        "content": { "type": "string", "description": "Summary text." },
+        "type": { "type": "string", "enum": ["page", "chapter", "document", "range"], "description": "Summary type." },
+        "range": { "type": "string", "description": "Page range." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp." }
+      },
+      "required": ["content", "type", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/blacklist/{email}": {
+      "schema": "Blacklist",
+      "description": "Collection of blacklisted emails."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Collection of user profiles."
+    },
+    "/users/{userId}/folders/{folderId}": {
+      "schema": "Folder",
+      "description": "Folders for the user."
+    },
+    "/users/{userId}/documents/{docId}": {
+      "schema": "Document",
+      "description": "Documents for the user."
+    },
+    "/users/{userId}/documents/{docId}/pages/{pageNum}": {
+      "schema": "Translation",
+      "description": "Translations for a specific document and page."
+    },
+    "/users/{userId}/documents/{docId}/summaries/{summaryId}": {
+      "schema": "Summary",
+      "description": "Summaries for a document."
+    },
+    "/apiKeys/{keyId}": {
+      "schema": "ApiKey",
+      "description": "Collection of stored API keys."
+    }
+  }
+}

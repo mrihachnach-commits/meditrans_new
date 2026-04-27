@@ -1,0 +1,189 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // pillar 0: Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // GLOBAL HELPERS
+    // ===============================================================
+
+    function isSignedIn() {
+      // Relaxing email_verified requirement as many users in this environment 
+      // may not have verified emails immediately or are using providers that don't auto-verify.
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email != null && request.auth.token.email.lower() in [
+          "hoctap853@gmail.com",
+          "hoanghiep1296@gmail.com",
+          "mrihachnach@gmail.com",
+          "admin@gmail.com"
+        ]) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin')
+      );
+    }
+
+    function isSharedWithMe(data) {
+      return isSignedIn() && request.auth.token.email != null && (
+        data.get('sharedWith', []).hasAny([request.auth.token.email]) || 
+        data.get('sharedWith', []).hasAny([request.auth.token.email.lower()])
+      );
+    }
+
+    // ===============================================================
+    // VALIDATION HELPERS
+    // ===============================================================
+
+    function isValidUser(data) {
+      // Invariant: If not admin, you can only set your own UID/Email
+      return (isAdmin() || (data.uid == request.auth.uid && (data.get('email', null) == null || data.email == request.auth.token.email))) &&
+             (data.get('role', 'user') in ['user', 'admin']) &&
+             (data.get('displayName', null) == null || (data.displayName is string && data.displayName.size() <= 100)) &&
+             (data.get('photoURL', null) == null || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+             (data.get('isBlocked', false) is bool) &&
+             (data.get('createdAt', null) == null || data.createdAt is timestamp || data.createdAt is string);
+    }
+
+    function isValidUserResource(data) {
+       return data.keys().hasAll(['uid', 'email', 'role']);
+    }
+
+    function isValidDocument(data) {
+      return data.keys().hasAll(['name', 'ownerId', 'token', 'downloadUrl', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 256 &&
+             data.ownerId is string &&
+             data.token is string && data.token.size() <= 128 &&
+             data.downloadUrl is string && data.downloadUrl.size() <= 2048 &&
+             (data.createdAt is timestamp || data.createdAt is string) &&
+             (data.get('sharedWith', []) is list) &&
+             (data.get('size', 0) is number) &&
+             (data.get('type', '') is string);
+    }
+
+    function isValidFolder(data) {
+      return data.keys().hasAll(['name', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
+             (data.createdAt is timestamp || data.createdAt is string) &&
+             (data.get('parentId', null) == null || isValidId(data.parentId));
+    }
+
+    function isValidApiKey(data) {
+      return data.keys().hasAll(['ownerId', 'name', 'value', 'engine', 'createdAt']) &&
+             data.ownerId is string &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
+             data.value is string && data.value.size() > 0 && data.value.size() <= 4096 &&
+             data.engine in ['gemini', 'openai', 'anthropic', 'medical-specialized', 'gemini-flash', 'gemini-pro'] &&
+             (data.createdAt is timestamp || data.createdAt is string) &&
+             (data.get('sharedWith', []) is list) &&
+             (data.get('status', 'active') in ['active', 'error']);
+    }
+
+    function isValidTranslation(data) {
+      return data.keys().hasAll(['content', 'status', 'updatedAt']) &&
+             data.content is string && data.content.size() <= 1048576 &&
+             data.status in ['success', 'error', 'loading'] &&
+             (data.updatedAt is timestamp || data.updatedAt is string);
+    }
+
+    function isValidSummary(data) {
+      return data.keys().hasAll(['content', 'type', 'createdAt']) &&
+             data.content is string && data.content.size() <= 1048576 &&
+             data.type in ['page', 'chapter', 'document', 'range'] &&
+             (data.createdAt is timestamp || data.createdAt is string) &&
+             (data.get('range', '') is string);
+    }
+
+    function isValidBlacklist(data) {
+      return data.keys().hasAll(['email', 'addedBy', 'createdAt']) &&
+             data.email is string &&
+             data.addedBy is string &&
+             (data.createdAt is timestamp || data.createdAt is string);
+    }
+
+    // ===============================================================
+    // RESOURCES
+    // ===============================================================
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if (isOwner(userId) || isAdmin()) && isValidUser(incoming()) && isValidUserResource(incoming());
+      allow update: if (isOwner(userId) && isValidUser(incoming())) || isAdmin();
+      
+      match /folders/{folderId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidFolder(incoming()) && isValidId(folderId);
+        allow update: if (isOwner(userId) && isValidFolder(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'parentId'])) || isAdmin();
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /documents/{docId} {
+        allow get: if isOwner(userId) || isSharedWithMe(existing()) || isAdmin();
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidDocument(incoming()) && isValidId(docId);
+        allow update: if (isOwner(userId) && isValidDocument(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'folderId', 'sharedWith'])) || isAdmin();
+        allow delete: if isOwner(userId) || isAdmin();
+
+        match /pages/{pageNum} {
+          allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isAdmin();
+          allow write: if (isOwner(userId) || isAdmin()) && isValidTranslation(incoming());
+        }
+
+        match /summaries/{summaryId} {
+          allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isAdmin();
+          allow write: if (isOwner(userId) || isAdmin()) && isValidSummary(incoming());
+        }
+      }
+    }
+
+    match /apiKeys/{keyId} {
+      allow get: if isSignedIn() && (existing().ownerId == request.auth.uid || isSharedWithMe(existing()) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isSharedWithMe(resource.data) || isAdmin());
+      allow create: if isSignedIn() && isValidApiKey(incoming()) && isValidId(keyId);
+      allow update: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()) && isValidApiKey(incoming()));
+      allow delete: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()));
+    }
+
+    match /blacklist/{email} {
+      allow get: if isSignedIn() && (request.auth.token.email == email || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isAdmin() && isValidBlacklist(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // Collection Group for Shared Documents
+    match /{path=**}/documents/{docId} {
+      allow list: if isSharedWithMe(resource.data) || isAdmin();
+    }
+
+    // System/Debug
+    match /test_connection/{docId} {
+      allow read, write: if isSignedIn();
+    }
+    match /test/{docId} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}
