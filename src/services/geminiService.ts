@@ -40,6 +40,14 @@ export class GeminiService implements TranslationService {
     const validKeys = this.apiKeys.filter(k => !this.exhaustedKeys.has(k));
     if (validKeys.length === 0) return null;
 
+    // Prefer last successful key if it fulfills rate limit
+    if (GeminiService.lastSuccessfulKey && validKeys.includes(GeminiService.lastSuccessfulKey)) {
+      const lastUsed = GeminiService.globalKeyLastUsed.get(GeminiService.lastSuccessfulKey) || 0;
+      if (now - lastUsed >= this.getMIN_REQUEST_INTERVAL()) {
+        return GeminiService.lastSuccessfulKey;
+      }
+    }
+
     // Least recently used selection
     validKeys.sort((a, b) => (GeminiService.globalKeyLastUsed.get(a) || 0) - (GeminiService.globalKeyLastUsed.get(b) || 0));
 

@@ -2389,7 +2389,6 @@ export default function App() {
       // Find all pages in the look-ahead window that need translation
       // We only look at a strict window of 'autoTranslateLookAhead' pages from the current page.
       const pagesToBuffer: number[] = [];
-      const currentTranslatingCount = translatingPagesRef.current.size;
       
       // Strict window: Current page + autoTranslateLookAhead
       for (let i = 1; i <= Math.min(numPages - currentPage, autoTranslateLookAhead); i++) {
@@ -2427,7 +2426,7 @@ export default function App() {
         }, index * 200);
       });
     }
-  }, [currentPage, pdfDoc, autoTranslate, numPages, preTranslatePage, autoTranslateLookAhead, translations]);
+  }, [currentPage, pdfDoc, autoTranslate, numPages, preTranslatePage, autoTranslateLookAhead]);
 
   useEffect(() => {
     if (user && fileId && fileOwnerId) {
