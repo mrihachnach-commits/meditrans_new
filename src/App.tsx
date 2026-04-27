@@ -592,6 +592,10 @@ export default function App() {
   }, []);
   const [showTranslationPanel, setShowTranslationPanel] = useState(false);
   const [mobileViewMode, setMobileViewMode] = useState<'pdf' | 'translation' | 'split'>('pdf');
+  const [isBulkTranslating, setIsBulkTranslating] = useState(false);
+  const [bulkTranslateProgress, setBulkTranslateProgress] = useState(0);
+  const bulkCancelRef = useRef(false);
+  
   const [autoTranslate, setAutoTranslate] = useState(false);
   const [autoTranslateLookAhead, setAutoTranslateLookAhead] = useState(5); // Default to 5 pages lookahead
   const [zoom, setZoom] = useState(0.82); // Default to 82% as requested
@@ -2427,6 +2431,64 @@ export default function App() {
       });
     }
   }, [currentPage, pdfDoc, autoTranslate, numPages, preTranslatePage, autoTranslateLookAhead]);
+
+  const startBulkTranslation = async () => {
+    if (!pdfDoc || numPages <= 0) return;
+    if (isBulkTranslating) {
+      bulkCancelRef.current = true;
+      setIsBulkTranslating(false);
+      return;
+    }
+
+    setIsBulkTranslating(true);
+    bulkCancelRef.current = false;
+    setBulkTranslateProgress(0);
+
+    const pagesToTranslate: number[] = [];
+    for (let i = 1; i <= numPages; i++) {
+      if (translationsRef.current[i]?.status !== 'success') {
+        pagesToTranslate.push(i);
+      }
+    }
+
+    if (pagesToTranslate.length === 0) {
+      setIsBulkTranslating(false);
+      return;
+    }
+
+    const totalToTranslate = pagesToTranslate.length;
+    let completedCount = 0;
+    
+    // Concurrency depends on the number of keys. 
+    // If you have 30 keys, we can comfortably run ~15 concurrent requests
+    const concurrentLimit = Math.min(15, userKeys.length > 5 ? Math.floor(userKeys.length * 0.5) : 5);
+    
+    console.log(`[MediTrans] Starting bulk translation. Pages: ${pagesToTranslate.length}, Concurrency: ${concurrentLimit}`);
+
+    // Process in batches
+    for (let i = 0; i < pagesToTranslate.length; i += concurrentLimit) {
+      if (bulkCancelRef.current) break;
+
+      const batch = pagesToTranslate.slice(i, i + concurrentLimit);
+      await Promise.all(batch.map(async (pageNum) => {
+        if (bulkCancelRef.current) return;
+        
+        try {
+          await preTranslatePage(pageNum);
+          completedCount++;
+          setBulkTranslateProgress(Math.floor((completedCount / totalToTranslate) * 100));
+        } catch (err) {
+          console.error(`Bulk translate failed for page ${pageNum}:`, err);
+        }
+      }));
+      
+      // Small cooldown between batches to keep the system responsive
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    console.log(`[MediTrans] Bulk translation finished.`);
+    setIsBulkTranslating(false);
+  };
 
   useEffect(() => {
     if (user && fileId && fileOwnerId) {
@@ -4639,6 +4701,50 @@ export default function App() {
                       />
                       <p className="text-[9px] text-slate-400 italic">
                         * Tự động dịch trước các trang tiếp theo để trải nghiệm đọc mượt mà hơn.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Bulk Translation Button */}
+                <div className="pt-4 border-t border-slate-100">
+                  <button
+                    onClick={startBulkTranslation}
+                    disabled={!pdfDoc}
+                    className={cn(
+                      "w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all font-bold text-xs uppercase tracking-wider",
+                      isBulkTranslating 
+                        ? "bg-amber-100 text-amber-700 border border-amber-200" 
+                        : "bg-indigo-600 text-white shadow-lg shadow-indigo-100 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0"
+                    )}
+                  >
+                    {isBulkTranslating ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Dừng dịch (Stop)
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="w-4 h-4" />
+                        Dịch toàn bộ tài liệu
+                      </>
+                    )}
+                  </button>
+                  
+                  {isBulkTranslating && (
+                    <div className="mt-3 space-y-1.5 px-1 animate-in fade-in slide-in-from-top-2">
+                      <div className="flex justify-between items-center text-[9px] font-bold text-slate-500 uppercase">
+                        <span>Tiến độ dịch thuật</span>
+                        <span className="text-indigo-600">{bulkTranslateProgress}%</span>
+                      </div>
+                      <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full bg-indigo-600 transition-all duration-300 rounded-full"
+                          style={{ width: `${bulkTranslateProgress}%` }}
+                        />
+                      </div>
+                      <p className="text-[8px] text-slate-400 text-center italic">
+                        Đang sử dụng pool keys ({userKeys.length} keys) để dịch song song...
                       </p>
                     </div>
                   )}
