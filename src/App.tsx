@@ -608,6 +608,7 @@ export default function App() {
   const [mobileViewMode, setMobileViewMode] = useState<'pdf' | 'translation' | 'split'>('pdf');
   const [isBulkTranslating, setIsBulkTranslating] = useState(false);
   const [bulkTranslateProgress, setBulkTranslateProgress] = useState(0);
+  const [bulkTranslateStatus, setBulkTranslateStatus] = useState<'translating' | 'completed' | 'failed' | 'idle'>('idle');
   const bulkCancelRef = useRef(false);
   const shouldAutoBulkRef = useRef(false);
   
@@ -2458,10 +2459,12 @@ export default function App() {
     if (isBulkTranslating) {
       bulkCancelRef.current = true;
       setIsBulkTranslating(false);
+      setBulkTranslateStatus('idle');
       return;
     }
 
     setIsBulkTranslating(true);
+    setBulkTranslateStatus('translating');
     bulkCancelRef.current = false;
     setBulkTranslateProgress(0);
 
@@ -2474,6 +2477,9 @@ export default function App() {
 
     if (pagesToTranslate.length === 0) {
       setIsBulkTranslating(false);
+      setBulkTranslateStatus('completed');
+      setBulkTranslateProgress(100);
+      showToast("Tất cả các trang đã được dịch trước đó.", 'success');
       return;
     }
 
@@ -2481,34 +2487,56 @@ export default function App() {
     let completedCount = 0;
     
     // Concurrency depends on the number of keys. 
-    // If you have 30 keys, we can comfortably run ~15 concurrent requests
     const concurrentLimit = Math.min(15, userKeys.length > 5 ? Math.floor(userKeys.length * 0.5) : 5);
     
     console.log(`[MediTrans] Starting bulk translation. Pages: ${pagesToTranslate.length}, Concurrency: ${concurrentLimit}`);
 
+    let allKeysExhausted = false;
+
     // Process in batches
     for (let i = 0; i < pagesToTranslate.length; i += concurrentLimit) {
-      if (bulkCancelRef.current) break;
+      if (bulkCancelRef.current || allKeysExhausted) break;
 
       const batch = pagesToTranslate.slice(i, i + concurrentLimit);
       await Promise.all(batch.map(async (pageNum) => {
-        if (bulkCancelRef.current) return;
+        if (bulkCancelRef.current || allKeysExhausted) return;
         
         try {
           await preTranslatePage(pageNum);
           completedCount++;
           setBulkTranslateProgress(Math.floor((completedCount / totalToTranslate) * 100));
-        } catch (err) {
+        } catch (err: any) {
           console.error(`Bulk translate failed for page ${pageNum}:`, err);
+          
+          // Check if all keys are exhausted
+          if (err.message?.includes('API Key khả dụng') || err.message?.includes('hạn mức')) {
+            allKeysExhausted = true;
+          }
         }
       }));
       
-      // Small cooldown between batches to keep the system responsive
-      await new Promise(resolve => setTimeout(resolve, 500));
+      if (!allKeysExhausted) {
+        // Small cooldown between batches to keep the system responsive
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    if (allKeysExhausted) {
+      const percentage = Math.floor((completedCount / totalToTranslate) * 100);
+      showToast(`Dừng dịch vì tất cả API Key đều hết hạn mức. Đã hoàn thành ${percentage}% (${completedCount}/${totalToTranslate} trang).`, 'warning');
+      setBulkTranslateStatus('failed');
+    } else if (bulkCancelRef.current) {
+      showToast("Đã dừng dịch toàn bộ tài liệu.", 'info');
+      setBulkTranslateStatus('idle');
+    } else {
+      showToast("Đã hoàn tất dịch toàn bộ tài liệu.", 'success');
+      setBulkTranslateStatus('completed');
+      setBulkTranslateProgress(100);
     }
 
     console.log(`[MediTrans] Bulk translation finished.`);
-    setIsBulkTranslating(false);
+    // Keep isBulkTranslating true for a bit to show completed state
+    setTimeout(() => setIsBulkTranslating(false), 5000);
   };
 
   useEffect(() => {
@@ -4742,15 +4770,29 @@ export default function App() {
                     disabled={!pdfDoc}
                     className={cn(
                       "w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all font-bold text-xs uppercase tracking-wider",
-                      isBulkTranslating 
+                      bulkTranslateStatus === 'translating' 
                         ? "bg-amber-100 text-amber-700 border border-amber-200" 
+                        : bulkTranslateStatus === 'completed'
+                        ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                        : bulkTranslateStatus === 'failed'
+                        ? "bg-rose-100 text-rose-700 border border-rose-200"
                         : "bg-indigo-600 text-white shadow-lg shadow-indigo-100 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0"
                     )}
                   >
-                    {isBulkTranslating ? (
+                    {bulkTranslateStatus === 'translating' ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Dừng dịch (Stop)
+                      </>
+                    ) : bulkTranslateStatus === 'completed' ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        Đã dịch xong
+                      </>
+                    ) : bulkTranslateStatus === 'failed' ? (
+                      <>
+                        <AlertTriangle className="w-4 h-4" />
+                        Lỗi/Hết Key
                       </>
                     ) : (
                       <>
@@ -4760,20 +4802,36 @@ export default function App() {
                     )}
                   </button>
                   
-                  {isBulkTranslating && (
+                  {bulkTranslateStatus !== 'idle' && (
                     <div className="mt-3 space-y-1.5 px-1 animate-in fade-in slide-in-from-top-2">
                       <div className="flex justify-between items-center text-[9px] font-bold text-slate-500 uppercase">
-                        <span>Tiến độ dịch thuật</span>
-                        <span className="text-indigo-600">{bulkTranslateProgress}%</span>
+                        <span>
+                          {bulkTranslateStatus === 'translating' ? 'Tiến độ dịch thuật' : 
+                           bulkTranslateStatus === 'completed' ? 'Hoàn tất dịch thuật' : 'Hết hạn mức API'}
+                        </span>
+                        <span className={cn(
+                          bulkTranslateStatus === 'completed' ? 'text-emerald-600' :
+                          bulkTranslateStatus === 'failed' ? 'text-rose-600' :
+                          'text-indigo-600'
+                        )}>{bulkTranslateProgress}%</span>
                       </div>
                       <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
                         <div 
-                          className="h-full bg-indigo-600 transition-all duration-300 rounded-full"
+                          className={cn(
+                            "h-full transition-all duration-300 rounded-full",
+                            bulkTranslateStatus === 'completed' ? 'bg-emerald-500' :
+                            bulkTranslateStatus === 'failed' ? 'bg-rose-500' :
+                            'bg-indigo-600'
+                          )}
                           style={{ width: `${bulkTranslateProgress}%` }}
                         />
                       </div>
                       <p className="text-[8px] text-slate-400 text-center italic">
-                        Đang sử dụng pool keys ({userKeys.length} keys) để dịch song song...
+                        {bulkTranslateStatus === 'translating' 
+                          ? `Đang sử dụng pool keys (${userKeys.length} keys) để dịch song song...`
+                          : bulkTranslateStatus === 'completed'
+                          ? "Tất cả các trang đã được dịch thành công."
+                          : "Đã dừng dịch do hết API Key khả dụng."}
                       </p>
                     </div>
                   )}
