@@ -1006,9 +1006,46 @@ export default function App() {
 
     try {
       if (authMode === 'register') {
-        setAuthError("Đăng ký đã bị vô hiệu hóa. Vui lòng liên hệ quản trị viên.");
-        setIsLoggingIn(false);
-        return;
+        if (!authDisplayName.trim()) {
+          setAuthError("Vui lòng nhập tên hiển thị.");
+          setIsLoggingIn(false);
+          return;
+        }
+        
+        // 1. Create auth user
+        const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+        const newUser = userCredential.user;
+        
+        // 2. Update profile with display name
+        await updateProfile(newUser, {
+          displayName: authDisplayName.trim()
+        });
+        
+        // 3. Create Firestore user document explicitly (to ensure immediate availability)
+        const userRef = doc(db, 'users', newUser.uid);
+        
+        // Check if UID/Email should be admin
+        const isAdminUser = newUser.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
+                            newUser.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
+                            newUser.email?.toLowerCase() === "mrihachnach@gmail.com";
+        
+        try {
+          await setDoc(userRef, {
+            uid: newUser.uid,
+            email: newUser.email,
+            displayName: authDisplayName.trim(),
+            photoURL: newUser.photoURL || null,
+            createdAt: serverTimestamp(),
+            role: isAdminUser ? 'admin' : 'user',
+            isBlocked: false
+          }, { merge: true });
+          console.log(`[Signup] Firestore document created for ${newUser.email}`);
+        } catch (fsError) {
+          console.error("[Signup] Firestore profile creation failed:", fsError);
+          // If this fails, onAuthStateChanged fallback will try it again
+        }
+        
+        showToast("Đăng ký thành công!", 'success');
       } else {
         await signInWithEmailAndPassword(auth, authEmail, authPassword);
       }
@@ -3147,7 +3184,7 @@ export default function App() {
                 <div className="p-10">
                   <div className="flex items-center justify-between mb-8">
                     <h3 className="text-2xl font-display font-black text-slate-800">
-                      Chào mừng trở lại
+                      {authMode === 'login' ? 'Chào mừng trở lại' : 'Tạo tài khoản mới'}
                     </h3>
                     <button onClick={() => setShowAuthModal(false)} className="p-2 hover:bg-slate-50 rounded-full transition-colors">
                       <ChevronLeft className="w-6 h-6 text-slate-400 rotate-180" />
@@ -3155,6 +3192,22 @@ export default function App() {
                   </div>
 
                   <form onSubmit={handleEmailAuth} className="space-y-5">
+                    {authMode === 'register' && (
+                      <div>
+                        <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2 ml-1">Tên hiển thị</label>
+                        <div className="relative">
+                          <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300" />
+                          <input 
+                            type="text"
+                            required
+                            value={authDisplayName}
+                            onChange={(e) => setAuthDisplayName(e.target.value)}
+                            className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold text-slate-700"
+                            placeholder="BS. Nguyễn Văn A"
+                          />
+                        </div>
+                      </div>
+                    )}
                     <div>
                       <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2 ml-1">Email</label>
                       <div className="relative">
@@ -3203,14 +3256,24 @@ export default function App() {
                       disabled={isLoggingIn}
                       className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95 flex items-center justify-center gap-3 disabled:opacity-50"
                     >
-                      {isLoggingIn ? <Loader2 className="w-6 h-6 animate-spin" /> : 'Đăng nhập'}
+                      {isLoggingIn ? (
+                        <Loader2 className="w-6 h-6 animate-spin" />
+                      ) : (
+                        authMode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'
+                      )}
                     </button>
                   </form>
 
                   <div className="mt-8 text-center">
-                    <p className="text-xs font-bold text-slate-400">
-                      Chưa có tài khoản? Vui lòng liên hệ quản trị viên.
-                    </p>
+                    <button 
+                      onClick={() => {
+                        setAuthMode(authMode === 'login' ? 'register' : 'login');
+                        setAuthError(null);
+                      }}
+                      className="text-xs font-bold text-indigo-600 hover:text-indigo-700 transition-colors"
+                    >
+                      {authMode === 'login' ? 'Chưa có tài khoản? Đăng ký ngay' : 'Đã có tài khoản? Đăng nhập'}
+                    </button>
                   </div>
                 </div>
               </motion.div>
