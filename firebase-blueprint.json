@@ -76,10 +76,10 @@
       "type": "object",
       "properties": {
         "email": { "type": "string", "format": "email", "description": "Blacklisted email." },
-        "addedBy": { "type": "string", "description": "Admin UID." },
+        "reason": { "type": "string", "description": "Reason for blacklisting." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp." }
       },
-      "required": ["email", "addedBy", "createdAt"]
+      "required": ["email", "reason", "createdAt"]
     },
     "Summary": {
       "title": "Summary",

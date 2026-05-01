@@ -1420,7 +1420,10 @@ export default function App() {
   };
 
   const deleteUserAccount = async (uid: string, email: string) => {
-    if (userRole !== 'admin' || !user) return;
+    if (userRole !== 'admin' || !user) {
+      console.warn("[Admin] Permission denied for delete operation");
+      return;
+    }
 
     // Debug log
     console.log(`[Admin] Attempting to delete user: ${email} (${uid})`);
@@ -1433,14 +1436,24 @@ export default function App() {
       return;
     }
 
-    if (!window.confirm(`XÁC NHẬN XÓA VĨNH VIỄN: ${email}?\n\nHành động này sẽ xóa dữ liệu người dùng và chặn họ vĩnh viễn. Không thể hoàn tác.`)) {
+    // In many environments confirm might be tricky in iframes
+    const confirmed = window.confirm(`XÁC NHẬN XÓA VĨNH VIỄN: ${email}?\n\nHành động này sẽ xóa dữ liệu người dùng và chặn họ vĩnh viễn. Không thể hoàn tác.`);
+    console.log("[Admin] Confirmation result:", confirmed);
+    
+    if (!confirmed) {
+      console.log("[Admin] Delete cancelled by user.");
       return;
     }
     
     showToast(`Đang thực hiện xóa tài khoản ${email}...`, 'info');
 
     try {
+      console.log("[Admin] Fetching idToken...");
       const token = await user.getIdToken();
+      
+      console.log("[Admin] Sending request to server...");
+      showToast("Đang gửi yêu cầu xóa đến máy chủ...", 'info');
+      
       const response = await fetch('/api/admin/delete-user', {
         method: 'POST',
         headers: { 
@@ -1450,7 +1463,23 @@ export default function App() {
         body: JSON.stringify({ uid, email })
       });
       
-      const data = await handleApiResponse(response);
+      console.log("[Admin] Server response status:", response.status);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("[Admin] Server returned error:", errorText);
+        let errorMessage = "Lỗi khi xóa người dùng";
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorMessage = errorJson.error || errorMessage;
+        } catch (e) {}
+        showToast(errorMessage, 'error');
+        return;
+      }
+
+      const data = await response.json();
+      console.log("[Admin] Server response data:", data);
+
       if (data.success) {
         showToast(`Đã xóa tài khoản ${email} thành công.`, 'success');
         await fetchAllUsers();
@@ -1458,7 +1487,7 @@ export default function App() {
         showToast(data.error || "Không thể xóa người dùng", 'error');
       }
     } catch (error: any) {
-      console.error("Error deleting user:", error);
+      console.error("[Admin] Error deleting user:", error);
       showToast("Lỗi khi xóa người dùng: " + error.message, 'error');
     }
   };
@@ -5797,7 +5826,7 @@ export default function App() {
                                     </div>
                                   </td>
                                   <td className="px-6 py-4 text-right">
-                                    <div className="flex items-center justify-end gap-2 opacity-60 hover:opacity-100 transition-opacity">
+                                    <div className="flex items-center justify-end gap-2 transition-opacity">
                                       <button 
                                         onClick={() => sendAdminPasswordResetEmail(u.email)}
                                         className="p-2 hover:bg-indigo-50 text-indigo-600 rounded-lg transition-colors"

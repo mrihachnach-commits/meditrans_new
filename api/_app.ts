@@ -10,7 +10,7 @@ import {
   getAdminFirestore, 
   firestoreRest, 
   CustomRequest 
-} from "../lib/firebaseAdmin";
+} from "../src/lib/firebaseAdmin";
 
 export async function createApp() {
   const app = express();
@@ -29,18 +29,22 @@ export async function createApp() {
   // Middleware to check if user is admin
   const checkAdmin = async (req: CustomRequest, res: any, next: any) => {
     try {
+      console.log(`[Server] checkAdmin triggered for ${req.path}`);
       if (firebaseConfig.error) {
+        console.error("[Server] Firebase config error:", firebaseConfig.error);
         return res.status(500).json({ error: "Dịch vụ chưa được cấu hình đúng.", details: firebaseConfig.error });
       }
 
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        console.warn("[Server] checkAdmin: Missing auth header");
         return res.status(401).json({ error: "Unauthorized: Thiếu token xác thực" });
       }
 
       const idToken = authHeader.split("Bearer ")[1].trim();
       req.idToken = idToken;
 
+      console.log("[Server] checkAdmin: Verifying ID token via Identity Toolkit...");
       const verifyRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -49,6 +53,7 @@ export async function createApp() {
       
       const verifyData: any = await verifyRes.json();
       if (!verifyRes.ok || !verifyData.users || verifyData.users.length === 0) {
+        console.warn("[Server] checkAdmin: Token verification failed", verifyData.error);
         return res.status(401).json({ error: "Xác thực token thất bại." });
       }
 
@@ -57,6 +62,8 @@ export async function createApp() {
       const userEmail = (decodedToken.email || "").toLowerCase();
       const userUid = decodedToken.uid;
       
+      console.log(`[Server] checkAdmin: Token belongs to ${userEmail} (${userUid})`);
+
       const primaryAdmins = [
         "hoanghiep1296@gmail.com",
         "mrihachnach@gmail.com",
@@ -67,20 +74,27 @@ export async function createApp() {
       const isPrimaryAdmin = (userEmail !== "" && primaryAdmins.includes(userEmail)) || (userUid === "4cFbfQhPMpgStJXZ9EpAVcd90i33");
       
       if (isPrimaryAdmin) {
+        console.log(`[Server] checkAdmin: Primary admin authorized: ${userEmail}`);
         req.user = decodedToken;
         return next();
       }
 
       try {
+        console.log(`[Server] checkAdmin: Fetching user doc for ${userUid} to check role...`);
         const userDoc = await firestoreRest.getDoc("users", userUid, idToken);
         if (userDoc.exists && userDoc.data.role === "admin") {
+          console.log(`[Server] checkAdmin: Dynamic admin authorized: ${userEmail}`);
           req.user = decodedToken;
           return next();
         }
-      } catch (e) {}
+        console.warn(`[Server] checkAdmin: User ${userEmail} is not an admin. Role: ${userDoc.exists ? userDoc.data.role : 'not found'}`);
+      } catch (e: any) {
+        console.error(`[Server] checkAdmin: Error checking user doc: ${e.message}`);
+      }
 
       return res.status(403).json({ error: "Bạn không có quyền quản trị (Admin)" });
     } catch (err: any) {
+      console.error(`[Server] checkAdmin: Critical error: ${err.message}`);
       return res.status(500).json({ error: "Lỗi hệ thống khi kiểm tra quyền", details: err.message });
     }
   };
@@ -180,14 +194,26 @@ export async function createApp() {
 
   app.post("/api/admin/delete-user", checkAdmin, async (req: any, res) => {
     const { uid, email } = req.body;
+    console.log(`[Server] Admin delete-user request for ${email} (${uid})`);
     try {
       try {
         const currentAdminApp = getAdminApp();
-        if (currentAdminApp) await admin.auth(currentAdminApp).deleteUser(uid);
-      } catch (ae) {}
+        if (currentAdminApp) {
+          console.log(`[Server] Deleting user ${uid} from Firebase Auth...`);
+          await admin.auth(currentAdminApp).deleteUser(uid);
+          console.log(`[Server] User ${uid} deleted from Firebase Auth.`);
+        } else {
+          console.warn(`[Server] Admin SDK not initialized, skipping Auth deletion for ${uid}`);
+        }
+      } catch (ae: any) {
+        console.error(`[Server] Error deleting user from Auth: ${ae.message}`);
+      }
       
+      console.log(`[Server] Deleting Firestore user doc: ${uid}`);
       await firestoreRest.deleteDoc("users", uid, req.idToken);
+      
       if (email) {
+        console.log(`[Server] Adding ${email} to blacklist...`);
         await firestoreRest.setDoc("blacklist", email.toLowerCase(), {
           email: email.toLowerCase(),
           uid: uid,
@@ -196,8 +222,10 @@ export async function createApp() {
         }, req.idToken);
       }
       
+      console.log(`[Server] Admin delete-user request for ${email} completed successfully.`);
       res.json({ success: true });
     } catch (error: any) {
+      console.error(`[Server] Admin delete-user request failed: ${error.message}`);
       res.status(500).json({ error: error.message });
     }
   });

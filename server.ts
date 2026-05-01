@@ -1,4 +1,4 @@
-import { createApp } from "./src/server/app";
+import { createApp } from "./api/_app";
 import { firebaseConfig } from "./src/lib/firebaseAdmin";
 
 const PORT = 3000;
