@@ -1419,6 +1419,50 @@ export default function App() {
     }
   };
 
+  const deleteUserAccount = async (uid: string, email: string) => {
+    if (userRole !== 'admin' || !user) return;
+
+    // Debug log
+    console.log(`[Admin] Attempting to delete user: ${email} (${uid})`);
+
+    // Protection for root admin
+    const isRootAdmin = email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
+                        email?.toLowerCase() === "mrihachnach@gmail.com";
+    if (isRootAdmin) {
+      showToast("Không thể xóa tài khoản Quản trị viên hệ thống.", 'error');
+      return;
+    }
+
+    if (!window.confirm(`XÁC NHẬN XÓA VĨNH VIỄN: ${email}?\n\nHành động này sẽ xóa dữ liệu người dùng và chặn họ vĩnh viễn. Không thể hoàn tác.`)) {
+      return;
+    }
+    
+    showToast(`Đang thực hiện xóa tài khoản ${email}...`, 'info');
+
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch('/api/admin/delete-user', {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ uid, email })
+      });
+      
+      const data = await handleApiResponse(response);
+      if (data.success) {
+        showToast(`Đã xóa tài khoản ${email} thành công.`, 'success');
+        await fetchAllUsers();
+      } else {
+        showToast(data.error || "Không thể xóa người dùng", 'error');
+      }
+    } catch (error: any) {
+      console.error("Error deleting user:", error);
+      showToast("Lỗi khi xóa người dùng: " + error.message, 'error');
+    }
+  };
+
 
   const changeOwnPassword = async (newPassword: string) => {
     if (!user) return;
@@ -5753,7 +5797,7 @@ export default function App() {
                                     </div>
                                   </td>
                                   <td className="px-6 py-4 text-right">
-                                    <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <div className="flex items-center justify-end gap-2 opacity-60 hover:opacity-100 transition-opacity">
                                       <button 
                                         onClick={() => sendAdminPasswordResetEmail(u.email)}
                                         className="p-2 hover:bg-indigo-50 text-indigo-600 rounded-lg transition-colors"
@@ -5794,6 +5838,13 @@ export default function App() {
                                         title={u.isBlocked ? "Bỏ chặn người dùng" : "Chặn người dùng"}
                                       >
                                         {u.isBlocked ? <ShieldCheck className="w-4 h-4" /> : <ShieldAlert className="w-4 h-4" />}
+                                      </button>
+                                      <button 
+                                        onClick={() => deleteUserAccount(u.uid, u.email)}
+                                        className="p-2 hover:bg-rose-100 text-rose-600 rounded-lg transition-colors border border-transparent hover:border-rose-200"
+                                        title="Xóa tài khoản vĩnh viễn"
+                                      >
+                                        <Trash2 className="w-4 h-4" />
                                       </button>
                                     </div>
                                   </td>

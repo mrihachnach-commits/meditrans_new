@@ -1,2 +1,10 @@
-import app from "../server";
-export default app;
+import { createApp } from "../src/server/app";
+
+let cachedApp: any;
+
+export default async (req: any, res: any) => {
+  if (!cachedApp) {
+    cachedApp = await createApp();
+  }
+  return cachedApp(req, res);
+};

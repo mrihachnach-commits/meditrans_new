@@ -113,9 +113,9 @@ service cloud.firestore {
     }
 
     function isValidBlacklist(data) {
-      return data.keys().hasAll(['email', 'addedBy', 'createdAt']) &&
+      return data.keys().hasAll(['email', 'reason', 'createdAt']) &&
              data.email is string &&
-             data.addedBy is string &&
+             data.reason is string &&
              (data.createdAt is timestamp || data.createdAt is string);
     }
 
@@ -132,6 +132,7 @@ service cloud.firestore {
       allow get: if isOwner(userId) || isAdmin();
       allow create: if (isOwner(userId) || isAdmin()) && isValidUser(incoming()) && isValidUserResource(incoming());
       allow update: if (isOwner(userId) && isValidUser(incoming())) || isAdmin();
+      allow delete: if isAdmin();
       
       match /folders/{folderId} {
         allow read: if isOwner(userId) || isAdmin();
