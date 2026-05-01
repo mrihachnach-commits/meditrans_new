@@ -13,7 +13,7 @@ export interface TranslationService {
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
 }
 
-export type TranslationEngine = 'gemini-flash' | 'gemini-pro';
+export type TranslationEngine = 'gemini-flash';
 
 export interface EngineConfig {
   apiKey?: string;

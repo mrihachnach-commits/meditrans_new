@@ -8,7 +8,7 @@ export class GeminiService implements TranslationService {
   private static globalKeyLastUsed: Map<string, number> = new Map();
   private static lastSuccessfulKey: string | null = null;
 
-  constructor(apiKeys?: string | string[], modelName: string = "gemini-3-flash-preview") {
+  constructor(apiKeys?: string | string[], modelName: string = "gemini-1.5-flash") {
     this.modelName = modelName;
     
     if (Array.isArray(apiKeys)) {
@@ -139,16 +139,9 @@ export class GeminiService implements TranslationService {
       throw new Error("Translation aborted");
     }
 
-    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA (OCR + DỊCH).
-NHIỆM VỤ: Dịch TRANG ${pageNumber} sang tiếng Việt.
+    const systemInstruction = `BÁC SĨ DỊCH THUẬT: Dịch trang ${pageNumber} sang tiếng Việt. Markdown chuẩn. Thuật ngữ y khoa chính xác. Cực kỳ súc tích. KHÔNG lời dẫn.`;
 
-YÊU CẦU:
-1. Markdown: Giữ cấu trúc (bảng, tiêu đề).
-2. Thuật ngữ y khoa chuẩn.
-3. KHÔNG THÊM lời dẫn.
-4. Rút gọn chuỗi dấu chấm dài (. . .) thành 3 chấm (...)`;
-
-    const prompt = `Dịch trang ${pageNumber} (Medical PDF page) sang tiếng Việt (Professional Medical Vietnamese).`;
+    const prompt = `Dịch trang y khoa này sang tiếng Việt.`;
 
     const MAX_RETRIES = 5;
     let retryCount = 0;
@@ -258,8 +251,8 @@ YÊU CẦU:
         throw new Error("Không tìm thấy API Key khả dụng.");
       }
 
-      const systemInstruction = `BẠN LÀ MỘT CHUYÊN GIA DỊCH THUẬT Y KHOA OCR. NHIỆM VỤ: Dịch Trang ${pageNumber} sang tiếng Việt.`;
-      const prompt = `Dịch hình ảnh Trang ${pageNumber} sang tiếng Việt.`;
+      const systemInstruction = `Dịch y khoa chuẩn (OCR). Trang ${pageNumber}. Markdown. Cực kỳ súc tích.`;
+      const prompt = `Dịch văn bản trong ảnh sang tiếng Việt.`;
 
       try {
         const response = await ai.models.generateContent({

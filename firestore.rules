@@ -95,7 +95,7 @@ service cloud.firestore {
              data.ownerId is string &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
              data.value is string && data.value.size() > 0 && data.value.size() <= 4096 &&
-             data.engine in ['gemini', 'openai', 'anthropic', 'medical-specialized', 'gemini-flash', 'gemini-pro'] &&
+             data.engine in ['gemini', 'openai', 'anthropic', 'medical-specialized', 'gemini-flash'] &&
              (data.createdAt is timestamp || data.createdAt is string) &&
              (data.get('sharedWith', []) is list) &&
              (data.get('status', 'active') in ['active', 'error']);

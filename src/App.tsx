@@ -253,27 +253,25 @@ export default function App() {
   useEffect(() => {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
-  const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
-    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-flash';
-  });
+  const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>('gemini-flash');
 
   useEffect(() => {
-    localStorage.setItem('mediTrans_selectedEngine', selectedEngine);
-  }, [selectedEngine]);
+    localStorage.setItem('mediTrans_selectedEngine', 'gemini-flash');
+  }, []);
   
   const [engineKeys, setEngineKeys] = useState<Record<TranslationEngine, string>>(() => {
     const saved = localStorage.getItem('mediTrans_engineKeys');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        return { 'gemini-flash': parsed['gemini-flash'] || '' };
       } catch (e) {
         console.error("Failed to parse engine keys:", e);
       }
     }
     
     return {
-      'gemini-flash': '',
-      'gemini-pro': ''
+      'gemini-flash': ''
     };
   });
   const [showSettings, setShowSettings] = useState(false);
@@ -608,13 +606,14 @@ export default function App() {
   const [showTranslationPanel, setShowTranslationPanel] = useState(false);
   const [mobileViewMode, setMobileViewMode] = useState<'pdf' | 'translation' | 'split'>('pdf');
   const [isBulkTranslating, setIsBulkTranslating] = useState(false);
+  const [showBulkConfirm, setShowBulkConfirm] = useState(false);
   const [bulkTranslateProgress, setBulkTranslateProgress] = useState(0);
   const [bulkTranslateStatus, setBulkTranslateStatus] = useState<'translating' | 'completed' | 'failed' | 'idle'>('idle');
   const bulkCancelRef = useRef(false);
   const shouldAutoBulkRef = useRef(false);
   
   const [autoTranslate, setAutoTranslate] = useState(false);
-  const [autoTranslateLookAhead, setAutoTranslateLookAhead] = useState(5); // Default to 5 pages lookahead
+  const [autoTranslateLookAhead, setAutoTranslateLookAhead] = useState(3); // Reduced for quota efficiency
   const [zoom, setZoom] = useState(0.82); // Default to 82% as requested
   const [isAutoFit, setIsAutoFit] = useState(true);
   
@@ -728,20 +727,19 @@ export default function App() {
   const performKeyCheck = async (silent: boolean = false) => {
     if (!silent) setIsCheckingKeys(true);
     try {
-      // 1. Check ALL Vault Keys in parallel for better performance
+      // 1. Check Vault Keys 
       let activeVaultCount = 0;
       let currentVaultKeyResults = null;
 
       if (user && userKeys.length > 0) {
-        const currentEngineType = selectedEngine.startsWith('gemini') ? 'gemini' : selectedEngine;
         const vaultKeysToCheck = userKeys.filter(k => {
           const vEng = (k.engine || 'gemini').toLowerCase();
-          return vEng === currentEngineType || vEng === 'gemini' || vEng.includes('gemini');
+          return vEng === 'gemini' || vEng.includes('gemini');
         });
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
-          const vService = new GeminiService(vKey.value, "gemini-3-flash-preview");
+          const vService = new GeminiService(vKey.value, "gemini-1.5-flash");
           const vRes = await vService.checkAvailableKeys();
           const isActive = vRes.manualKey;
           
@@ -2457,6 +2455,8 @@ export default function App() {
 
   const startBulkTranslation = async () => {
     if (!pdfDoc || numPages <= 0) return;
+    
+    // If already translating, clicking toggles cancellation
     if (isBulkTranslating) {
       bulkCancelRef.current = true;
       setIsBulkTranslating(false);
@@ -2470,8 +2470,12 @@ export default function App() {
     setBulkTranslateProgress(0);
 
     const pagesToTranslate: number[] = [];
+    let initialCompletedCount = 0;
+    
     for (let i = 1; i <= numPages; i++) {
-      if (translationsRef.current[i]?.status !== 'success') {
+      if (translationsRef.current[i]?.status === 'success') {
+        initialCompletedCount++;
+      } else {
         pagesToTranslate.push(i);
       }
     }
@@ -2480,17 +2484,17 @@ export default function App() {
       setIsBulkTranslating(false);
       setBulkTranslateStatus('completed');
       setBulkTranslateProgress(100);
-      showToast("Tất cả các trang đã được dịch trước đó.", 'success');
+      showToast("Tất cả các trang đã được dịch thành công.", 'success');
       return;
     }
 
     const totalToTranslate = pagesToTranslate.length;
-    let completedCount = 0;
+    let newlyCompletedCount = 0;
     
     // Concurrency depends on the number of keys. 
     const concurrentLimit = Math.min(15, userKeys.length > 5 ? Math.floor(userKeys.length * 0.5) : 5);
     
-    console.log(`[MediTrans] Starting bulk translation. Pages: ${pagesToTranslate.length}, Concurrency: ${concurrentLimit}`);
+    console.log(`[MediTrans] Bulk Translation: ${pagesToTranslate.length} more pages. Already Done: ${initialCompletedCount}`);
 
     let allKeysExhausted = false;
 
@@ -2504,39 +2508,41 @@ export default function App() {
         
         try {
           await preTranslatePage(pageNum);
-          completedCount++;
-          setBulkTranslateProgress(Math.floor((completedCount / totalToTranslate) * 100));
+          newlyCompletedCount++;
+          // Progress of the current operation
+          setBulkTranslateProgress(Math.floor((newlyCompletedCount / totalToTranslate) * 100));
         } catch (err: any) {
           console.error(`Bulk translate failed for page ${pageNum}:`, err);
           
-          // Check if all keys are exhausted
-          if (err.message?.includes('API Key khả dụng') || err.message?.includes('hạn mức')) {
-            allKeysExhausted = true;
-          }
+          const isQuotaError = err.message?.includes('API Key') || 
+                              err.message?.includes('hạn mức') || 
+                              err.message?.includes('429') ||
+                              err.message?.includes('quota');
+                              
+          if (isQuotaError) allKeysExhausted = true;
         }
       }));
       
       if (!allKeysExhausted) {
-        // Small cooldown between batches to keep the system responsive
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
 
+    const finalTotalCompleted = initialCompletedCount + newlyCompletedCount;
+    const finalPercentage = Math.floor((finalTotalCompleted / numPages) * 100);
+
     if (allKeysExhausted) {
-      const percentage = Math.floor((completedCount / totalToTranslate) * 100);
-      showToast(`Dừng dịch vì tất cả API Key đều hết hạn mức. Đã hoàn thành ${percentage}% (${completedCount}/${totalToTranslate} trang).`, 'error');
+      showToast(`Dừng dịch do hết hạn mức. Đã hoàn thành ${finalPercentage}% (${finalTotalCompleted}/${numPages} trang).`, 'error');
       setBulkTranslateStatus('failed');
     } else if (bulkCancelRef.current) {
-      showToast("Đã dừng dịch toàn bộ tài liệu.", 'info');
+      showToast(`Đã dừng. Hiện có ${finalPercentage}% (${finalTotalCompleted}/${numPages} trang) đã dịch.`, 'info');
       setBulkTranslateStatus('idle');
     } else {
-      showToast("Đã hoàn tất dịch toàn bộ tài liệu.", 'success');
+      showToast(`Đã hoàn tất dịch 100% (${numPages}/${numPages} trang).`, 'success');
       setBulkTranslateStatus('completed');
       setBulkTranslateProgress(100);
     }
 
-    console.log(`[MediTrans] Bulk translation finished.`);
-    // Keep isBulkTranslating true for a bit to show completed state
     setTimeout(() => setIsBulkTranslating(false), 5000);
   };
 
@@ -2672,18 +2678,14 @@ export default function App() {
     // Use selected vault key as primary if available
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
-    if (selectedEngine === 'gemini-flash') {
-      translationService.current = new GeminiService(allKeys, "gemini-3-flash-preview");
-    } else if (selectedEngine === 'gemini-pro') {
-      translationService.current = new GeminiService(allKeys, "gemini-3-pro-preview");
-    }
+    translationService.current = new GeminiService(allKeys, "gemini-1.5-flash");
 
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
     if (allKeys.length > 0) {
-      console.log(`[MediTrans AI] Engine: ${selectedEngine} | Keys: ${allKeys.length} (${vaultKeyCount} from Vault) | Active: ${selectedVaultKeyName || "Manual/System"}`);
+      console.log(`[MediTrans AI] Engine: Gemini Flash | Keys: ${allKeys.length} (${vaultKeyCount} from Vault) | Active: ${selectedVaultKeyName || "Manual/System"}`);
     } else {
-      console.warn(`[MediTrans AI] Engine: ${selectedEngine} - NO API KEYS AVAILABLE`);
+      console.warn(`[MediTrans AI] Engine: Gemini Flash - NO API KEYS AVAILABLE`);
     }
   }, [selectedEngine, engineKeys, user, selectedKeyId, userKeys, isKeysLoading]);
 
@@ -4685,36 +4687,6 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="space-y-4 pt-4 border-t border-slate-100">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Sparkles className="w-4 h-4 text-indigo-500" />
-                    <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
-                      Động cơ dịch thuật (Engine)
-                    </label>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(['gemini-flash', 'gemini-pro'] as TranslationEngine[]).map((engine) => {
-                      const labels: Record<string, string> = {
-                        'gemini-flash': 'Gemini Flash',
-                        'gemini-pro': 'Gemini Pro'
-                      };
-                      return (
-                        <button
-                          key={engine}
-                          onClick={() => setSelectedEngine(engine)}
-                          className={cn(
-                            "px-2 py-3 rounded-xl text-[10px] font-bold border transition-all flex flex-col items-center gap-1 text-center h-full justify-center",
-                            selectedEngine === engine
-                              ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-100"
-                              : "bg-white border-slate-100 text-slate-500 hover:border-slate-200"
-                          )}
-                        >
-                          <span>{labels[engine]}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
 
                 <div className="space-y-4 pt-4 border-t border-slate-100">
                   <div className="flex items-center justify-between">
@@ -4764,44 +4736,78 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Bulk Translation Button */}
+                {/* Bulk Translation Button with Confirmation */}
                 <div className="pt-4 border-t border-slate-100">
-                  <button
-                    onClick={startBulkTranslation}
-                    disabled={!pdfDoc}
-                    className={cn(
-                      "w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all font-bold text-xs uppercase tracking-wider",
-                      bulkTranslateStatus === 'translating' 
-                        ? "bg-amber-100 text-amber-700 border border-amber-200" 
-                        : bulkTranslateStatus === 'completed'
-                        ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
-                        : bulkTranslateStatus === 'failed'
-                        ? "bg-rose-100 text-rose-700 border border-rose-200"
-                        : "bg-indigo-600 text-white shadow-lg shadow-indigo-100 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0"
-                    )}
-                  >
-                    {bulkTranslateStatus === 'translating' ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Dừng dịch (Stop)
-                      </>
-                    ) : bulkTranslateStatus === 'completed' ? (
-                      <>
-                        <CheckCircle2 className="w-4 h-4" />
-                        Đã dịch xong
-                      </>
-                    ) : bulkTranslateStatus === 'failed' ? (
-                      <>
-                        <AlertTriangle className="w-4 h-4" />
-                        Lỗi/Hết Key
-                      </>
-                    ) : (
-                      <>
-                        <Zap className="w-4 h-4" />
-                        Dịch toàn bộ tài liệu
-                      </>
-                    )}
-                  </button>
+                  {showBulkConfirm && !isBulkTranslating ? (
+                    <div className="space-y-3 animate-in zoom-in-95 duration-200">
+                      <div className="bg-amber-50 border border-amber-100 p-3 rounded-xl">
+                        <p className="text-[10px] font-bold text-amber-900 leading-relaxed">
+                          Xác nhận dịch toàn bộ {numPages} trang? 
+                          <span className="block font-normal mt-1 text-amber-700">Hành động này sẽ tiêu tốn hạn mức API của bạn.</span>
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => {
+                            setShowBulkConfirm(false);
+                            startBulkTranslation();
+                          }}
+                          className="flex-1 py-2.5 bg-indigo-600 text-white rounded-lg text-[10px] font-bold uppercase hover:bg-indigo-700 shadow-sm"
+                        >
+                          Bắt đầu dịch
+                        </button>
+                        <button
+                          onClick={() => setShowBulkConfirm(false)}
+                          className="flex-1 py-2.5 bg-white border border-slate-200 text-slate-500 rounded-lg text-[10px] font-bold uppercase hover:bg-slate-50"
+                        >
+                          Hủy
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        if (isBulkTranslating) {
+                          startBulkTranslation(); // This handles stopping
+                        } else {
+                          setShowBulkConfirm(true);
+                        }
+                      }}
+                      disabled={!pdfDoc}
+                      className={cn(
+                        "w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all font-bold text-xs uppercase tracking-wider",
+                        bulkTranslateStatus === 'translating' 
+                          ? "bg-amber-100 text-amber-700 border border-amber-200" 
+                          : bulkTranslateStatus === 'completed'
+                          ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                          : bulkTranslateStatus === 'failed'
+                          ? "bg-rose-100 text-rose-700 border border-rose-200"
+                          : "bg-indigo-600 text-white shadow-lg shadow-indigo-100 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0"
+                      )}
+                    >
+                      {bulkTranslateStatus === 'translating' ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Dừng dịch (Stop)
+                        </>
+                      ) : bulkTranslateStatus === 'completed' ? (
+                        <>
+                          <CheckCircle2 className="w-4 h-4" />
+                          Đã dịch xong
+                        </>
+                      ) : bulkTranslateStatus === 'failed' ? (
+                        <>
+                          <AlertTriangle className="w-4 h-4" />
+                          Lỗi/Hết Key
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-4 h-4" />
+                          Dịch toàn bộ tài liệu
+                        </>
+                      )}
+                    </button>
+                  )}
                   
                   {bulkTranslateStatus !== 'idle' && (
                     <div className="mt-3 space-y-1.5 px-1 animate-in fade-in slide-in-from-top-2">
