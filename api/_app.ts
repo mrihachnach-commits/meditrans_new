@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import admin from "firebase-admin";
+import { getAuth } from "firebase-admin/auth";
 import axios from "axios";
 import FormData from "form-data";
 import multer from "multer";
@@ -195,18 +196,39 @@ export async function createApp() {
   app.post("/api/admin/delete-user", checkAdmin, async (req: any, res) => {
     const { uid, email } = req.body;
     console.log(`[Server] Admin delete-user request for ${email} (${uid})`);
+    
+    let authDeleted = false;
+    let authError = null;
+
     try {
-      try {
-        const currentAdminApp = getAdminApp();
-        if (currentAdminApp) {
+      const currentAdminApp = getAdminApp();
+      if (currentAdminApp) {
+        try {
           console.log(`[Server] Deleting user ${uid} from Firebase Auth...`);
-          await admin.auth(currentAdminApp).deleteUser(uid);
+          await getAuth(currentAdminApp).deleteUser(uid);
           console.log(`[Server] User ${uid} deleted from Firebase Auth.`);
-        } else {
-          console.warn(`[Server] Admin SDK not initialized, skipping Auth deletion for ${uid}`);
+          authDeleted = true;
+        } catch (ae: any) {
+          authError = ae.message;
+          console.error(`[Server] Error deleting user from Auth: ${ae.message}`);
+          
+          // Re-throw if it's a critical error that should stop the process
+          // But if the user is already gone from Auth, we might want to continue to Firestore
+          if (ae.code === 'auth/user-not-found') {
+            console.warn(`[Server] User ${uid} not found in Auth, continuing to Firestore...`);
+            authDeleted = true; // Effectively deleted
+          } else {
+            return res.status(500).json({ 
+              error: `Lỗi xóa tài khoản khỏi Authentication: ${ae.message}`,
+              details: "Bạn có thể cần cấu hình FIREBASE_PRIVATE_KEY và FIREBASE_CLIENT_EMAIL trong môi trường."
+            });
+          }
         }
-      } catch (ae: any) {
-        console.error(`[Server] Error deleting user from Auth: ${ae.message}`);
+      } else {
+        return res.status(500).json({ 
+          error: "Admin SDK chưa được cấu hình đầy đủ (thiếu Service Account).",
+          details: "Cần đặt FIREBASE_PRIVATE_KEY và FIREBASE_CLIENT_EMAIL để xóa người dùng khỏi Authentication."
+        });
       }
       
       console.log(`[Server] Deleting Firestore user doc: ${uid}`);
@@ -223,7 +245,7 @@ export async function createApp() {
       }
       
       console.log(`[Server] Admin delete-user request for ${email} completed successfully.`);
-      res.json({ success: true });
+      res.json({ success: true, authDeleted });
     } catch (error: any) {
       console.error(`[Server] Admin delete-user request failed: ${error.message}`);
       res.status(500).json({ error: error.message });

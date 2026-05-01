@@ -656,6 +656,7 @@ export default function App() {
   const [adminNewUserPassword, setAdminNewUserPassword] = useState('');
   const [adminNewUserDisplayName, setAdminNewUserDisplayName] = useState('');
   const [adminNewUserRole, setAdminNewUserRole] = useState<'user' | 'admin'>('user');
+  const [pendingDeleteUid, setPendingDeleteUid] = useState<string | null>(null);
   const [isCreatingUser, setIsCreatingUser] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [newPasswordValue, setNewPasswordValue] = useState('');
@@ -1436,15 +1437,6 @@ export default function App() {
       return;
     }
 
-    // In many environments confirm might be tricky in iframes
-    const confirmed = window.confirm(`XÁC NHẬN XÓA VĨNH VIỄN: ${email}?\n\nHành động này sẽ xóa dữ liệu người dùng và chặn họ vĩnh viễn. Không thể hoàn tác.`);
-    console.log("[Admin] Confirmation result:", confirmed);
-    
-    if (!confirmed) {
-      console.log("[Admin] Delete cancelled by user.");
-      return;
-    }
-    
     showToast(`Đang thực hiện xóa tài khoản ${email}...`, 'info');
 
     try {
@@ -1465,23 +1457,27 @@ export default function App() {
       
       console.log("[Admin] Server response status:", response.status);
       
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error("[Admin] Server returned error:", errorText);
-        let errorMessage = "Lỗi khi xóa người dùng";
-        try {
-          const errorJson = JSON.parse(errorText);
-          errorMessage = errorJson.error || errorMessage;
-        } catch (e) {}
-        showToast(errorMessage, 'error');
-        return;
-      }
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error("[Admin] Server returned error:", errorText);
+          let errorMessage = "Lỗi khi xóa người dùng";
+          let details = "";
+          try {
+            const errorJson = JSON.parse(errorText);
+            errorMessage = errorJson.error || errorMessage;
+            details = errorJson.details || "";
+          } catch (e) {}
+          
+          showToast(errorMessage + (details ? `. ${details}` : ""), 'error');
+          return;
+        }
 
       const data = await response.json();
       console.log("[Admin] Server response data:", data);
 
       if (data.success) {
         showToast(`Đã xóa tài khoản ${email} thành công.`, 'success');
+        setPendingDeleteUid(null);
         await fetchAllUsers();
       } else {
         showToast(data.error || "Không thể xóa người dùng", 'error');
@@ -5868,13 +5864,32 @@ export default function App() {
                                       >
                                         {u.isBlocked ? <ShieldCheck className="w-4 h-4" /> : <ShieldAlert className="w-4 h-4" />}
                                       </button>
-                                      <button 
-                                        onClick={() => deleteUserAccount(u.uid, u.email)}
-                                        className="p-2 hover:bg-rose-100 text-rose-600 rounded-lg transition-colors border border-transparent hover:border-rose-200"
-                                        title="Xóa tài khoản vĩnh viễn"
-                                      >
-                                        <Trash2 className="w-4 h-4" />
-                                      </button>
+                                      <div className="flex items-center gap-1">
+                                        {pendingDeleteUid === u.uid ? (
+                                          <div className="flex items-center gap-1 animate-in fade-in slide-in-from-right-2 duration-300">
+                                            <button 
+                                              onClick={() => deleteUserAccount(u.uid, u.email)}
+                                              className="px-3 py-1 bg-rose-600 text-white text-xs font-bold rounded-lg hover:bg-rose-700 transition-colors shadow-sm"
+                                            >
+                                              Xác nhận xóa
+                                            </button>
+                                            <button 
+                                              onClick={() => setPendingDeleteUid(null)}
+                                              className="p-1 px-2 bg-slate-100 text-slate-600 text-xs font-medium rounded-lg hover:bg-slate-200 transition-colors"
+                                            >
+                                              Hủy
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <button 
+                                            onClick={() => setPendingDeleteUid(u.uid)}
+                                            className="p-2 hover:bg-rose-100 text-rose-600 rounded-lg transition-colors border border-transparent hover:border-rose-200"
+                                            title="Xóa tài khoản vĩnh viễn"
+                                          >
+                                            <Trash2 className="w-4 h-4" />
+                                          </button>
+                                        )}
+                                      </div>
                                     </div>
                                   </td>
                                 </tr>
