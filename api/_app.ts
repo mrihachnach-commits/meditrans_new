@@ -13,6 +13,9 @@ import {
   CustomRequest 
 } from "../src/lib/firebaseAdmin";
 
+// In-memory cache for verified tokens to prevent "Rate exceeded" errors
+const tokenCache = new Map<string, { decodedToken: any, expiry: number }>();
+
 export async function createApp() {
   const app = express();
   app.use(express.json());
@@ -45,21 +48,80 @@ export async function createApp() {
       const idToken = authHeader.split("Bearer ")[1].trim();
       req.idToken = idToken;
 
-      console.log("[Server] checkAdmin: Verifying ID token via Identity Toolkit...");
-      const verifyRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken })
-      });
-      
-      const verifyData: any = await verifyRes.json();
-      if (!verifyRes.ok || !verifyData.users || verifyData.users.length === 0) {
-        console.warn("[Server] checkAdmin: Token verification failed", verifyData.error);
-        return res.status(401).json({ error: "Xác thực token thất bại." });
+      // Check cache first
+      const now = Date.now();
+      const cached = tokenCache.get(idToken);
+      if (cached && cached.expiry > now) {
+        console.log("[Server] checkAdmin: Using cached token info");
+        const decodedToken = cached.decodedToken;
+        const userEmail = (decodedToken.email || "").toLowerCase();
+        const userUid = decodedToken.uid;
+        
+        const primaryAdmins = ["hoanghiep1296@gmail.com", "mrihachnach@gmail.com", "admin@gmail.com", "hoctap853@gmail.com"];
+        const isPrimaryAdmin = (userEmail !== "" && primaryAdmins.includes(userEmail)) || (userUid === "4cFbfQhPMpgStJXZ9EpAVcd90i33");
+        
+        if (isPrimaryAdmin) {
+          req.user = decodedToken;
+          return next();
+        }
+
+        const userDoc = await firestoreRest.getDoc("users", userUid, idToken);
+        if (userDoc.exists && userDoc.data.role === "admin") {
+          req.user = decodedToken;
+          return next();
+        }
+        return res.status(403).json({ error: "Bạn không có quyền quản trị (Admin)" });
       }
 
-      const decodedToken = verifyData.users[0];
-      decodedToken.uid = decodedToken.localId;
+      let decodedToken: any = null;
+      const adminApp = getAdminApp();
+
+      if (adminApp) {
+        try {
+          console.log("[Server] checkAdmin: Verifying ID token via Admin SDK...");
+          decodedToken = await admin.auth(adminApp).verifyIdToken(idToken);
+          console.log(`[Server] checkAdmin: Admin SDK verification succesful for ${decodedToken.email}`);
+        } catch (e: any) {
+          console.warn("[Server] checkAdmin: Admin SDK verification failed, falling back to REST API:", e.message);
+        }
+      }
+
+      if (!decodedToken) {
+        console.log("[Server] checkAdmin: Verifying ID token via Identity Toolkit REST API...");
+        const verifyRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken })
+        });
+        
+        const verifyData: any = await verifyRes.json();
+        
+        if (verifyRes.status === 429) {
+          console.error("[Server] checkAdmin: IDENTITY_TOOLKIT_RATE_LIMIT_EXCEEDED");
+          return res.status(429).json({ 
+            error: "Hệ thống đang bận (Rate Limit Exceeded).", 
+            details: "Vui lòng đợi 1-2 phút và thử lại. Bạn cũng có thể định cấu hình Service Account (FIREBASE_PRIVATE_KEY) để bỏ qua giới hạn này." 
+          });
+        }
+
+        if (!verifyRes.ok || !verifyData.users || verifyData.users.length === 0) {
+          console.warn("[Server] checkAdmin: Token verification failed", verifyData.error);
+          return res.status(401).json({ error: "Xác thực token thất bại." });
+        }
+
+        decodedToken = verifyData.users[0];
+        decodedToken.uid = decodedToken.localId;
+      }
+
+      // Cache the result for 5 minutes
+      tokenCache.set(idToken, { decodedToken, expiry: now + 5 * 60 * 1000 });
+      // Cleanup cache occasionally
+      if (tokenCache.size > 100) {
+        for (const [key, val] of tokenCache.entries()) {
+          if (val.expiry < now) tokenCache.delete(key);
+        }
+      }
+
       const userEmail = (decodedToken.email || "").toLowerCase();
       const userUid = decodedToken.uid;
       
