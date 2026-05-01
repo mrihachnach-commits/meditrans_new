@@ -657,6 +657,8 @@ export default function App() {
   const [adminNewUserDisplayName, setAdminNewUserDisplayName] = useState('');
   const [adminNewUserRole, setAdminNewUserRole] = useState<'user' | 'admin'>('user');
   const [pendingDeleteUid, setPendingDeleteUid] = useState<string | null>(null);
+  const [pendingPasswordUid, setPendingPasswordUid] = useState<string | null>(null);
+  const [newPasswordInput, setNewPasswordInput] = useState('');
   const [isCreatingUser, setIsCreatingUser] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [newPasswordValue, setNewPasswordValue] = useState('');
@@ -1362,7 +1364,7 @@ export default function App() {
     if (userRole !== 'admin' || !user) return;
     try {
       const token = await user.getIdToken();
-      const response = await fetch('/api/admin/reset-password', {
+      const response = await fetch('/api/admin/change-password', {
         method: 'POST',
         headers: { 
           'Authorization': `Bearer ${token}`,
@@ -1370,21 +1372,18 @@ export default function App() {
         },
         body: JSON.stringify({ uid, newPassword })
       });
-      const data = await handleApiResponse(response);
+      const data = await response.json();
       if (data.success) {
         showToast("Đã đổi mật khẩu thành công", 'success');
         return true;
       } else {
-        if (data.isApiDisabled) {
-          showToast("Lỗi: Identity Toolkit API chưa bật. Hãy thử dùng nút 'Gửi email đặt lại mật khẩu'.", 'error');
-        } else {
-          showToast(data.error || "Không thể đổi mật khẩu", 'error');
-        }
-        throw new Error(data.error || "Không thể đổi mật khẩu");
+        showToast(data.error || "Không thể đổi mật khẩu", 'error');
+        return false;
       }
     } catch (error: any) {
       console.error("Error resetting password:", error);
-      throw error;
+      showToast("Lỗi khi đổi mật khẩu trực tiếp: " + error.message, 'error');
+      return false;
     }
   };
 
@@ -1417,6 +1416,40 @@ export default function App() {
     } catch (error: any) {
       console.error("Error updating role:", error);
       handleFirestoreError(error, OperationType.UPDATE, `users/${uid}`);
+    }
+  };
+
+  const adminChangeUserPassword = async (uid: string, email: string) => {
+    if (userRole !== 'admin' || !user || !newPasswordInput) return;
+    if (newPasswordInput.length < 6) {
+      showToast("Mật khẩu phải có ít nhất 6 ký tự", 'error');
+      return;
+    }
+
+    showToast(`Đang đổi mật khẩu cho ${email}...`, 'info');
+    
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch('/api/admin/change-password', {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json' 
+        },
+        body: JSON.stringify({ uid, email, newPassword: newPasswordInput })
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        showToast(`Đã đổi mật khẩu cho ${email} thành công.`, 'success');
+        setPendingPasswordUid(null);
+        setNewPasswordInput('');
+      } else {
+        showToast(data.error || "Không thể đổi mật khẩu", 'error');
+      }
+    } catch (error: any) {
+      console.error("Error changing password:", error);
+      showToast("Lỗi khi đổi mật khẩu: " + error.message, 'error');
     }
   };
 
@@ -5823,27 +5856,57 @@ export default function App() {
                                   </td>
                                   <td className="px-6 py-4 text-right">
                                     <div className="flex items-center justify-end gap-2 transition-opacity">
-                                      <button 
-                                        onClick={() => sendAdminPasswordResetEmail(u.email)}
-                                        className="p-2 hover:bg-indigo-50 text-indigo-600 rounded-lg transition-colors"
-                                        title="Gửi email đặt lại mật khẩu"
-                                      >
-                                        <Mail className="w-4 h-4" />
-                                      </button>
-                                      <button 
-                                        onClick={async () => {
-                                          const newPass = "12345678"; // Default reset password to avoid prompt()
-                                          try {
-                                            await resetUserPassword(u.uid, newPass);
-                                          } catch (e: any) {
-                                            console.error(e.message);
-                                          }
-                                        }}
-                                        className="p-2 hover:bg-amber-50 text-amber-600 rounded-lg transition-colors"
-                                        title="Đặt lại mật khẩu trực tiếp"
-                                      >
-                                        <KeyRound className="w-4 h-4" />
-                                      </button>
+                                      <div className="flex items-center gap-1">
+                                        {pendingPasswordUid === u.uid ? (
+                                          <div className="flex items-center gap-1 animate-in fade-in slide-in-from-right-2 duration-300">
+                                            <input 
+                                              type="text"
+                                              value={newPasswordInput}
+                                              onChange={(e) => setNewPasswordInput(e.target.value)}
+                                              placeholder="Mật khẩu mới"
+                                              className="px-2 py-1 bg-white border border-slate-200 rounded-lg text-[10px] w-24 focus:ring-1 focus:ring-indigo-500 outline-none"
+                                              autoFocus
+                                            />
+                                            <button 
+                                              onClick={() => adminChangeUserPassword(u.uid, u.email)}
+                                              className="p-1 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-sm"
+                                              title="Xác nhận đổi mật khẩu"
+                                            >
+                                              <CheckCircle2 className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button 
+                                              onClick={() => {
+                                                setPendingPasswordUid(null);
+                                                setNewPasswordInput('');
+                                              }}
+                                              className="p-1 bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 transition-colors"
+                                              title="Hủy"
+                                            >
+                                              <ChevronLeft className="w-3.5 h-3.5" />
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <>
+                                            <button 
+                                              onClick={() => sendAdminPasswordResetEmail(u.email)}
+                                              className="p-2 hover:bg-indigo-50 text-indigo-600 rounded-lg transition-colors"
+                                              title="Gửi email đặt lại mật khẩu"
+                                            >
+                                              <Mail className="w-4 h-4" />
+                                            </button>
+                                            <button 
+                                              onClick={() => {
+                                                setPendingPasswordUid(u.uid);
+                                                setNewPasswordInput('');
+                                              }}
+                                              className="p-2 hover:bg-amber-50 text-amber-600 rounded-lg transition-colors"
+                                              title="Đổi mật khẩu trực tiếp"
+                                            >
+                                              <KeyRound className="w-4 h-4" />
+                                            </button>
+                                          </>
+                                        )}
+                                      </div>
                                       <button 
                                         onClick={() => updateUserRole(u.uid, u.email, u.role === 'admin' ? 'user' : 'admin')}
                                         className={cn(
