@@ -1218,6 +1218,10 @@ export default function App() {
       
       setAllUsers(fetchedUsers);
       console.log(`[MediTrans AI] Directly fetched ${fetchedUsers.length} users from Firestore.`);
+      
+      // Stop here if successful to avoid redundant REST calls that might 403
+      setIsFetchingUsers(false);
+      return;
     } catch (e: any) {
       console.warn("Direct Firestore fetch failed, will try backend fallback:", e.message);
       firestoreError = e;
