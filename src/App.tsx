@@ -739,7 +739,7 @@ export default function App() {
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
-          const vService = new GeminiService(vKey.value, "gemini-1.5-flash");
+          const vService = new GeminiService(vKey.value, "gemini-3-flash-preview");
           const vRes = await vService.checkAvailableKeys();
           const isActive = vRes.manualKey;
           
@@ -2702,7 +2702,7 @@ export default function App() {
     // Use selected vault key as primary if available
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
-    translationService.current = new GeminiService(allKeys, "gemini-1.5-flash");
+    translationService.current = new GeminiService(allKeys, "gemini-3-flash-preview");
 
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
@@ -3878,7 +3878,7 @@ export default function App() {
                         <Zap className={cn("w-3 h-3", serviceStatus.activeKeys > 0 ? "text-amber-500 animate-pulse" : "text-slate-400")} />
                         <div className="flex flex-col">
                           <span className="text-[8px] leading-none font-black uppercase tracking-tight text-indigo-700 mb-0.5">
-                            {serviceStatus.model.replace('gemini-1.5-', '')}
+                            {serviceStatus.model.toLowerCase().includes('flash') ? "Gemini Flash" : "Gemini Pro"}
                           </span>
                           <div className="flex items-center gap-1">
                             <span className="text-[7px] font-bold text-indigo-400 leading-none">
@@ -4326,12 +4326,12 @@ export default function App() {
                 </div>
                 <ul className="space-y-1.5">
                   <li className="text-[11px] text-amber-700 leading-relaxed flex justify-between">
-                    <span>• Gemini 1.5 Flash:</span>
-                    <span className="font-bold">1,500 yêu cầu/ngày</span>
+                    <span>• Gemini Flash (3.0):</span>
+                    <span className="font-bold">RPM: 15 / RPD: 1500+</span>
                   </li>
                   <li className="text-[11px] text-amber-700 leading-relaxed flex justify-between">
-                    <span>• Gemini 1.5 Pro:</span>
-                    <span className="font-bold">50 yêu cầu/ngày</span>
+                    <span>• Gemini Pro (3.1):</span>
+                    <span className="font-bold">RPM: 2 / RPD: 50+</span>
                   </li>
                 </ul>
                 <p className="mt-2 pt-2 border-t border-amber-200 text-[10px] text-amber-600 italic leading-tight">

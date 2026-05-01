@@ -8,7 +8,7 @@ export class GeminiService implements TranslationService {
   private static globalKeyLastUsed: Map<string, number> = new Map();
   private static lastSuccessfulKey: string | null = null;
 
-  constructor(apiKeys?: string | string[], modelName: string = "gemini-1.5-flash") {
+  constructor(apiKeys?: string | string[], modelName: string = "gemini-3-flash-preview") {
     this.modelName = modelName;
     
     if (Array.isArray(apiKeys)) {
