@@ -8,7 +8,7 @@ export class GeminiService implements TranslationService {
   private static globalKeyLastUsed: Map<string, number> = new Map();
   private static lastSuccessfulKey: string | null = null;
 
-  constructor(apiKeys?: string | string[], modelName: string = "gemini-3-flash-preview") {
+  constructor(apiKeys?: string | string[], modelName: string = "gemini-1.5-flash") {
     this.modelName = modelName;
     
     if (Array.isArray(apiKeys)) {
@@ -133,7 +133,8 @@ export class GeminiService implements TranslationService {
   }
 
   async *translateMedicalPageStream(options: TranslationOptions): AsyncGenerator<string> {
-    const { imageBuffer, pageNumber, signal } = options;
+    const { imageBuffer, pageNumber, signal, model } = options;
+    const requestModel = model || this.modelName;
     
     if (signal?.aborted) {
       throw new Error("Translation aborted");
@@ -160,7 +161,7 @@ export class GeminiService implements TranslationService {
 
       try {
         const response = await ai.models.generateContentStream({
-          model: this.modelName,
+          model: requestModel,
           contents: [
             {
               parts: [
@@ -236,7 +237,8 @@ export class GeminiService implements TranslationService {
   }
 
   async translateMedicalPage(options: TranslationOptions): Promise<string> {
-    const { imageBuffer, pageNumber, signal } = options;
+    const { imageBuffer, pageNumber, signal, model } = options;
+    const requestModel = model || this.modelName;
     if (signal?.aborted) throw new Error("Translation aborted");
 
     const MAX_RETRIES = 5;
@@ -256,7 +258,7 @@ export class GeminiService implements TranslationService {
 
       try {
         const response = await ai.models.generateContent({
-          model: this.modelName,
+          model: requestModel,
           contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] } }] }],
           config: { systemInstruction, temperature: 0 }
         });

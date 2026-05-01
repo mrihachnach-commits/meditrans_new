@@ -253,10 +253,10 @@ export default function App() {
   useEffect(() => {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
-  const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>('gemini-flash');
+  const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>('gemini-flash-lite-latest');
 
   useEffect(() => {
-    localStorage.setItem('mediTrans_selectedEngine', 'gemini-flash');
+    localStorage.setItem('mediTrans_selectedEngine', 'gemini-flash-lite-latest');
   }, []);
   
   const [engineKeys, setEngineKeys] = useState<Record<TranslationEngine, string>>(() => {
@@ -264,14 +264,20 @@ export default function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        return { 'gemini-flash': parsed['gemini-flash'] || '' };
+        return { 
+          'gemini-3-flash-preview': parsed['gemini-3-flash-preview'] || parsed['gemini-1.5-flash'] || parsed['gemini-flash'] || '',
+          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-1.5-flash-lite'] || '',
+          'gemini-2.0-flash-exp': parsed['gemini-2.0-flash-exp'] || ''
+        };
       } catch (e) {
         console.error("Failed to parse engine keys:", e);
       }
     }
     
     return {
-      'gemini-flash': ''
+      'gemini-3-flash-preview': '',
+      'gemini-flash-lite-latest': '',
+      'gemini-2.0-flash-exp': ''
     };
   });
   const [showSettings, setShowSettings] = useState(false);
@@ -739,7 +745,7 @@ export default function App() {
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
-          const vService = new GeminiService(vKey.value, "gemini-3-flash-preview");
+          const vService = new GeminiService(vKey.value, "gemini-1.5-flash");
           const vRes = await vService.checkAvailableKeys();
           const isActive = vRes.manualKey;
           
@@ -821,13 +827,15 @@ export default function App() {
           const userRef = doc(db, 'users', currentUser.uid);
           const userSnap = await getDoc(userRef);
           
-          // CRITICAL: Always check if this specific email should be admin
-          const isAdminEmail = currentUser.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
-                               currentUser.email?.toLowerCase() === "mrihachnach@gmail.com" || 
-                               currentUser.email?.toLowerCase() === "admin@gmail.com" || 
-                               currentUser.email?.toLowerCase() === "hoctap853@gmail.com";
+          // CRITICAL: Always check if this specific email or UID should be admin
+          const isAdminUser = currentUser.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
+                              currentUser.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
+                              currentUser.email?.toLowerCase() === "mrihachnach@gmail.com";
+          
+          console.log(`[Auth] User logged in: ${currentUser.email} (UID: ${currentUser.uid}). Admin check: ${isAdminUser}`);
           
           if (!userSnap.exists()) {
+            console.log(`[Auth] Creating new user profile for ${currentUser.email}`);
             try {
               await setDoc(userRef, {
                 uid: currentUser.uid,
@@ -835,18 +843,20 @@ export default function App() {
                 displayName: currentUser.displayName,
                 photoURL: currentUser.photoURL,
                 createdAt: serverTimestamp(),
-                role: isAdminEmail ? 'admin' : 'user',
+                role: isAdminUser ? 'admin' : 'user',
                 isBlocked: false
               }, { merge: true });
             } catch (writeError: any) {
-              handleFirestoreError(writeError, OperationType.CREATE, `users/${currentUser.uid}`);
+              console.error(`[Auth] Failed to create user profile:`, writeError);
+              // We'll still set the local role for UI purposes
             }
-            setUserRole(isAdminEmail ? 'admin' : 'user');
+            setUserRole(isAdminUser ? 'admin' : 'user');
           } else {
             const data = userSnap.data();
+            console.log(`[Auth] Existing user profile found. DB Role: ${data?.role}`);
             
             // Check if user is blocked
-            if (data?.isBlocked && !isAdminEmail) {
+            if (data?.isBlocked && !isAdminUser) {
               console.warn("User is blocked, logging out...");
               showToast("Tài khoản của bạn đã bị khóa bởi quản trị viên.", 'error');
               await signOut(auth);
@@ -856,34 +866,36 @@ export default function App() {
             }
 
             let currentRole = data?.role || 'user';
-            // If it's an admin email but role is not admin, update it
-            if (isAdminEmail && currentRole !== 'admin') {
+            // If it's an admin user but role is not admin in DB, update it
+            if (isAdminUser && currentRole !== 'admin') {
+              console.log(`[Auth] Upgrading user ${currentUser.email} to admin role in DB`);
               try {
                 await updateDoc(userRef, { role: 'admin' });
               } catch (updateError: any) {
-                handleFirestoreError(updateError, OperationType.UPDATE, `users/${currentUser.uid}`);
+                console.error(`[Auth] Failed to update role to admin:`, updateError);
               }
               setUserRole('admin');
             } else {
-              setUserRole(currentRole);
+              setUserRole(isAdminUser ? 'admin' : currentRole);
             }
           }
         } catch (error: any) {
           console.error("Error fetching user data from Firestore:", error);
           
           // Fallback if Firestore is completely blocked
-          const isAdminEmail = currentUser.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
-                               currentUser.email?.toLowerCase() === "mrihachnach@gmail.com" || 
-                               currentUser.email?.toLowerCase() === "admin@gmail.com" || 
-                               currentUser.email?.toLowerCase() === "hoctap853@gmail.com";
-          if (isAdminEmail) {
+          const isAdminUser = currentUser.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
+                              currentUser.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
+                              currentUser.email?.toLowerCase() === "mrihachnach@gmail.com";
+          
+          console.log(`[Auth] Firestore fallback triggered. Forcing admin: ${isAdminUser}`);
+          if (isAdminUser) {
             setUserRole('admin');
           } else {
             setUserRole('user');
           }
           
           // Only show error if it's not a common permission issue during setup
-          if (!error.message?.includes('permission-denied')) {
+          if (!error.message?.includes('permission-denied') && !error.message?.includes('insufficient permissions')) {
             handleFirestoreError(error, OperationType.WRITE, path);
           }
         }
@@ -906,12 +918,11 @@ export default function App() {
         const data = snap.data();
         
         // CRITICAL: Admins are immune to blocking to prevent accidental lockout
-        const isAdminEmail = user.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
-                             user.email?.toLowerCase() === "mrihachnach@gmail.com" || 
-                             user.email?.toLowerCase() === "admin@gmail.com" || 
-                             user.email?.toLowerCase() === "hoctap853@gmail.com";
+        const isAdminUser = user.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
+                            user.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
+                            user.email?.toLowerCase() === "mrihachnach@gmail.com";
 
-        if (data?.isBlocked && !isAdminEmail) {
+        if (data?.isBlocked && !isAdminUser) {
           console.warn("User has been blocked remotely. Logging out...");
           showToast("Tài khoản của bạn đã bị khóa bởi quản trị viên.", 'error');
           await signOut(auth);
@@ -2194,7 +2205,7 @@ export default function App() {
     }
   }, [currentPage]);
 
-  const translateCurrentPage = useCallback(async (pageNumber?: number, force = false) => {
+  const translateCurrentPage = useCallback(async (pageNumber?: number, force = false, engine?: TranslationEngine) => {
     const targetPage = pageNumber ?? currentPage;
     const currentFileId = fileIdRef.current;
     
@@ -2233,7 +2244,7 @@ export default function App() {
       setTimeout(() => {
         if (currentPageRef.current === targetPage) {
           translatingPagesRef.current.delete(targetPage);
-          translateCurrentPage(targetPage, force);
+          translateCurrentPage(targetPage, force, engine);
         }
       }, 100);
       return;
@@ -2276,7 +2287,12 @@ export default function App() {
         throw new Error("Không thể chụp ảnh trang.");
       }
 
-      const stream = translationService.current.translateMedicalPageStream({ imageBuffer, pageNumber: targetPage, signal });
+      const stream = translationService.current.translateMedicalPageStream({ 
+        imageBuffer, 
+        pageNumber: targetPage, 
+        signal,
+        model: engine
+      });
       let fullContent = "";
       let lastUpdateTime = Date.now();
 
@@ -2477,7 +2493,7 @@ export default function App() {
     }
   }, [currentPage, pdfDoc, autoTranslate, numPages, preTranslatePage, autoTranslateLookAhead]);
 
-  const startBulkTranslation = async () => {
+  const startBulkTranslation = async (engine?: TranslationEngine) => {
     if (!pdfDoc || numPages <= 0) return;
     
     // If already translating, clicking toggles cancellation
@@ -2518,7 +2534,7 @@ export default function App() {
     // Concurrency depends on the number of keys. 
     const concurrentLimit = Math.min(15, userKeys.length > 5 ? Math.floor(userKeys.length * 0.5) : 5);
     
-    console.log(`[MediTrans] Bulk Translation: ${pagesToTranslate.length} more pages. Already Done: ${initialCompletedCount}`);
+    console.log(`[MediTrans] Bulk Translation: ${pagesToTranslate.length} more pages. Model: ${engine || 'default'}`);
 
     let allKeysExhausted = false;
 
@@ -2531,43 +2547,21 @@ export default function App() {
         if (bulkCancelRef.current || allKeysExhausted) return;
         
         try {
-          await preTranslatePage(pageNum);
+          await translateCurrentPage(pageNum, false, engine);
           newlyCompletedCount++;
           // Progress of the current operation
           setBulkTranslateProgress(Math.floor((newlyCompletedCount / totalToTranslate) * 100));
-        } catch (err: any) {
-          console.error(`Bulk translate failed for page ${pageNum}:`, err);
-          
-          const isQuotaError = err.message?.includes('API Key') || 
-                              err.message?.includes('hạn mức') || 
-                              err.message?.includes('429') ||
-                              err.message?.includes('quota');
-                              
-          if (isQuotaError) allKeysExhausted = true;
+        } catch (e) {
+          console.error(`Bulk translation failed for page ${pageNum}:`, e);
         }
       }));
-      
-      if (!allKeysExhausted) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
     }
 
-    const finalTotalCompleted = initialCompletedCount + newlyCompletedCount;
-    const finalPercentage = Math.floor((finalTotalCompleted / numPages) * 100);
-
-    if (allKeysExhausted) {
-      showToast(`Dừng dịch do hết hạn mức. Đã hoàn thành ${finalPercentage}% (${finalTotalCompleted}/${numPages} trang).`, 'error');
-      setBulkTranslateStatus('failed');
-    } else if (bulkCancelRef.current) {
-      showToast(`Đã dừng. Hiện có ${finalPercentage}% (${finalTotalCompleted}/${numPages} trang) đã dịch.`, 'info');
-      setBulkTranslateStatus('idle');
-    } else {
-      showToast(`Đã hoàn tất dịch 100% (${numPages}/${numPages} trang).`, 'success');
+    setIsBulkTranslating(false);
+    if (!bulkCancelRef.current) {
       setBulkTranslateStatus('completed');
-      setBulkTranslateProgress(100);
+      showToast(`Đã hoàn thành dịch ${newlyCompletedCount} trang.`, 'success');
     }
-
-    setTimeout(() => setIsBulkTranslating(false), 5000);
   };
 
   useEffect(() => {
@@ -2702,7 +2696,7 @@ export default function App() {
     // Use selected vault key as primary if available
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
-    translationService.current = new GeminiService(allKeys, "gemini-3-flash-preview");
+    translationService.current = new GeminiService(allKeys, "gemini-1.5-flash");
 
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
@@ -3771,28 +3765,50 @@ export default function App() {
                   <div className="h-4 w-px bg-slate-200 hidden xs:block" />
 
                   {translationPanelMode === 'translation' ? (
-                    <button 
-                      onClick={() => translateCurrentPage(currentPage, true)}
-                      disabled={isTranslating || isRendering}
-                      className={cn(
-                        "px-3 md:px-5 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 md:gap-2 shadow-lg",
-                        (isTranslating || isRendering)
-                          ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
-                          : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 active:scale-95"
-                      )}
-                    >
-                      {isTranslating || isRendering ? (
-                        <>
-                          <Loader2 className="w-3 h-3 md:w-3.5 md:h-3.5 animate-spin" />
-                          <span>{isRendering ? 'Vẽ...' : 'Dịch...'}</span>
-                        </>
-                      ) : (
-                        <>
-                          <RefreshCcw className="w-3 h-3 md:w-3.5 md:h-3.5" />
-                          <span>{translations[currentPage] ? 'Dịch lại' : 'Dịch trang'}</span>
-                        </>
-                      )}
-                    </button>
+                    <div className="flex items-center gap-1.5 md:gap-2">
+                      <button 
+                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
+                        disabled={isTranslating || isRendering}
+                        className={cn(
+                          "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-tight transition-all flex items-center gap-1 border shadow-sm",
+                          (isTranslating || isRendering)
+                            ? "bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed" 
+                            : "bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100 hover:shadow active:scale-95"
+                        )}
+                        title="Dịch thường bằng Gemini Flash-Lite"
+                      >
+                        {isTranslating || isRendering ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Zap className="w-3 h-3" />
+                        )}
+                        <span>{translations[currentPage] ? 'Dịch lại' : 'Dịch thường'}</span>
+                      </button>
+
+                      <button 
+                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-3-flash-preview')}
+                        disabled={isTranslating || isRendering}
+                        className={cn(
+                          "px-3 md:px-4 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1.5 md:gap-2 shadow-lg",
+                          (isTranslating || isRendering)
+                            ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
+                            : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 active:scale-95"
+                        )}
+                        title="Dịch chất lượng bằng Gemini 3 Flash"
+                      >
+                        {isTranslating || isRendering ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            <span>{isRendering ? 'Vẽ...' : 'Đang dịch...'}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3 h-3 md:w-3.5 md:h-3.5" />
+                            <span>{translations[currentPage] ? 'Dịch lại chất lượng' : 'Dịch chất lượng'}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   ) : (
                     <div className="flex items-center gap-1.5 bg-slate-100/50 p-1 rounded-2xl border border-slate-200/50">
                       <button 
@@ -4770,19 +4786,28 @@ export default function App() {
                           <span className="block font-normal mt-1 text-amber-700">Hành động này sẽ tiêu tốn hạn mức API của bạn.</span>
                         </p>
                       </div>
-                      <div className="flex gap-2">
+                      <div className="flex flex-col gap-2">
                         <button
                           onClick={() => {
                             setShowBulkConfirm(false);
-                            startBulkTranslation();
+                            startBulkTranslation('gemini-flash-lite-latest');
                           }}
-                          className="flex-1 py-2.5 bg-indigo-600 text-white rounded-lg text-[10px] font-bold uppercase hover:bg-indigo-700 shadow-sm"
+                          className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-lg text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm"
                         >
-                          Bắt đầu dịch
+                          Dịch toàn bộ (Tốc độ)
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowBulkConfirm(false);
+                            startBulkTranslation('gemini-3-flash-preview');
+                          }}
+                          className="w-full py-2.5 bg-indigo-600 text-white rounded-lg text-[10px] font-bold uppercase hover:bg-indigo-700 shadow-sm"
+                        >
+                          Dịch toàn bộ (Chất lượng - Gemini 3)
                         </button>
                         <button
                           onClick={() => setShowBulkConfirm(false)}
-                          className="flex-1 py-2.5 bg-white border border-slate-200 text-slate-500 rounded-lg text-[10px] font-bold uppercase hover:bg-slate-50"
+                          className="w-full py-2 bg-slate-100 text-slate-500 rounded-lg text-[9px] font-bold uppercase hover:bg-slate-200 mt-1"
                         >
                           Hủy
                         </button>
@@ -4871,7 +4896,7 @@ export default function App() {
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">
-                      API Key cho Gemini 3 Flash
+                      API Keys cho Gemini AI
                     </label>
                     {currentKeyRef.current?.split(',').length! > 1 && (
                       <div className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-50 text-emerald-600 rounded-full border border-emerald-100 animate-pulse">

@@ -33,23 +33,18 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      // Direct email check from token
-      let email = request.auth.token.get('email', '').lower();
-      
-      return isSignedIn() && (
-        email == "hoanghiep1296@gmail.com" || 
-        email == "mrihachnach@gmail.com" || 
-        email == "admin@gmail.com" || 
-        email == "hoctap853@gmail.com" ||
+      return request.auth != null && (
         request.auth.uid == "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
+        (request.auth.token.email != null && request.auth.token.email.lower() == "hoanghiep1296@gmail.com") ||
+        (request.auth.token.email != null && request.auth.token.email.lower() == "mrihachnach@gmail.com") ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
     function isSharedWithMe(data) {
-      return isSignedIn() && request.auth.token.email != null && (
-        data.get('sharedWith', []).hasAny([request.auth.token.email]) || 
-        data.get('sharedWith', []).hasAny([request.auth.token.email.lower()])
+      let email = (request.auth != null && 'email' in request.auth.token && request.auth.token.email is string) ? request.auth.token.email.lower() : '';
+      return request.auth != null && email != "" && (
+        data.get('sharedWith', []).hasAny([email])
       );
     }
 
@@ -58,8 +53,9 @@ service cloud.firestore {
     // ===============================================================
 
     function isValidUser(data) {
+      let userEmail = (request.auth != null && 'email' in request.auth.token && request.auth.token.email is string) ? request.auth.token.email.lower() : '';
       // Invariant: If not admin, you can only set your own UID/Email
-      return (isAdmin() || (data.uid == request.auth.uid && (data.get('email', null) == null || data.email == request.auth.token.email))) &&
+      return (isAdmin() || (data.uid == request.auth.uid && (data.get('email', null) == null || data.email.lower() == userEmail))) &&
              (data.get('role', 'user') in ['user', 'admin']) &&
              (data.get('displayName', null) == null || (data.displayName is string && data.displayName.size() <= 100)) &&
              (data.get('photoURL', null) == null || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
@@ -95,7 +91,7 @@ service cloud.firestore {
              data.ownerId is string &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
              data.value is string && data.value.size() > 0 && data.value.size() <= 4096 &&
-             data.engine in ['gemini', 'openai', 'anthropic', 'medical-specialized', 'gemini-flash'] &&
+             data.engine in ['gemini', 'openai', 'anthropic', 'medical-specialized', 'gemini-3-flash-preview', 'gemini-flash-lite-latest', 'gemini-flash-latest'] &&
              (data.createdAt is timestamp || data.createdAt is string) &&
              (data.get('sharedWith', []) is list) &&
              (data.get('status', 'active') in ['active', 'error']);
@@ -172,7 +168,7 @@ service cloud.firestore {
     }
 
     match /blacklist/{email} {
-      allow get: if isSignedIn() && (request.auth.token.email == email || isAdmin());
+      allow get: if isSignedIn() && (('email' in request.auth.token && request.auth.token.email == email) || isAdmin());
       allow list: if isAdmin();
       allow create, update: if isAdmin() && isValidBlacklist(incoming());
       allow delete: if isAdmin();

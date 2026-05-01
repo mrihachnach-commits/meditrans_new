@@ -171,6 +171,7 @@ const firestoreRest = {
     
     if (!res.ok) {
       console.error(`[Firestore REST] List failed with status ${resStatus}. Method: GET, URL: ${url}`);
+      console.error(`[Firestore REST] Token: ${idToken ? idToken.substring(0, 10) + "..." : "NONE"}`);
       console.error(`[Firestore REST] Response body:`, resText);
       let errorMessage = `Firestore REST error (Status ${resStatus})`;
       try {
@@ -657,7 +658,8 @@ async function startServer() {
           diagnostic: {
             email: req.user?.email,
             uid: req.user?.uid,
-            projectId: firebaseConfig.projectId
+            projectId: firebaseConfig.projectId,
+            restError: restErr.message
           }
         });
       }
