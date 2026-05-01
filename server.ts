@@ -64,22 +64,47 @@ if (firebaseConfig.projectId) {
 let adminApp: any = null;
 function getAdminApp() {
   if (adminApp) return adminApp;
-  if (firebaseConfig && firebaseConfig.projectId && !firebaseConfig.error) {
+  
+  // Priority 1: Environment Variables (Required for Vercel/Production)
+  const projectIdEnv = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY;
+  
+  // Component fallback: project ID from config
+  const projectId = projectIdEnv || firebaseConfig.projectId;
+
+  if (projectId) {
     try {
       if (admin.apps.length === 0) {
-        adminApp = admin.initializeApp({ 
-          projectId: firebaseConfig.projectId 
-        });
-        console.log(`[Firebase Admin] Lazy-initialized for project: ${firebaseConfig.projectId}`);
+        if (clientEmail && privateKey) {
+          // Robust initialization with Service Account
+          adminApp = admin.initializeApp({
+            credential: admin.credential.cert({
+              projectId,
+              clientEmail,
+              privateKey: privateKey.replace(/\\n/g, '\n'),
+            }),
+            projectId
+          });
+          console.log(`[Firebase Admin] Initialized with Service Account for project: ${projectId}`);
+        } else {
+          // Fallback to project ID only (limited functionality)
+          adminApp = admin.initializeApp({ 
+            projectId: projectId 
+          });
+          console.warn(`[Firebase Admin] Initialized with Project ID ONLY (No Service Account) for: ${projectId}. Administrative tasks may fail.`);
+        }
       } else {
         adminApp = admin.apps[0];
       }
       return adminApp;
     } catch (e: any) {
-      console.error("[Firebase Admin] Lazy-initialization failed:", e.message);
+      console.error("[Firebase Admin] Initialization failed:", e.message);
       return null;
     }
   }
+  
+  console.error("[Firebase Admin] Cannot initialize: No Project ID found in environment or config.");
   return null;
 }
 
@@ -382,6 +407,7 @@ async function startServer() {
   // Diagnostic Endpoint
   app.get("/api/admin/diagnostics", checkAdmin, async (req: CustomRequest, res) => {
     try {
+      console.log("[Diagnostics] Starting health check...");
       const idToken = req.idToken;
       const results: any = {
         projectId: firebaseConfig.projectId,
@@ -394,11 +420,13 @@ async function startServer() {
         },
         auth: { status: "unknown" },
         firestore: { status: "unknown" },
+        adminSdk: { status: "unknown" },
         env: {
           GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
           NODE_ENV: process.env.NODE_ENV,
           VERCEL: process.env.VERCEL || "0",
-          CWD: process.cwd()
+          CWD: process.cwd(),
+          HAS_ADMIN_KEYS: !!(process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY)
         }
       };
 
@@ -406,8 +434,23 @@ async function startServer() {
         results.configError = firebaseConfig.error;
       }
 
+      // 1. Test Admin SDK initialization
       try {
-        // Test Auth REST API
+        const app = getAdminApp();
+        if (app) {
+          results.adminSdk.status = "ok";
+          results.adminSdk.name = app.name;
+        } else {
+          results.adminSdk.status = "error";
+          results.adminSdk.message = "Failed to initialize Admin SDK. Check environment variables.";
+        }
+      } catch (e: any) {
+        results.adminSdk.status = "error";
+        results.adminSdk.message = e.message;
+      }
+
+      // 2. Test Auth REST API
+      try {
         const verifyRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -435,8 +478,8 @@ async function startServer() {
         results.auth.message = e.message;
       }
 
+      // 3. Test Firestore REST API
       try {
-        // Test Firestore REST API
         console.log(`[Diagnostic] Testing Firestore REST: ${firebaseConfig.projectId}/${firebaseConfig.firestoreDatabaseId}`);
         await firestoreRest.getDoc("test_connection", "diagnostic", idToken);
         results.firestore.status = "ok";
@@ -448,10 +491,11 @@ async function startServer() {
 
       return res.json(results);
     } catch (err: any) {
-      console.error("[Diagnostics] Failed:", err);
+      console.error("[Diagnostics] Critical Failure:", err);
       return res.status(500).json({ 
         error: "Diagnostics failed", 
-        details: err.message || String(err) 
+        message: err.message || String(err),
+        stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
       });
     }
   });
@@ -515,6 +559,7 @@ async function startServer() {
   // Admin: Create User
   app.post("/api/admin/create-user", checkAdmin, async (req: CustomRequest, res) => {
     const { email, password, displayName, role } = req.body;
+    console.log(`[Admin] Create user request: email=${email}, role=${role}`);
     
     if (!email || !password) {
       return res.status(400).json({ error: "Email và mật khẩu là bắt buộc" });
@@ -527,8 +572,11 @@ async function startServer() {
       // 1. Attempt to create user in Firebase Auth via Admin SDK first
       try {
         const currentAdminApp = getAdminApp();
-        if (!currentAdminApp) throw new Error("Admin SDK not initialized");
+        if (!currentAdminApp) {
+          throw new Error("Không thể khởi tạo Firebase Admin SDK. Vui lòng kiểm tra biến môi trường FIREBASE_PRIVATE_KEY.");
+        }
         
+        console.log("[Admin] Attempting user creation via Admin SDK...");
         const userRecord = await admin.auth(currentAdminApp).createUser({
           email,
           password,
@@ -538,11 +586,12 @@ async function startServer() {
         uid = userRecord.uid;
         console.log(`[Admin] Successfully created user via Admin SDK: ${uid}`);
       } catch (adminError: any) {
-        console.warn("[Admin] Admin SDK user creation failed, trying REST signup:", adminError.message);
+        console.error("[Admin] Admin SDK user creation failed:", adminError.message);
         
         // 2. Fallback to Identity Toolkit REST API
+        console.log("[Admin] Falling back to REST signup API...");
         authMethod = "rest-signup";
-        if (!firebaseConfig.apiKey) throw new Error("Thiếu Firebase API Key.");
+        if (!firebaseConfig.apiKey) throw new Error("Thiếu Firebase API Key trong cấu hình.");
 
         const signUpResponse = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`, {
           method: 'POST',
@@ -558,10 +607,12 @@ async function startServer() {
         const signUpData: any = await signUpResponse.json();
         if (!signUpResponse.ok) {
           const msg = signUpData.error?.message;
+          console.error("[Admin] REST signup failed:", msg);
           if (msg === 'EMAIL_EXISTS') throw new Error("Email này đã được sử dụng.");
-          throw new Error(msg || "Lỗi khi tạo tài khoản");
+          throw new Error(msg || "Lỗi khi tạo tài khoản thông qua REST API fallback.");
         }
         uid = signUpData.localId;
+        console.log(`[Admin] Successfully created user via REST fallback: ${uid}`);
       }
       
       // 3. Create user document in Firestore
@@ -578,10 +629,12 @@ async function startServer() {
       const adminToken = req.idToken;
 
       try {
+        console.log(`[Admin] Syncing user data to Firestore for UID: ${uid}`);
         // Try REST first using the admin's token
         if (adminToken) {
           await firestoreRest.setDoc("users", uid, userData, adminToken);
           dbSuccess = true;
+          console.log("[Admin] Firestore update success via REST API");
         } else {
           // Try Admin SDK fallback
           const currentAdminApp = getAdminApp();
@@ -589,10 +642,11 @@ async function startServer() {
             const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
             await db.collection("users").doc(uid).set(userData);
             dbSuccess = true;
+            console.log("[Admin] Firestore update success via Admin SDK");
           }
         }
       } catch (dbError: any) {
-        console.warn("[Admin] Firestore update failed during creation:", dbError.message);
+        console.error("[Admin] Firestore update failed during creation:", dbError.message);
       }
       
       return res.json({ 
@@ -603,14 +657,19 @@ async function startServer() {
         userData
       });
     } catch (error: any) {
-      console.error("[Admin] Error creating user:", error);
-      res.status(500).json({ error: error.message || "Lỗi không xác định khi tạo người dùng" });
+      console.error("[Admin] ERROR creating user:", error);
+      res.status(500).json({ 
+        error: "Thất bại khi tạo người dùng", 
+        message: error.message || "Lỗi không xác định",
+        details: error.code || undefined
+      });
     }
   });
 
   // Admin: List Users (Source from Firestore only to avoid project mismatch)
   app.get("/api/admin/list-users", checkAdmin, async (req: any, res) => {
     try {
+      console.log("[Admin] Requested user list");
       // 1. Try Admin SDK first (fastest, bypasses rules if configured)
       try {
         const currentAdminApp = getAdminApp();
@@ -622,6 +681,7 @@ async function startServer() {
             ...(doc.data() as any)
           }));
           
+          console.log(`[Admin] Successfully listed ${users.length} users via Admin SDK`);
           return res.json({ 
             success: true, 
             users,
@@ -632,7 +692,7 @@ async function startServer() {
         }
       } catch (adminError: any) {
         // Quiet fallback - only log info, not warn/error as this is common in this environment
-        console.log(`[Admin] Admin SDK list-users bypassed (Environment restriction). Falling back to REST API.`);
+        console.log(`[Admin] Admin SDK list-users bypassed (Environment restriction or missing key). Falling back to REST API.`);
       }
       
       // 2. Fallback to REST API using the admin's token
@@ -641,6 +701,7 @@ async function startServer() {
       if (!idToken) throw new Error("Missing auth token for fallback");
       
       try {
+        console.log("[Admin] Fetching user list via Firestore REST fallback...");
         const users = await firestoreRest.listDocs("users", idToken);
         return res.json({ 
           success: true, 
@@ -654,18 +715,21 @@ async function startServer() {
         console.error(`[Admin] Final REST list-users failed for ${req.user?.email}:`, restErr.message);
         return res.status(403).json({ 
           error: "Truy cập bị từ chối.",
+          message: restErr.message,
           details: "Bạn không có quyền quản trị hoặc project bị giới hạn truy cập REST API.",
           diagnostic: {
             email: req.user?.email,
             uid: req.user?.uid,
-            projectId: firebaseConfig.projectId,
-            restError: restErr.message
+            projectId: firebaseConfig.projectId
           }
         });
       }
     } catch (error: any) {
-      console.error("[Admin] List users final failure:", error.message);
-      return res.status(500).json({ error: "Không thể lấy danh sách người dùng: " + error.message });
+      console.error("[Admin] List users final failure:", error);
+      return res.status(500).json({ 
+        error: "Không thể lấy danh sách người dùng", 
+        message: error.message 
+      });
     }
   });
 
@@ -679,12 +743,13 @@ async function startServer() {
 
   // Admin: Delete User (Soft Delete + Firestore Cleanup)
   app.post("/api/admin/delete-user", checkAdmin, async (req: any, res) => {
-    const { uid, email } = req.body;
-    const idToken = req.idToken;
-    let authDeleted = false;
-    let authError = null;
-
     try {
+      const { uid, email } = req.body;
+      console.log(`[Admin] Delete user request: uid=${uid}, email=${email}`);
+      const idToken = req.idToken;
+      let authDeleted = false;
+      let authError = null;
+
       // 1. Attempt to delete from Firebase Authentication using Admin SDK
       try {
         const currentAdminApp = getAdminApp();
@@ -710,37 +775,45 @@ async function startServer() {
       }
 
       // 2. Delete Firestore document
-      const currentAdminApp = getAdminApp();
-      if (currentAdminApp) {
-        const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
-        await db.collection("users").doc(uid).delete();
-        
-        // 3. Add to blacklist to prevent re-registration or access if Auth delete failed
-        if (email) {
-          await db.collection("blacklist").doc(email.toLowerCase()).set({
-            email: email.toLowerCase(),
-            uid: uid,
-            reason: "Deleted by admin",
-            authDeleted,
-            createdAt: new Date().toISOString()
-          });
+      try {
+        const currentAdminApp = getAdminApp();
+        if (currentAdminApp) {
+          const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
+          await db.collection("users").doc(uid).delete();
+          console.log(`[Admin] Firestore document deleted via Admin SDK: ${uid}`);
+          
+          // 3. Add to blacklist to prevent re-registration or access if Auth delete failed
+          if (email) {
+            await db.collection("blacklist").doc(email.toLowerCase()).set({
+              email: email.toLowerCase(),
+              uid: uid,
+              reason: "Deleted by admin",
+              authDeleted,
+              createdAt: new Date().toISOString()
+            });
+            console.log(`[Admin] Blacklisted: ${email}`);
+          }
+        } else {
+          // Fallback to REST for deletion if possible
+          console.log("[Admin] Falling back to REST for Firestore deletion...");
+          const idToken = req.idToken;
+          await firestoreRest.deleteDoc("users", uid, idToken);
+          if (email) {
+            await firestoreRest.setDoc("blacklist", email.toLowerCase(), {
+              email: email.toLowerCase(),
+              uid: uid,
+              reason: "Deleted by admin",
+              authDeleted,
+              createdAt: new Date().toISOString()
+            }, idToken);
+          }
+          console.log(`[Admin] Firestore REST deletion success: ${uid}`);
         }
-      } else {
-        // Fallback to REST for deletion if possible
-        const idToken = req.headers.authorization.split("Bearer ")[1];
-        await firestoreRest.deleteDoc("users", uid, idToken);
-        if (email) {
-          await firestoreRest.setDoc("blacklist", email.toLowerCase(), {
-            email: email.toLowerCase(),
-            uid: uid,
-            reason: "Deleted by admin",
-            authDeleted,
-            createdAt: new Date().toISOString()
-          }, idToken);
-        }
+      } catch (dbErr: any) {
+        console.error(`[Admin] Firestore deletion failed: ${dbErr.message}`);
       }
       
-      res.json({ 
+      return res.json({ 
         success: true, 
         authDeleted,
         authError,
@@ -750,7 +823,10 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error("[Admin] Error in delete-user route:", error);
-      res.status(500).json({ error: error.message });
+      return res.status(500).json({ 
+        error: "Lỗi khi xóa người dùng", 
+        message: error.message 
+      });
     }
   });
 
