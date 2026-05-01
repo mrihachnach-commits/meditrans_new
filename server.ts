@@ -4,13 +4,38 @@ import { fileURLToPath } from "url";
 import admin from "firebase-admin";
 import { getFirestore as getAdminFirestore } from "firebase-admin/firestore";
 import fs from "fs";
-import firebaseConfigLocal from "./firebase-applet-config.json";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import axios from "axios";
+import FormData from "form-data";
+import multer from "multer";
 
 // Load firebase config
-let firebaseConfig: any = { ...firebaseConfigLocal };
+let firebaseConfig: any = {};
+try {
+  // Use a safer path resolution for Vercel
+  const configPath = path.resolve(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    const rawConfig = fs.readFileSync(configPath, "utf8");
+    firebaseConfig = JSON.parse(rawConfig);
+    console.log("[Config] Loaded from file system at", configPath);
+  } else {
+    // Try to find it in other locations
+    console.warn("[Config] firebase-applet-config.json not found at cwd, trying import fallback");
+    try {
+       // This handles the bundling if Vite included it
+       const configImport = await import("./firebase-applet-config.json", { 
+         assert: { type: "json" } 
+       }).catch(() => import("./firebase-applet-config.json"));
+       firebaseConfig = configImport.default || configImport;
+       console.log("[Config] Loaded via fallback import");
+    } catch (importErr) {
+       console.error("[Config] All loading methods failed");
+       firebaseConfig = { error: "Configuration missing" };
+    }
+  }
+} catch (err: any) {
+  console.error("[Config] Critical error during load:", err.message);
+  firebaseConfig = { error: err.message };
+}
 
 // Allow override from environment variable if provided
 if (process.env.FIREBASE_CONFIG_JSON) {
@@ -220,7 +245,7 @@ async function startServer() {
          throw new Error("Dịch vụ chưa được cấu hình đúng: Thiếu API Key.");
       }
 
-      // 1. Verify token using REST API (Always uses user's API Key and Project)
+      // 1. Verify token using REST API (Always works with client API Key)
       const verifyRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseConfig.apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -233,89 +258,69 @@ async function startServer() {
         verifyData = JSON.parse(text);
       } catch (e) {
         console.error("[Admin Check] Failed to parse verification response:", text);
-        throw new Error("Dịch vụ xác thực phản hồi không hợp lệ.");
+        return res.status(500).json({ error: "Dịch vụ xác thực phản hồi không hợp lệ." });
       }
       
       if (!verifyRes.ok || !verifyData.users || verifyData.users.length === 0) {
-        throw new Error(verifyData.error?.message || "Xác thực token thất bại.");
+        return res.status(401).json({ error: verifyData.error?.message || "Xác thực token thất bại." });
       }
 
       const decodedToken = verifyData.users[0];
-      decodedToken.uid = decodedToken.localId; // Map localId to uid for consistency
-      console.log(`[Admin Check] Verified user: ${decodedToken.email} (${decodedToken.uid})`);
-
-      // 2. Check Admin Status
+      decodedToken.uid = decodedToken.localId;
       const userEmail = (decodedToken.email || "").toLowerCase();
+      
+      // 2. Immediate Admin check for Primary Admins (NO DB REQUIRED)
       const isPrimaryAdmin = userEmail === "hoanghiep1296@gmail.com" || 
                              userEmail === "mrihachnach@gmail.com" || 
                              userEmail === "admin@gmail.com" ||
                              userEmail === "hoctap853@gmail.com";
 
-      console.log(`[Admin Check] Processing user: ${userEmail}, isPrimaryAdmin: ${isPrimaryAdmin}`);
+      if (isPrimaryAdmin) {
+        console.log(`[Admin Check] Primary admin verified: ${userEmail}`);
+        req.user = decodedToken;
+        return next();
+      }
 
+      // 3. Database Role Check for non-primary admins
       let userData: any = null;
-      try {
-        const currentAdminApp = getAdminApp();
-        // Only use Admin SDK for server-side checks if initialized
-        if (currentAdminApp) {
-          const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
-          const userDoc = await db.collection("users").doc(decodedToken.uid).get();
-          
-          if (userDoc.exists) {
-            userData = userDoc.data();
-            console.log(`[Admin Check] User document found via Admin SDK. Role: ${userData?.role}`);
-          }
-        }
-        
-        // Fallback or verify with REST if Admin SDK didn't provide role
-        if (!userData || !userData.role) {
-          try {
-            const restUser = await firestoreRest.getDoc("users", decodedToken.uid, idToken);
-            if (restUser.exists) {
-              userData = restUser.data;
-              console.log(`[Admin Check] User document found via REST. Role: ${userData?.role}`);
-            }
-          } catch (restErr: any) {
-            console.warn(`[Admin Check] REST Fetch failed: ${restErr.message}`);
-          }
-        }
-
-        if (!userData && !isPrimaryAdmin) {
-          console.log(`[Admin Check] No user document found for UID: ${decodedToken.uid}`);
-          return res.status(403).json({ error: "Tài khoản của bạn chưa được thiết lập hoặc đã bị xóa." });
-        }
-        
-        // Check blacklist/blocked status
-        if (userEmail) {
-          try {
-            const blacklistRes = await firestoreRest.getDoc("blacklist", userEmail, idToken);
-            if (blacklistRes.exists) {
-              console.log(`[Admin Check] User ${userEmail} is in blacklist.`);
-              return res.status(403).json({ error: "Tài khoản của bạn đã bị chặn truy cập." });
-            }
-          } catch (blkErr) {
-            console.warn("[Admin Check] Blacklist check failed:", blkErr);
-          }
-        }
-      } catch (dbError: any) {
-        console.error(`[Admin Check] Database check major error: ${dbError.message}`);
-        // primary admins continue
-        if (!isPrimaryAdmin) {
-          return res.status(500).json({ error: "Lỗi kiểm tra quyền hạn: " + dbError.message });
-        }
-      }
       
-      const isAdmin = userData?.role === "admin" || isPrimaryAdmin;
-
-      if (!isAdmin) {
-        console.log(`[Admin Check] Access denied for ${userEmail}. Not an admin.`);
-        return res.status(403).json({ error: "Forbidden: Admin access required" });
+      // Try REST first as it's more predictable on Vercel
+      try {
+        const restUser = await firestoreRest.getDoc("users", decodedToken.uid, idToken);
+        if (restUser.exists) {
+          userData = restUser.data;
+          console.log(`[Admin Check] User role from REST: ${userData?.role}`);
+        }
+      } catch (restErr: any) {
+        console.warn(`[Admin Check] REST Fetch failed: ${restErr.message}`);
+        
+        // Fallback to Admin SDK ONLY if REST failed
+        try {
+          const currentAdminApp = getAdminApp();
+          if (currentAdminApp) {
+            const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
+            const userDoc = await db.collection("users").doc(decodedToken.uid).get();
+            if (userDoc.exists) {
+              userData = userDoc.data();
+              console.log(`[Admin Check] User role from Admin SDK: ${userData?.role}`);
+            }
+          }
+        } catch (adminErr: any) {
+          console.error(`[Admin Check] Admin SDK Check failed: ${adminErr.message}`);
+        }
       }
-      req.user = decodedToken;
-      next();
+
+      if (userData?.role === "admin") {
+        req.user = decodedToken;
+        return next();
+      }
+
+      console.log(`[Admin Check] Access denied for ${userEmail}`);
+      return res.status(403).json({ error: "Tài khoản của bạn không có quyền truy cập quản trị." });
+
     } catch (error: any) {
-      console.error("Admin check failed:", error.message);
-      res.status(401).json({ error: `Invalid token: ${error.message}` });
+      console.error("Admin check critical failure:", error);
+      res.status(500).json({ error: "Lỗi hệ thống khi kiểm tra quyền: " + error.message });
     }
   };
 
@@ -384,12 +389,9 @@ async function startServer() {
     });
   });
 
-  // Proxy TinyVault Upload (Vercel-style proxy for local dev/Cloud Run)
+  // Proxy TinyVault Upload
   app.post("/api/tinyvault", async (req, res) => {
     try {
-      const { default: axios } = await import("axios");
-      const { default: FormData } = await import("form-data");
-      const { default: multer } = await import("multer");
       const upload = multer({ 
         storage: multer.memoryStorage(),
         limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
@@ -442,17 +444,13 @@ async function startServer() {
     }
 
     try {
-      // 1. Attempt to create user in Firebase Auth via Admin SDK first (More robust)
-      let uid: string;
-      let dbSuccess = false;
+      let uid: string = "";
       let authMethod = "admin-sdk";
 
+      // 1. Attempt to create user in Firebase Auth via Admin SDK first
       try {
-        // Only use admin SDK if it was initialized
         const currentAdminApp = getAdminApp();
-        if (!currentAdminApp) {
-          throw new Error("Admin SDK not initialized");
-        }
+        if (!currentAdminApp) throw new Error("Admin SDK not initialized");
         
         const userRecord = await admin.auth(currentAdminApp).createUser({
           email,
@@ -463,14 +461,11 @@ async function startServer() {
         uid = userRecord.uid;
         console.log(`[Admin] Successfully created user via Admin SDK: ${uid}`);
       } catch (adminError: any) {
-        console.warn("[Admin] Admin SDK user creation failed, falling back to REST API:", adminError.message);
-        authMethod = "rest-api";
+        console.warn("[Admin] Admin SDK user creation failed, trying REST signup:", adminError.message);
         
-        // 2. Fallback to Firebase Auth via REST API using API Key
-        // This works because it's a "Public" signup style call
-        if (!firebaseConfig.apiKey) {
-          throw new Error("Thiếu Firebase API Key để thực hiện hành động này.");
-        }
+        // 2. Fallback to Identity Toolkit REST API
+        authMethod = "rest-signup";
+        if (!firebaseConfig.apiKey) throw new Error("Thiếu Firebase API Key.");
 
         const signUpResponse = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`, {
           method: 'POST',
@@ -484,93 +479,63 @@ async function startServer() {
         });
 
         const signUpData: any = await signUpResponse.json();
-        
         if (!signUpResponse.ok) {
-          const errorCode = signUpData.error?.message;
-          if (errorCode === 'EMAIL_EXISTS') throw new Error("Email này đã được sử dụng.");
-          if (errorCode?.includes('WEAK_PASSWORD')) throw new Error("Mật khẩu quá yếu.");
-          if (errorCode?.includes('OPERATION_NOT_ALLOWED')) throw new Error("Cung cấp email/mật khẩu chưa được bật trong Firebase Console.");
-          throw new Error(signUpData.error?.message || "Lỗi khi tạo tài khoản");
+          const msg = signUpData.error?.message;
+          if (msg === 'EMAIL_EXISTS') throw new Error("Email này đã được sử dụng.");
+          throw new Error(msg || "Lỗi khi tạo tài khoản");
         }
         uid = signUpData.localId;
       }
       
-      // 3. Create user document in Firestore (Optional on server)
+      // 3. Create user document in Firestore
       const userData = {
         uid,
         email,
         displayName: displayName || email.split('@')[0],
         role: role || "user",
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       };
 
-      dbSuccess = true;
+      let dbSuccess = false;
+      const authHeader = req.headers.authorization;
+      const adminToken = authHeader ? authHeader.split("Bearer ")[1] : undefined;
+
       try {
-        // Use the admin's token from the request to write to Firestore
-        const authHeader = req.headers.authorization;
-        const adminToken = authHeader ? authHeader.split("Bearer ")[1] : undefined;
-        
+        // Try REST first using the admin's token
         if (adminToken) {
           await firestoreRest.setDoc("users", uid, userData, adminToken);
+          dbSuccess = true;
         } else {
-          // Attempt using admin SDK if token missing
+          // Try Admin SDK fallback
           const currentAdminApp = getAdminApp();
           if (currentAdminApp) {
             const db = getAdminFirestore(currentAdminApp, firebaseConfig.firestoreDatabaseId);
             await db.collection("users").doc(uid).set(userData);
-          } else {
-            throw new Error("No authorization token or Admin SDK available");
+            dbSuccess = true;
           }
         }
       } catch (dbError: any) {
-        // Suppress expected permission logs as we have a client-side fallback
-        console.warn("Firestore update failed during user creation (server-side):", dbError.message);
-        dbSuccess = false;
+        console.warn("[Admin] Firestore update failed during creation:", dbError.message);
       }
       
-      res.json({ 
+      return res.json({ 
         success: true, 
         uid, 
         dbSuccess,
         authMethod,
-        userData: {
-          uid,
-          email,
-          displayName: userData.displayName,
-          role: userData.role,
-          createdAt: new Date().toISOString()
-        }
+        userData
       });
     } catch (error: any) {
       console.error("[Admin] Error creating user:", error);
-      
-      const message = error.message || "";
-      if (message.includes("Identity Toolkit API") || message.includes("IDENTITY_TOOLKIT_API_NOT_ENABLED") || error.code === 'auth/internal-error') {
-        return res.status(500).json({ 
-          error: "Dịch vụ Authentication (Identity Toolkit) chưa được kích hoạt.",
-          details: `Bạn PHẢI kích hoạt Identity Toolkit API.\n\nCách 1 (Dễ nhất): Vào Firebase Console -> Authentication -> Nhấn 'Get Started'.\nLink: https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication\n\nCách 2: Kích hoạt API tại Google Cloud Console.\nLink: https://console.developers.google.com/apis/api/identitytoolkit.googleapis.com/overview?project=${firebaseConfig.projectId}`,
-          apiLink: `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication`
-        });
-      }
-
-      let errorMessage = message;
-      if (error.code === 'auth/email-already-exists' || message === 'EMAIL_EXISTS') {
-        errorMessage = "Email này đã được sử dụng.";
-        return res.status(400).json({ error: errorMessage });
-      } else if (error.code === 'auth/invalid-password') {
-        errorMessage = "Mật khẩu không hợp lệ (tối thiểu 6 ký tự).";
-        return res.status(400).json({ error: errorMessage });
-      }
-      
-      res.status(500).json({ error: "Lỗi hệ thống khi tạo người dùng: " + errorMessage });
+      res.status(500).json({ error: error.message || "Lỗi không xác định khi tạo người dùng" });
     }
   });
 
   // Admin: List Users (Source from Firestore only to avoid project mismatch)
   app.get("/api/admin/list-users", checkAdmin, async (req, res) => {
     try {
-      // 1. Try Admin SDK first (fastest, bypasses rules)
+      // 1. Try Admin SDK first (fastest, bypasses rules if configured)
       try {
         const currentAdminApp = getAdminApp();
         if (currentAdminApp) {
@@ -590,25 +555,30 @@ async function startServer() {
           });
         }
       } catch (adminError: any) {
-        console.warn("[Admin] Admin SDK list-users failed, falling back to REST API:", adminError.message);
+        console.warn("[Admin] Admin SDK list-users failed (likely permission denied on Vercel), falling back to REST API.");
       }
       
       // 2. Fallback to REST API using the admin's token
       // This works because the admin's token HAS list permissions in security rules
       const authHeader = req.headers.authorization;
-      if (!authHeader) throw new Error("Missing auth header");
+      if (!authHeader) throw new Error("Missing auth header for fallback");
       const idToken = authHeader.split("Bearer ")[1];
-      const users = await firestoreRest.listDocs("users", idToken);
       
-      res.json({ 
-        success: true, 
-        users,
-        projectId: firebaseConfig.projectId,
-        databaseId: firebaseConfig.firestoreDatabaseId,
-        source: "rest-api-fallback"
-      });
+      try {
+        const users = await firestoreRest.listDocs("users", idToken);
+        return res.json({ 
+          success: true, 
+          users,
+          projectId: firebaseConfig.projectId,
+          databaseId: firebaseConfig.firestoreDatabaseId,
+          source: "rest-api"
+        });
+      } catch (restErr: any) {
+        console.error("[Admin] REST list-users failed:", restErr.message);
+        throw restErr;
+      }
     } catch (error: any) {
-      console.error("[Admin] List users failed:", error.message);
+      console.error("[Admin] List users final failure:", error.message);
       res.status(500).json({ error: "Không thể lấy danh sách người dùng: " + error.message });
     }
   });
@@ -740,7 +710,8 @@ const serverPromise = startServer();
 export default async (req: any, res: any) => {
   // Add a quick check for ping without waiting for the full server promise if possible
   if (req.url === "/api/ping") {
-     return res.json({ status: "alive (pree-flight)", vercel: "1" });
+     res.setHeader('Content-Type', 'application/json');
+     return res.end(JSON.stringify({ status: "alive (pree-flight)", vercel: "1" }));
   }
 
   try {
@@ -749,24 +720,27 @@ export default async (req: any, res: any) => {
     // Check if configuration failed during initialization
     if (firebaseConfig.error) {
       console.error("Serverless handler invoked but config is invalid:", firebaseConfig.error);
-      if (req.url.startsWith("/api/")) {
-        return res.status(500).json({ 
+      if (req.url && req.url.startsWith("/api/")) {
+        res.setHeader('Content-Type', 'application/json');
+        return res.status(500).end(JSON.stringify({ 
           error: "Server configuration error", 
           details: firebaseConfig.error,
           env: process.env.NODE_ENV,
           vercel: process.env.VERCEL
-        });
+        }));
       }
     }
     
+    // Express apps are functions that take (req, res)
     return app(req, res);
   } catch (error: any) {
     console.error("Vercel serverless function crashed:", error);
-    res.status(500).json({ 
+    res.setHeader('Content-Type', 'application/json');
+    res.status(500).end(JSON.stringify({ 
       error: "Critical Server Error", 
       message: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
       type: error.name
-    });
+    }));
   }
 };
