@@ -33,16 +33,16 @@ service cloud.firestore {
     }
 
     function isAdmin() {
+      // Direct email check from token
+      let email = request.auth.token.get('email', '').lower();
+      
       return isSignedIn() && (
-        (request.auth.token.email != null && request.auth.token.email.lower() in [
-          "hoctap853@gmail.com",
-          "hoanghiep1296@gmail.com",
-          "mrihachnach@gmail.com",
-          "admin@gmail.com"
-        ]) ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin') ||
-        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)))
+        email == "hoanghiep1296@gmail.com" || 
+        email == "mrihachnach@gmail.com" || 
+        email == "admin@gmail.com" || 
+        email == "hoctap853@gmail.com" ||
+        request.auth.uid == "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
@@ -127,9 +127,13 @@ service cloud.firestore {
     // RESOURCES
     // ===============================================================
 
-    match /users/{userId} {
-      allow get: if isOwner(userId) || isAdmin();
+    match /users {
       allow list: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow list: if isAdmin();
+      allow get: if isOwner(userId) || isAdmin();
       allow create: if (isOwner(userId) || isAdmin()) && isValidUser(incoming()) && isValidUserResource(incoming());
       allow update: if (isOwner(userId) && isValidUser(incoming())) || isAdmin();
       

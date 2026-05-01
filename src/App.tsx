@@ -922,6 +922,9 @@ export default function App() {
           setUserRole(data?.role || 'user');
         }
       }
+    }, (error) => {
+      console.warn("User profile snapshot listener failed:", error);
+      // Suppressing JSON toast for this specific background listener to avoid irritation
     });
 
     return () => {
@@ -1117,7 +1120,7 @@ export default function App() {
           'Authorization': `Bearer ${idToken}`
         }
       });
-      const data = await response.json();
+      const data = await handleApiResponse(response);
       setDiagnosticResults(data);
       setIsDiagnosticModalOpen(true);
     } catch (error: any) {
@@ -1142,17 +1145,19 @@ export default function App() {
     if (userRole !== 'admin' || !user) return;
     setIsFetchingUsers(true);
     
-    // 1. First, fetch directly from Firestore (Client SDK)
-    // This is more reliable in this environment because it uses the user's own authorized token
+    let fetchedUsers: any[] = [];
+    let firestoreError: any = null;
+
+    // 1. First, try to fetch directly from Firestore (Client SDK)
     try {
       const querySnapshot = await getDocs(collection(db, 'users'));
-      const users = querySnapshot.docs.map(doc => ({
+      fetchedUsers = querySnapshot.docs.map(doc => ({
         ...doc.data(),
         uid: doc.id
       }));
       
       // Sort by createdAt (newest first)
-      const sortedUsers = users.sort((a: any, b: any) => {
+      fetchedUsers.sort((a: any, b: any) => {
         const getTime = (val: any) => {
           if (!val) return 0;
           if (typeof val.toDate === 'function') return val.toDate().getTime();
@@ -1163,34 +1168,53 @@ export default function App() {
         return getTime(b.createdAt) - getTime(a.createdAt);
       });
       
-      setAllUsers(sortedUsers);
+      setAllUsers(fetchedUsers);
+      console.log(`[MediTrans AI] Directly fetched ${fetchedUsers.length} users from Firestore.`);
+    } catch (e: any) {
+      console.warn("Direct Firestore fetch failed, will try backend fallback:", e.message);
+      firestoreError = e;
+    }
+
+    // 2. Try to enrich or fallback with Auth data from Admin API
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch('/api/admin/list-users', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       
-      // 2. Then, try to enrich with Auth data from Admin API (optional)
-      try {
-        const token = await user.getIdToken();
-        const response = await fetch('/api/admin/list-users', {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        
-        if (response.ok) {
-          const data = await handleApiResponse(response);
-          if (data.success && data.users) {
-            setAuthSyncError(data.authSyncError || null);
-            setApiActivationLink(data.apiLink || null);
-            
-            // Merge Auth data (like emailVerified) into our Firestore list
+      if (response.ok) {
+        const data = await handleApiResponse(response);
+        if (data.success && data.users) {
+          setAuthSyncError(data.authSyncError || null);
+          setApiActivationLink(data.apiLink || null);
+          
+          if (fetchedUsers.length > 0) {
+            // Case A: Enrich existing Firestore list
             setAllUsers(prev => prev.map(u => {
               const authUser = data.users.find((au: any) => au.uid === u.uid);
               return authUser ? { ...u, ...authUser } : u;
             }));
+          } else {
+            // Case B: Fallback - use data from Backend if Firestore fetch failed
+            console.log(`[MediTrans AI] Using backend list-users as fallback.`);
+            const backendUsers = data.users.map((u: any) => ({
+              ...u,
+              uid: u.uid || u.localId,
+              role: u.role || 'user'
+              // Note: missing fields like createdAt will be merged if they exist in Auth but Backend might not return all Firestore fields
+            }));
+            setAllUsers(backendUsers);
           }
         }
-      } catch (adminError) {
-        console.warn("Admin API enrichment failed:", adminError);
+      } else if (firestoreError) {
+        // Only error if BOTH failed
+        handleFirestoreError(firestoreError, OperationType.LIST, 'users');
       }
-    } catch (e: any) {
-      console.error("Failed to fetch users from Firestore:", e);
-      handleFirestoreError(e, OperationType.LIST, 'users');
+    } catch (adminError) {
+      console.warn("Admin API enrichment/fallback failed:", adminError);
+      if (firestoreError) {
+        handleFirestoreError(firestoreError, OperationType.LIST, 'users');
+      }
     } finally {
       setIsFetchingUsers(false);
     }
