@@ -1,4 +1,4 @@
-import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import { TranslationService, TranslationOptions } from "./translationService";
 
 export class GeminiService implements TranslationService {
@@ -65,7 +65,7 @@ export class GeminiService implements TranslationService {
     
     try {
       console.log(`[MediTrans] Using key: ...${key.substring(key.length - 4)} (Vault) for ${this.modelName}`);
-      const ai = new GoogleGenAI({ apiKey: key });
+      const ai = new GoogleGenerativeAI(key);
       return { ai, key };
     } catch (e) {
       console.error("[MediTrans] Failed to initialize GoogleGenAI with key:", key.substring(key.length - 4), e);
@@ -160,33 +160,37 @@ export class GeminiService implements TranslationService {
       }
 
       try {
-        const response = await ai.models.generateContentStream({
+        const fetchStartTime = Date.now();
+        const genModel = ai.getGenerativeModel({ 
           model: requestModel,
-          contents: [
-            {
-              parts: [
-                { text: prompt },
-                {
-                  inlineData: {
-                    mimeType: "image/jpeg",
-                    data: imageBuffer.split(",")[1],
-                  },
-                },
-              ],
-            },
-          ],
-          config: {
-            systemInstruction: systemInstruction,
-            temperature: 0
+          systemInstruction: systemInstruction,
+          generationConfig: {
+            temperature: 0,
           }
         });
 
+        const response = await genModel.generateContentStream([
+          prompt,
+          {
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: imageBuffer.split(",")[1],
+            },
+          },
+        ]);
+
+        console.log(`[MediTrans] API request sent. Model: ${requestModel}. Wait time for stream start...`);
         let fullText = "";
-        for await (const chunk of response) {
+        let chunkCount = 0;
+        for await (const chunk of response.stream) {
+          if (chunkCount === 0) {
+            console.log(`[MediTrans] Stream started after ${Date.now() - fetchStartTime}ms`);
+          }
+          chunkCount++;
           if (signal?.aborted) {
             throw new Error("Translation aborted");
           }
-          let chunkText = chunk.text;
+          let chunkText = chunk.text();
           if (chunkText) {
             chunkText = chunkText.replace(/\.{6,}/g, '.....');
             fullText += chunkText;
@@ -257,13 +261,19 @@ export class GeminiService implements TranslationService {
       const prompt = `Dịch văn bản trong ảnh sang tiếng Việt.`;
 
       try {
-        const response = await ai.models.generateContent({
+        const genModel = ai.getGenerativeModel({ 
           model: requestModel,
-          contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] } }] }],
-          config: { systemInstruction, temperature: 0 }
+          systemInstruction: systemInstruction,
+          generationConfig: { temperature: 0 }
         });
 
-        let text = response.text || "";
+        const result = await genModel.generateContent([
+          prompt, 
+          { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] } }
+        ]);
+
+        const response = await result.response;
+        let text = response.text() || "";
         return text.replace(/\.{6,}/g, '.....');
       } catch (error: any) {
         if (signal?.aborted) throw new Error("Translation aborted");
@@ -299,27 +309,29 @@ export class GeminiService implements TranslationService {
     }
 
     try {
-      const response = await ai.models.generateContent({
+      const genModel = ai.getGenerativeModel({ 
         model: this.modelName,
-        contents: [{ parts: [{ text: prompt }] }],
-        config: {
-          systemInstruction: systemInstruction,
+        systemInstruction: systemInstruction,
+        generationConfig: {
           temperature: 0,
           responseMimeType: "application/json",
           responseSchema: {
-            type: Type.OBJECT,
+            type: SchemaType.OBJECT,
             properties: {
-              term: { type: Type.STRING },
-              definition: { type: Type.STRING },
-              synonyms: { type: Type.ARRAY, items: { type: Type.STRING } },
-              relatedTerms: { type: Type.ARRAY, items: { type: Type.STRING } },
-              source: { type: Type.STRING }
+              term: { type: SchemaType.STRING },
+              definition: { type: SchemaType.STRING },
+              synonyms: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+              relatedTerms: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+              source: { type: SchemaType.STRING }
             },
             required: ["term", "definition"]
           }
         }
       });
-      return JSON.parse(response.text.replace(/```json\n?|```/g, '').trim());
+
+      const result = await genModel.generateContent(prompt);
+      const response = await result.response;
+      return JSON.parse(response.text().replace(/```json\n?|```/g, '').trim());
     } catch (error: any) {
       throw error;
     }
@@ -337,12 +349,17 @@ export class GeminiService implements TranslationService {
     const prompt = "Hãy trích xuất văn bản từ hình ảnh này.";
 
     try {
-      const response = await ai.models.generateContent({
+      const genModel = ai.getGenerativeModel({ 
         model: this.modelName,
-        contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] } }] }],
-        config: { systemInstruction, temperature: 0.1 }
+        systemInstruction: systemInstruction,
+        generationConfig: { temperature: 0.1 }
       });
-      return response.text?.trim() || "";
+      const result = await genModel.generateContent([
+        prompt, 
+        { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] } }
+      ]);
+      const response = await result.response;
+      return response.text()?.trim() || "";
     } catch (error: any) {
       throw error;
     }
@@ -356,14 +373,15 @@ export class GeminiService implements TranslationService {
     try { ({ ai, key } = await this.acquireKeyAndInstance()); } catch (e) { throw new Error("API Key error."); }
 
     try {
-      const response = await ai.models.generateContentStream({
+      const genModel = ai.getGenerativeModel({ 
         model: this.modelName,
-        contents: [{ parts: [{ text: prompt }] }],
-        config: { systemInstruction, temperature: 0.2 }
+        systemInstruction: systemInstruction,
+        generationConfig: { temperature: 0.2 }
       });
-      for await (const chunk of response) {
+      const response = await genModel.generateContentStream(prompt);
+      for await (const chunk of response.stream) {
         if (signal?.aborted) throw new Error("Aborted");
-        if (chunk.text) yield chunk.text;
+        if (chunk.text()) yield chunk.text();
       }
     } catch (error: any) { throw error; }
   }

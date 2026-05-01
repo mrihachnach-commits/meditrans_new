@@ -2304,7 +2304,7 @@ export default function App() {
     try {
       const startTime = Date.now();
       const originalCanvas = canvasRef.current;
-      const MAX_DIMENSION = 1200; 
+      const MAX_DIMENSION = 1000; // Reduced from 1200 for faster upload
       
       let captureCanvas = originalCanvas;
       if (originalCanvas.width > MAX_DIMENSION || originalCanvas.height > MAX_DIMENSION) {
@@ -2319,10 +2319,15 @@ export default function App() {
         }
       }
 
-      const imageBuffer = captureCanvas.toDataURL('image/jpeg', 0.7);
+      const renderTime = Date.now() - startTime;
+      const imageBuffer = captureCanvas.toDataURL('image/jpeg', 0.6); // Reduced from 0.7 for smaller payload
+      const uploadPrepTime = Date.now() - startTime - renderTime;
+      
       if (!imageBuffer || imageBuffer.length < 1000) {
         throw new Error("Không thể chụp ảnh trang.");
       }
+
+      console.log(`[MediTrans] Prep: Render=${renderTime}ms, DataURL=${uploadPrepTime}ms, Size=${(imageBuffer.length/1024).toFixed(1)}KB`);
 
       const stream = translationService.current.translateMedicalPageStream({ 
         imageBuffer, 
@@ -2332,8 +2337,13 @@ export default function App() {
       });
       let fullContent = "";
       let lastUpdateTime = Date.now();
+      let firstChunkTime = 0;
 
       for await (const chunk of stream) {
+        if (!firstChunkTime) {
+          firstChunkTime = Date.now() - startTime;
+          console.log(`[MediTrans] First chunk received in ${firstChunkTime}ms`);
+        }
         fullContent += chunk;
         const now = Date.now();
         if (now - lastUpdateTime > 80) {
