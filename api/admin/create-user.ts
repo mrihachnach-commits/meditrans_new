@@ -7,6 +7,11 @@ export default async function handler(req: CustomRequest, res: any) {
 
   try {
     await checkAdmin(req);
+    console.log("[create-user] fallback apiKey exists:", !!firebaseConfig.apiKey);
+    
+    if (!firebaseConfig.apiKey) {
+      throw new Error("Firebase API key missing");
+    }
     
     const { email, password, displayName, role } = req.body;
     if (!email || !password) return res.status(400).json({ error: "Email và mật khẩu là bắt buộc" });
@@ -35,9 +40,11 @@ export default async function handler(req: CustomRequest, res: any) {
     
     const userData = { uid, email, displayName: displayName || email.split('@')[0], role: role || "user", createdAt: new Date().toISOString() };
     await firestoreRest.setDoc("users", uid, userData, req.idToken);
+    console.log("[create-user] Firestore user doc created");
     
     return res.status(200).json({ success: true, uid, userData });
   } catch (err: any) {
+    console.error("[create-user] error:", err);
     return res.status(err.status || 500).json({ error: err.error || err.message, details: err.details });
   }
 }
