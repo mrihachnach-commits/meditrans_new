@@ -8,7 +8,7 @@ export class GeminiService implements TranslationService {
   private static globalKeyLastUsed: Map<string, number> = new Map();
   private static lastSuccessfulKey: string | null = null;
 
-  constructor(apiKeys?: string | string[], modelName: string = "gemini-1.5-flash") {
+  constructor(apiKeys?: string | string[], modelName: string = "gemini-flash-lite-latest") {
     this.modelName = modelName;
     
     if (Array.isArray(apiKeys)) {
@@ -186,15 +186,25 @@ export class GeminiService implements TranslationService {
         let fullText = "";
         let chunkCount = 0;
         for await (const chunk of response.stream) {
+          if (signal?.aborted) {
+            console.log("[MediTrans] Stream aborted by signal");
+            break; 
+          }
           if (chunkCount === 0) {
             console.log(`[MediTrans] Stream started after ${Date.now() - fetchStartTime}ms`);
           }
           chunkCount++;
-          if (signal?.aborted) {
-            throw new Error("Translation aborted");
+          
+          let chunkText = "";
+          try {
+             chunkText = chunk.text();
+          } catch (e) {
+             console.warn("[MediTrans] Error reading chunk text", e);
+             continue;
           }
-          let chunkText = chunk.text();
+
           if (chunkText) {
+            // Basic deduplication or cleaning if needed
             chunkText = chunkText.replace(/\.{6,}/g, '.....');
             fullText += chunkText;
             yield chunkText;

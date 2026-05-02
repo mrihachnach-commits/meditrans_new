@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import * as pdfjs from 'pdfjs-dist';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
@@ -206,6 +206,58 @@ interface TranslationState {
   };
 }
 
+// --- UTILITIES ---
+const OPTIMIZED_IMAGE_DIM = 850;
+const OPTIMIZED_IMAGE_QUALITY = 0.5;
+
+const optimizeCanvasImage = (canvas: HTMLCanvasElement): string => {
+  const { width, height } = canvas;
+  const ratio = Math.min(OPTIMIZED_IMAGE_DIM / width, OPTIMIZED_IMAGE_DIM / height, 1);
+  
+  const temp = document.createElement('canvas');
+  temp.width = width * ratio;
+  temp.height = height * ratio;
+  const ctx = temp.getContext('2d', { alpha: false });
+  if (!ctx) return canvas.toDataURL('image/jpeg', OPTIMIZED_IMAGE_QUALITY);
+  
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, temp.width, temp.height);
+  ctx.drawImage(canvas, 0, 0, temp.width, temp.height);
+  return temp.toDataURL('image/jpeg', OPTIMIZED_IMAGE_QUALITY);
+};
+
+// --- COMPONENTS ---
+const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel }: { 
+  content: string; 
+  page: number; 
+  isStreaming: boolean;
+  onCancel: () => void;
+}) => {
+  return (
+    <div className="markdown-body select-text pb-60 md:pb-0">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+        {content}
+      </ReactMarkdown>
+
+      {isStreaming && (
+        <div className="mt-6 p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100/50 flex flex-col gap-3">
+          <div className="flex items-center gap-2 text-indigo-600 font-bold text-xs animate-pulse">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>Đang dịch nội dung y khoa...</span>
+          </div>
+          <button 
+            onClick={onCancel}
+            className="w-fit px-4 py-2 bg-white text-slate-600 rounded-xl text-[10px] font-black uppercase tracking-wider hover:bg-rose-50 hover:text-rose-600 transition-all border border-slate-200 shadow-sm flex items-center gap-2"
+          >
+            <Square className="w-3 h-3 fill-current" />
+            Dừng dịch
+          </button>
+        </div>
+      )}
+    </div>
+  );
+});
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -227,6 +279,7 @@ export default function App() {
   const [activeTranslation, setActiveTranslation] = useState<{page: number, content: string, status: string} | null>(null);
   const translatingPagesRef = useRef<Set<number>>(new Set());
   const abortControllerRef = useRef<AbortController | null>(null);
+  const bulkAbortControllerRef = useRef<AbortController | null>(null);
   const fileIdRef = useRef<number>(0);
   const preTranslateControllersRef = useRef<Map<number, AbortController>>(new Map());
 
@@ -265,9 +318,7 @@ export default function App() {
       try {
         const parsed = JSON.parse(saved);
         return { 
-          'gemini-3-flash-preview': parsed['gemini-3-flash-preview'] || parsed['gemini-1.5-flash'] || parsed['gemini-flash'] || '',
-          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-1.5-flash-lite'] || '',
-          'gemini-2.0-flash-exp': parsed['gemini-2.0-flash-exp'] || ''
+          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-3-flash-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
         };
       } catch (e) {
         console.error("Failed to parse engine keys:", e);
@@ -275,9 +326,7 @@ export default function App() {
     }
     
     return {
-      'gemini-3-flash-preview': '',
       'gemini-flash-lite-latest': '',
-      'gemini-2.0-flash-exp': ''
     };
   });
   const [showSettings, setShowSettings] = useState(false);
@@ -615,7 +664,6 @@ export default function App() {
   const [showBulkConfirm, setShowBulkConfirm] = useState(false);
   const [bulkTranslateProgress, setBulkTranslateProgress] = useState(0);
   const [bulkTranslateStatus, setBulkTranslateStatus] = useState<'translating' | 'completed' | 'failed' | 'idle'>('idle');
-  const bulkCancelRef = useRef(false);
   const shouldAutoBulkRef = useRef(false);
   
   const [autoTranslate, setAutoTranslate] = useState(false);
@@ -748,7 +796,7 @@ export default function App() {
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
-          const vService = new GeminiService(vKey.value, "gemini-1.5-flash");
+          const vService = new GeminiService(vKey.value, "gemini-flash-lite-latest");
           const vRes = await vService.checkAvailableKeys();
           const isActive = vRes.manualKey;
           
@@ -2348,259 +2396,187 @@ export default function App() {
     }
   }, [currentPage]);
 
-  const translateCurrentPage = useCallback(async (pageNumber?: number, force = false, engine?: TranslationEngine) => {
-    const targetPage = pageNumber ?? currentPage;
+  const performTranslation = useCallback(async (
+    targetPage: number, 
+    signal: AbortSignal, 
+    engine?: TranslationEngine,
+    onProgress?: (content: string) => void
+  ) => {
     const currentFileId = fileIdRef.current;
-    
-    if (!canvasRef.current || !translationService.current || !currentFileId) return;
+    if (!translationService.current || !currentFileId || !pdfDoc) return null;
 
-    // 1. Double initiation check
-    const currentStatus = translationsRef.current[targetPage]?.status;
-    if (!force && (currentStatus === 'loading' || currentStatus === 'success')) {
-      if (translatingPagesRef.current.has(targetPage)) return;
-    }
-
-    // 2. Promotion check
-    if (translatingPagesRef.current.has(targetPage) && !force) {
-      console.log(`[MediTrans] Promoting pre-translation for page ${targetPage}`);
-      setIsTranslating(true);
-      setActiveTranslation(prev => (prev?.page === targetPage) ? prev : { page: targetPage, content: '', status: 'loading' });
-      return;
-    }
-
-    // 3. Mark as translating
-    translatingPagesRef.current.add(targetPage);
-    setIsTranslating(true);
-    setActiveTranslation({ page: targetPage, content: '', status: 'loading' });
-
-    // 4. Abort previous foreground task
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    const { signal } = controller;
-
-    // 5. Render safety check
-    if (isRenderingRef.current) {
-      console.log(`[MediTrans] Đang render trang ${targetPage}, chờ một lát...`);
-      setTimeout(() => {
-        if (currentPageRef.current === targetPage) {
-          translatingPagesRef.current.delete(targetPage);
-          translateCurrentPage(targetPage, force, engine);
-        }
-      }, 100);
-      return;
-    }
-    
-    // 6. API Key check
-    const hasKey = await translationService.current.hasApiKey();
-    if (!hasKey) {
-      setTranslations(prev => ({
-        ...prev,
-        [targetPage]: { content: 'Vui lòng cài đặt API Key.', status: 'error' }
-      }));
-      setActiveTranslation(null);
-      setIsTranslating(false);
-      translatingPagesRef.current.delete(targetPage);
-      return;
-    }
-
-    // 7. Capture & Translate
     try {
-      const startTime = Date.now();
-      const originalCanvas = canvasRef.current;
-      const MAX_DIMENSION = 1000; // Reduced from 1200 for faster upload
+      // 1. Image preparation
+      let imageBuffer = "";
+      const cached = pageCacheRef.current.get(targetPage);
       
-      let captureCanvas = originalCanvas;
-      if (originalCanvas.width > MAX_DIMENSION || originalCanvas.height > MAX_DIMENSION) {
+      // Use live canvas if it's the current page, otherwise use cache or render background
+      if (targetPage === currentPageRef.current && !isRenderingRef.current && canvasRef.current) {
+        imageBuffer = optimizeCanvasImage(canvasRef.current);
+      } else if (cached?.canvas) {
+        imageBuffer = optimizeCanvasImage(cached.canvas);
+      } else {
+        const pdfPage = await pdfDoc.getPage(targetPage);
+        const viewport = pdfPage.getViewport({ scale: 1.5 });
         const tempCanvas = document.createElement('canvas');
-        const ratio = Math.min(MAX_DIMENSION / originalCanvas.width, MAX_DIMENSION / originalCanvas.height);
-        tempCanvas.width = originalCanvas.width * ratio;
-        tempCanvas.height = originalCanvas.height * ratio;
-        const tempCtx = tempCanvas.getContext('2d');
-        if (tempCtx) {
-          tempCtx.drawImage(originalCanvas, 0, 0, tempCanvas.width, tempCanvas.height);
-          captureCanvas = tempCanvas;
+        tempCanvas.width = viewport.width;
+        tempCanvas.height = viewport.height;
+        const ctx = tempCanvas.getContext('2d');
+        if (ctx) {
+          await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+          imageBuffer = optimizeCanvasImage(tempCanvas);
         }
+        pdfPage.cleanup();
       }
 
-      const renderTime = Date.now() - startTime;
-      const imageBuffer = captureCanvas.toDataURL('image/jpeg', 0.6); // Reduced from 0.7 for smaller payload
-      const uploadPrepTime = Date.now() - startTime - renderTime;
-      
-      if (!imageBuffer || imageBuffer.length < 1000) {
-        throw new Error("Không thể chụp ảnh trang.");
-      }
+      if (!imageBuffer || signal.aborted) return null;
 
-      console.log(`[MediTrans] Prep: Render=${renderTime}ms, DataURL=${uploadPrepTime}ms, Size=${(imageBuffer.length/1024).toFixed(1)}KB`);
-
+      // 2. Start Stream
       const stream = translationService.current.translateMedicalPageStream({ 
         imageBuffer, 
         pageNumber: targetPage, 
         signal,
         model: engine
       });
+
       let fullContent = "";
-      let lastUpdateTime = Date.now();
-      let firstChunkTime = 0;
+      let lastUpdate = Date.now();
 
       for await (const chunk of stream) {
-        if (!firstChunkTime) {
-          firstChunkTime = Date.now() - startTime;
-          console.log(`[MediTrans] First chunk received in ${firstChunkTime}ms`);
-        }
+        if (signal.aborted) break;
         fullContent += chunk;
-        const now = Date.now();
-        if (now - lastUpdateTime > 80) {
-          setActiveTranslation({ page: targetPage, content: fullContent, status: 'loading' });
-          lastUpdateTime = now;
-        }
-      }
-      
-      console.log(`[MediTrans] Finished page ${targetPage} in ${Date.now() - startTime}ms`);
-      const finalResult = { content: fullContent, status: 'success' as const };
-      
-      if (fileIdRef.current === currentFileId) {
-        setTranslations(prev => ({ ...prev, [targetPage]: finalResult }));
-        setActiveTranslation({ page: targetPage, content: fullContent, status: 'success' });
         
-        if (user && fileId && fileOwnerId) {
-          setDoc(doc(db, 'users', fileOwnerId, 'documents', fileId, 'pages', targetPage.toString()), {
-            content: fullContent, status: 'success', updatedAt: serverTimestamp()
-          }).catch(e => handleFirestoreError(e, OperationType.WRITE, `users/${fileOwnerId}/documents/${fileId}/pages/${targetPage}`));
+        const now = Date.now();
+        if (onProgress && now - lastUpdate > 120) {
+          onProgress(fullContent);
+          lastUpdate = now;
         }
       }
-      
-      console.log(`[MediTrans] Finished page ${targetPage} in ${Date.now() - startTime}ms`);
-      
-      // Delay clearing active translation to avoid visual jump
-      setTimeout(() => {
-        if (currentPageRef.current === targetPage) {
-          setActiveTranslation(null);
-        }
-      }, 300);
 
-    } catch (error: any) {
-      if (error.message === "Translation aborted" || error.name === 'AbortError') return;
-      console.error("Translation Error:", error);
-      if (fileIdRef.current === currentFileId) {
-        setTranslations(prev => ({ ...prev, [targetPage]: { content: formatErrorMessage(error), status: 'error' } }));
+      if (signal.aborted) return null;
+      return fullContent;
+
+    } catch (error) {
+      if (error instanceof Error && (error.name === 'AbortError' || error.message === 'Translation aborted')) {
+        return null;
       }
-      setActiveTranslation(null);
-    } finally {
-      translatingPagesRef.current.delete(targetPage);
-      if (abortControllerRef.current?.signal === signal) {
-        setIsTranslating(false);
-        abortControllerRef.current = null;
-      }
+      throw error;
     }
-  }, [currentPage, translationService, user, fileId]);
+  }, [pdfDoc, selectedEngine]);
 
-  const preTranslatePage = useCallback(async (pageNum: number, signal?: AbortSignal) => {
-    if (!pdfDoc || !translationService.current || pageNum > numPages) return;
+  const translateCurrentPage = useCallback(async (pageNumber?: number, force = false, engine?: TranslationEngine) => {
+    const targetPage = pageNumber ?? currentPage;
     const currentFileId = fileIdRef.current;
+    
+    if (!translationService.current || !currentFileId) return;
 
-    if (signal?.aborted) return;
-
-    // Avoid double translation
-    const currentStatus = translationsRef.current[pageNum]?.status;
-    if (translatingPagesRef.current.has(pageNum) || currentStatus === 'loading' || currentStatus === 'success') {
-      return;
+    // Fast return if already done
+    const currentStatus = translationsRef.current[targetPage]?.status;
+    if (!force && (currentStatus === 'loading' || currentStatus === 'success')) {
+      if (translatingPagesRef.current.has(targetPage)) return;
     }
 
-    translatingPagesRef.current.add(pageNum);
+    // Abort previous FOREGROUND request only
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     
+    translatingPagesRef.current.add(targetPage);
+    setIsTranslating(true);
+    setActiveTranslation({ page: targetPage, content: '', status: 'loading' });
+
     try {
-      const page = await pdfDoc.getPage(pageNum);
-      if (signal?.aborted) {
-        page.cleanup();
-        translatingPagesRef.current.delete(pageNum);
+      const hasKey = await translationService.current.hasApiKey();
+      if (!hasKey) {
+        showToast("Vui lòng cấu hình API Key trong Cài đặt.", "error");
+        setIsTranslating(false);
+        setActiveTranslation(null);
+        translatingPagesRef.current.delete(targetPage);
         return;
       }
 
-      // 1. Render in background to image - optimized scale for speed/accuracy balance
-      const viewport = page.getViewport({ scale: 1.5 }); 
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const context = canvas.getContext('2d');
-      
-      if (context) {
-        const renderTask = page.render({ canvasContext: context, viewport: viewport } as any);
-        const abortHandler = () => renderTask.cancel();
-        if (signal) signal.addEventListener('abort', abortHandler);
-        try {
-          await renderTask.promise;
-        } finally {
-          if (signal) signal.removeEventListener('abort', abortHandler);
-        }
-
-        const imageBuffer = canvas.toDataURL('image/jpeg', 0.6); // Reduced for faster upload, still great for OCR
-        canvas.width = 0; canvas.height = 0; // memory cleanup
-
-        // 2. Start translation stream
-        const stream = translationService.current.translateMedicalPageStream({
-          imageBuffer, pageNumber: pageNum, signal
-        });
-        
-        let fullContent = "";
-        let lastUpdateTime = Date.now();
-
-        for await (const chunk of stream) {
-          if (signal?.aborted) break;
-          fullContent += chunk;
-          
-          const now = Date.now();
-          // If the user has moved to this page while it was being pre-translated, show progress
-          // We check more frequently if it becomes the currently viewed page
-          const isCurrent = pageNum === currentPageRef.current;
-          if (isCurrent && (now - lastUpdateTime > 100)) {
-            setActiveTranslation({ page: pageNum, content: fullContent, status: 'loading' });
-            setIsTranslating(true);
-            lastUpdateTime = now;
+      const content = await performTranslation(
+        targetPage, 
+        controller.signal, 
+        engine,
+        (text) => {
+          if (currentPageRef.current === targetPage) {
+            setActiveTranslation({ page: targetPage, content: text, status: 'loading' });
           }
         }
-        
-        if (signal?.aborted) return;
+      );
 
-        const finalResult = { content: fullContent, status: 'success' as const };
-        
+      if (content !== null) {
+        const finalResult = { content, status: 'success' as const };
         if (fileIdRef.current === currentFileId) {
-          setTranslations(prev => {
-             const updated = { ...prev, [pageNum]: finalResult };
-             translationsRef.current = updated;
-             return updated;
-          });
-          
-          // Show final results immediately if we are on this page
-          if (pageNum === currentPageRef.current) {
-            setActiveTranslation({ page: pageNum, content: fullContent, status: 'success' });
-            setIsTranslating(true);
-            setTimeout(() => {
-              if (currentPageRef.current === pageNum) setActiveTranslation(null);
-            }, 300);
-          }
+          setTranslations(prev => ({ ...prev, [targetPage]: finalResult }));
+          setActiveTranslation({ page: targetPage, content, status: 'success' });
           
           if (user && fileId && fileOwnerId) {
-            setDoc(doc(db, 'users', fileOwnerId, 'documents', fileId, 'pages', pageNum.toString()), {
-              content: fullContent, status: 'success', updatedAt: serverTimestamp()
-            }, { merge: true }).catch(e => handleFirestoreError(e, OperationType.WRITE, `users/${fileOwnerId}/documents/${fileId}/pages/${pageNum}`));
+            setDoc(doc(db, 'users', fileOwnerId, 'documents', fileId, 'pages', targetPage.toString()), {
+              content, status: 'success', updatedAt: serverTimestamp()
+            }, { merge: true }).catch(console.error);
           }
         }
+        
+        setTimeout(() => {
+          if (currentPageRef.current === targetPage) setActiveTranslation(null);
+        }, 500);
       }
-      page.cleanup();
     } catch (error: any) {
-      if (error.message === "Translation aborted" || error.name === 'AbortError') return;
-      console.error(`Pre-translation error for page ${pageNum}:`, error);
-      if (fileIdRef.current === currentFileId) {
-        setTranslations(prev => ({ ...prev, [pageNum]: { content: formatErrorMessage(error), status: 'error' } }));
+      console.error(`Translation error for page ${targetPage}:`, error);
+      setTranslations(prev => ({ ...prev, [targetPage]: { content: formatErrorMessage(error), status: 'error' } }));
+      setActiveTranslation(null);
+    } finally {
+      translatingPagesRef.current.delete(targetPage);
+      if (abortControllerRef.current === controller) {
+        setIsTranslating(false);
       }
+    }
+  }, [currentPage, user, fileId, pdfDoc, performTranslation]);
+
+  const preTranslatePage = useCallback(async (pageNum: number, signal: AbortSignal, engine?: TranslationEngine) => {
+    if (!pdfDoc || pageNum > numPages || translatingPagesRef.current.has(pageNum)) return;
+    
+    try {
+      translatingPagesRef.current.add(pageNum);
+      
+      const content = await performTranslation(
+        pageNum, 
+        signal, 
+        engine,
+        (text) => {
+          // Only show progress if user moves to this page while it is being pre-translated
+          if (pageNum === currentPageRef.current) {
+            setActiveTranslation({ page: pageNum, content: text, status: 'loading' });
+            setIsTranslating(true);
+          }
+        }
+      );
+
+      if (content !== null) {
+        const finalResult = { content, status: 'success' as const };
+        setTranslations(prev => ({ ...prev, [pageNum]: finalResult }));
+
+        if (pageNum === currentPageRef.current) {
+          setActiveTranslation({ page: pageNum, content, status: 'success' });
+          setTimeout(() => {
+            if (currentPageRef.current === pageNum) setActiveTranslation(null);
+          }, 500);
+        }
+        
+        if (user && fileId && fileOwnerId) {
+          setDoc(doc(db, 'users', fileOwnerId, 'documents', fileId, 'pages', pageNum.toString()), {
+            content, status: 'success', updatedAt: serverTimestamp()
+          }, { merge: true }).catch(console.error);
+        }
+      }
+    } catch (error: any) {
+      // Quiet fail for pre-translation
     } finally {
       translatingPagesRef.current.delete(pageNum);
-      if (pageNum === currentPageRef.current) setIsTranslating(false);
     }
-  }, [pdfDoc, numPages, user, fileId, translationService]);
+  }, [pdfDoc, numPages, user, fileId, performTranslation]);
 
   useEffect(() => {
     if (pdfDoc && autoTranslate) {
@@ -2651,24 +2627,23 @@ export default function App() {
     
     // If already translating, clicking toggles cancellation
     if (isBulkTranslating) {
-      bulkCancelRef.current = true;
+      if (bulkAbortControllerRef.current) bulkAbortControllerRef.current.abort();
       setIsBulkTranslating(false);
       setBulkTranslateStatus('idle');
       return;
     }
 
+    const controller = new AbortController();
+    bulkAbortControllerRef.current = controller;
+    const { signal } = controller;
+
     setIsBulkTranslating(true);
     setBulkTranslateStatus('translating');
-    bulkCancelRef.current = false;
     setBulkTranslateProgress(0);
 
     const pagesToTranslate: number[] = [];
-    let initialCompletedCount = 0;
-    
     for (let i = 1; i <= numPages; i++) {
-      if (translationsRef.current[i]?.status === 'success') {
-        initialCompletedCount++;
-      } else {
+      if (translationsRef.current[i]?.status !== 'success') {
         pagesToTranslate.push(i);
       }
     }
@@ -2684,36 +2659,70 @@ export default function App() {
     const totalToTranslate = pagesToTranslate.length;
     let newlyCompletedCount = 0;
     
-    // Concurrency depends on the number of keys. 
-    const concurrentLimit = Math.min(15, userKeys.length > 5 ? Math.floor(userKeys.length * 0.5) : 5);
+    // Concurrency depends on keys
+    const concurrentLimit = Math.min(10, userKeys.length > 5 ? Math.floor(userKeys.length * 0.8) : 5);
     
-    console.log(`[MediTrans] Bulk Translation: ${pagesToTranslate.length} more pages. Model: ${engine || 'default'}`);
-
-    let allKeysExhausted = false;
+    console.log(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages...`);
 
     // Process in batches
     for (let i = 0; i < pagesToTranslate.length; i += concurrentLimit) {
-      if (bulkCancelRef.current || allKeysExhausted) break;
+      if (signal.aborted) break;
 
       const batch = pagesToTranslate.slice(i, i + concurrentLimit);
       await Promise.all(batch.map(async (pageNum) => {
-        if (bulkCancelRef.current || allKeysExhausted) return;
+        if (signal.aborted) return;
         
         try {
-          await translateCurrentPage(pageNum, false, engine);
-          newlyCompletedCount++;
-          // Progress of the current operation
-          setBulkTranslateProgress(Math.floor((newlyCompletedCount / totalToTranslate) * 100));
+          translatingPagesRef.current.add(pageNum);
+          const content = await performTranslation(
+            pageNum, 
+            signal, 
+            engine,
+            (text) => {
+              if (currentPageRef.current === pageNum) {
+                setActiveTranslation({ page: pageNum, content: text, status: 'loading' });
+                setIsTranslating(true);
+              }
+            }
+          );
+
+          if (content !== null && !signal.aborted) {
+            const finalResult = { content, status: 'success' as const };
+            setTranslations(prev => ({ ...prev, [pageNum]: finalResult }));
+            newlyCompletedCount++;
+            setBulkTranslateProgress(Math.floor((newlyCompletedCount / totalToTranslate) * 100));
+
+            // Sync with current page UI
+            if (pageNum === currentPageRef.current) {
+              setActiveTranslation({ page: pageNum, content, status: 'success' });
+              setTimeout(() => {
+                if (currentPageRef.current === pageNum) setActiveTranslation(null);
+              }, 500);
+            }
+
+            // Save to Firestore
+            if (user && fileId && fileOwnerId) {
+              setDoc(doc(db, 'users', fileOwnerId, 'documents', fileId, 'pages', pageNum.toString()), {
+                content, status: 'success', updatedAt: serverTimestamp()
+              }, { merge: true }).catch(console.error);
+            }
+          }
         } catch (e) {
           console.error(`Bulk translation failed for page ${pageNum}:`, e);
+          setTranslations(prev => ({ ...prev, [pageNum]: { content: 'Lỗi dịch thuật.', status: 'error' } }));
+        } finally {
+          translatingPagesRef.current.delete(pageNum);
         }
       }));
     }
 
-    setIsBulkTranslating(false);
-    if (!bulkCancelRef.current) {
-      setBulkTranslateStatus('completed');
-      showToast(`Đã hoàn thành dịch ${newlyCompletedCount} trang.`, 'success');
+    if (bulkAbortControllerRef.current === controller) {
+      bulkAbortControllerRef.current = null;
+      setIsBulkTranslating(false);
+      if (!signal.aborted) {
+        setBulkTranslateStatus('completed');
+        showToast(`Đã hoàn thành dịch ${newlyCompletedCount} trang.`, 'success');
+      }
     }
   };
 
@@ -2849,7 +2858,7 @@ export default function App() {
     // Use selected vault key as primary if available
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
-    translationService.current = new GeminiService(allKeys, "gemini-1.5-flash");
+    translationService.current = new GeminiService(allKeys, "gemini-flash-lite-latest");
 
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
@@ -2897,18 +2906,16 @@ export default function App() {
   useEffect(() => {
     if (!pdfDoc || !autoTranslate) return;
 
-    // Debounce auto-translation to prevent hammering the API when scrolling fast
+    // Debounce auto-translation slightly to prevent hammering the API when scrolling super fast
     const timer = setTimeout(() => {
       const translation = translationsRef.current[currentPage];
       const isDone = translation?.status === 'success';
       const isForegroundActive = isTranslatingRef.current && activeTranslation?.page === currentPage;
       
-      // We trigger if the page is not done and not already translating in foreground.
-      // translateCurrentPage internally handles if it's already in background (translatingPagesRef).
-      if (!isRenderingRef.current && !isDone && !isForegroundActive) {
+      if (!isDone && !isForegroundActive) {
         translateCurrentPage(currentPage);
       }
-    }, 300); // Very fast debounce for instant translation navigation
+    }, 150); // Faster initiation (150ms)
 
     return () => clearTimeout(timer);
   }, [currentPage, pdfDoc, autoTranslate, isRendering, isTranslating, translateCurrentPage, activeTranslation?.page, translations]);
@@ -3965,7 +3972,7 @@ export default function App() {
                       </button>
 
                       <button 
-                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-3-flash-preview')}
+                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
                         disabled={isTranslating || isRendering}
                         className={cn(
                           "px-3 md:px-4 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1.5 md:gap-2 shadow-lg",
@@ -3973,7 +3980,7 @@ export default function App() {
                             ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
                             : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 active:scale-95"
                         )}
-                        title="Dịch chất lượng bằng Gemini 3 Flash"
+                        title="Dịch nhanh bằng Gemini Flash-Lite Latest"
                       >
                         {isTranslating || isRendering ? (
                           <>
@@ -3983,7 +3990,7 @@ export default function App() {
                         ) : (
                           <>
                             <Sparkles className="w-3 h-3 md:w-3.5 md:h-3.5" />
-                            <span>{translations[currentPage] ? 'Dịch lại chất lượng' : 'Dịch chất lượng'}</span>
+                            <span>{translations[currentPage] ? 'Dịch lại' : 'Dịch trang'}</span>
                           </>
                         )}
                       </button>
@@ -4330,27 +4337,14 @@ export default function App() {
                                    fontFamily
                       }}
                     >
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {activeTranslation && activeTranslation.page === currentPage 
+                      <TranslationMarkdown 
+                        content={activeTranslation && activeTranslation.page === currentPage 
                           ? activeTranslation.content 
                           : translations[currentPage]?.content || ''}
-                      </ReactMarkdown>
-
-                      {activeTranslation && activeTranslation.page === currentPage && (
-                        <div className="mt-6 p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100/50 flex flex-col gap-3">
-                          <div className="flex items-center gap-2 text-indigo-600 font-bold text-xs animate-pulse">
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            <span>Đang dịch nội dung y khoa...</span>
-                          </div>
-                          <button 
-                            onClick={cancelTranslation}
-                            className="w-fit px-4 py-2 bg-white text-slate-600 rounded-xl text-[10px] font-black uppercase tracking-wider hover:bg-rose-50 hover:text-rose-600 transition-all border border-slate-200 shadow-sm flex items-center gap-2"
-                          >
-                            <Square className="w-3 h-3 fill-current" />
-                            Dừng dịch
-                          </button>
-                        </div>
-                      )}
+                        page={currentPage}
+                        isStreaming={!!(activeTranslation && activeTranslation.page === currentPage && activeTranslation.status === 'loading')}
+                        onCancel={cancelTranslation}
+                      />
 
                       {/* Mobile Navigation Buttons - Removed as redundant with floating bar */}
                     </motion.div>
@@ -4971,22 +4965,14 @@ export default function App() {
                             setShowBulkConfirm(false);
                             startBulkTranslation('gemini-flash-lite-latest');
                           }}
-                          className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-lg text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm"
+                          className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2"
                         >
-                          Dịch toàn bộ (Tốc độ)
-                        </button>
-                        <button
-                          onClick={() => {
-                            setShowBulkConfirm(false);
-                            startBulkTranslation('gemini-3-flash-preview');
-                          }}
-                          className="w-full py-2.5 bg-indigo-600 text-white rounded-lg text-[10px] font-bold uppercase hover:bg-indigo-700 shadow-sm"
-                        >
-                          Dịch toàn bộ (Chất lượng - Gemini 3)
+                          <Zap className="w-4 h-4" />
+                          Bắt đầu dịch toàn bộ
                         </button>
                         <button
                           onClick={() => setShowBulkConfirm(false)}
-                          className="w-full py-2 bg-slate-100 text-slate-500 rounded-lg text-[9px] font-bold uppercase hover:bg-slate-200 mt-1"
+                          className="w-full py-2.5 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-bold uppercase hover:bg-slate-200"
                         >
                           Hủy
                         </button>
