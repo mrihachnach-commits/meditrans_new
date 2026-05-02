@@ -45,7 +45,7 @@ import {
   handleFirestoreError,
   collectionGroup
 } from '../firebase';
-import { cn } from '../lib/utils';
+import { cn } from '../../lib/utils.js';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface FolderData {

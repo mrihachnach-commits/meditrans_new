@@ -1,6 +1,6 @@
 import express from "express";
 import path from "path";
-import { firebaseConfig } from "./src/lib/firebaseAdmin";
+import { firebaseConfig } from "./lib/firebaseAdmin.js";
 
 // Import handlers for local mapping
 import pingHandler from "./api/ping";

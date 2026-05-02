@@ -2,14 +2,13 @@ import {
   firebaseConfig, 
   getAdminApp, 
   firestoreRest, 
-  CustomRequest 
-} from "../src/lib/firebaseAdmin";
+} from "../lib/firebaseAdmin.js";
 import admin from "firebase-admin";
 
 // In-memory cache for verified tokens
-export const tokenCache = new Map<string, { decodedToken: any, expiry: number }>();
+export const tokenCache = new Map();
 
-export const checkAdmin = async (req: CustomRequest) => {
+export const checkAdmin = async (req) => {
   try {
     if (firebaseConfig.error) {
       console.error("[Server] Firebase config error:", firebaseConfig.error);
@@ -50,14 +49,14 @@ export const checkAdmin = async (req: CustomRequest) => {
       throw { status: 403, error: "Bạn không có quyền quản trị (Admin)" };
     }
 
-    let decodedToken: any = null;
+    let decodedToken = null;
     const adminApp = getAdminApp();
 
     if (adminApp) {
       try {
         console.log("[Server] checkAdmin: Verifying ID token via Admin SDK...");
         decodedToken = await admin.auth(adminApp).verifyIdToken(idToken);
-      } catch (e: any) {
+      } catch (e) {
         console.warn("[Server] checkAdmin: Admin SDK verification failed, falling back to REST API:", e.message);
       }
     }
@@ -70,7 +69,7 @@ export const checkAdmin = async (req: CustomRequest) => {
         body: JSON.stringify({ idToken })
       });
       
-      const verifyData: any = await verifyRes.json();
+      const verifyData = await verifyRes.json();
       
       if (verifyRes.status === 429) {
         throw { status: 429, error: "Hệ thống đang bận (Rate Limit Exceeded).", details: "Vui lòng đợi 1-2 phút và thử lại." };
@@ -103,7 +102,7 @@ export const checkAdmin = async (req: CustomRequest) => {
       return decodedToken;
     }
     throw { status: 403, error: "Bạn không có quyền quản trị (Admin)" };
-  } catch (err: any) {
+  } catch (err) {
     if (err.status) throw err;
     throw { status: 500, error: err.error || "Lỗi hệ thống", details: err.message || err.details };
   }
