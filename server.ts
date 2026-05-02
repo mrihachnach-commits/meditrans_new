@@ -1,6 +1,6 @@
 import express from "express";
 import path from "path";
-import { firebaseConfig, getAdminApp } from "./lib/firebaseAdmin.js";
+import { firebaseConfig } from "./lib/firebaseAdmin.js";
 
 // Import handlers for local mapping
 import pingHandler from "./api/ping";
@@ -45,15 +45,11 @@ async function start() {
     });
   }
 
-  try {
-    getAdminApp();
-    console.log("[Firebase] Initialized successfully");
-  } catch (e: any) {
-    console.warn("[Warning] Firebase Initialization Error:", e.message);
-  }
-
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[Local Dev] Server running on http://localhost:${PORT}`);
+    if (firebaseConfig.error) {
+      console.warn("[Warning] Firebase Config Error:", firebaseConfig.error);
+    }
   });
 }
 

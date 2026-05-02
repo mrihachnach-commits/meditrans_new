@@ -8,9 +8,9 @@ export default async function handler(req: CustomRequest, res: any) {
     await checkAdmin(req);
     
     const results: any = {
-      projectId: firebaseConfig ? firebaseConfig.projectId : "unknown",
-      databaseId: firebaseConfig ? firebaseConfig.firestoreDatabaseId : "unknown",
-      configLoaded: !!firebaseConfig && !firebaseConfig.error,
+      projectId: firebaseConfig.projectId,
+      databaseId: firebaseConfig.firestoreDatabaseId,
+      configLoaded: !firebaseConfig.error,
       adminSdk: { status: "unknown" },
       env: {
         VERCEL: process.env.VERCEL || "0",

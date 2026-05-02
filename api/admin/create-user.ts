@@ -14,7 +14,7 @@ export default async function handler(req: CustomRequest, res: any) {
     let uid = "";
     try {
       const currentAdminApp = getAdminApp();
-      if (!currentAdminApp) throw new Error("Admin SDK setup failure");
+      if (!currentAdminApp) throw new Error("Admin SDK not initialized");
       const userRecord = await admin.auth(currentAdminApp).createUser({ 
         email, 
         password, 
