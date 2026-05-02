@@ -136,6 +136,9 @@ export class GeminiService implements TranslationService {
     const { imageBuffer, pageNumber, signal, model } = options;
     const requestModel = model || this.modelName;
     
+    console.log(`[MediTrans] Starting stream translation for page: ${pageNumber} using model: ${requestModel}`);
+    const totalStartTime = Date.now();
+
     if (signal?.aborted) {
       throw new Error("Translation aborted");
     }
@@ -203,6 +206,7 @@ export class GeminiService implements TranslationService {
           throw new Error("Model returned no text.");
         }
         
+        console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
         break;
 
       } catch (error: any) {
@@ -243,6 +247,10 @@ export class GeminiService implements TranslationService {
   async translateMedicalPage(options: TranslationOptions): Promise<string> {
     const { imageBuffer, pageNumber, signal, model } = options;
     const requestModel = model || this.modelName;
+    
+    console.log(`[MediTrans] Starting non-stream translation for page: ${pageNumber} using model: ${requestModel}`);
+    const totalStartTime = Date.now();
+    
     if (signal?.aborted) throw new Error("Translation aborted");
 
     const MAX_RETRIES = 5;
@@ -274,7 +282,9 @@ export class GeminiService implements TranslationService {
 
         const response = await result.response;
         let text = response.text() || "";
-        return text.replace(/\.{6,}/g, '.....');
+        const resultText = text.replace(/\.{6,}/g, '.....');
+        console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
+        return resultText;
       } catch (error: any) {
         if (signal?.aborted) throw new Error("Translation aborted");
         
