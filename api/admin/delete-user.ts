@@ -33,7 +33,6 @@ export default async function handler(req: CustomRequest, res: any) {
     }
     
     await firestoreRest.deleteDoc("users", uid, req.idToken);
-    console.log("[delete-user] Firestore user doc deleted");
     
     if (email) {
       await firestoreRest.setDoc("blacklist", email.toLowerCase(), {
@@ -42,12 +41,10 @@ export default async function handler(req: CustomRequest, res: any) {
         reason: "Deleted by admin",
         createdAt: new Date().toISOString()
       }, req.idToken);
-      console.log("[delete-user] blacklist updated");
     }
     
     return res.status(200).json({ success: true, authDeleted });
   } catch (err: any) {
-    console.error("[delete-user] error:", err);
     return res.status(err.status || 500).json({ error: err.error || err.message, details: err.details });
   }
 }

@@ -10,7 +10,10 @@ export const tokenCache = new Map();
 
 export const checkAdmin = async (req) => {
   try {
-    console.log("[checkAdmin] apiKey exists:", !!firebaseConfig.apiKey);
+    if (firebaseConfig.error) {
+      console.error("[Server] Firebase config error:", firebaseConfig.error);
+      throw { status: 500, error: "Dịch vụ chưa được cấu hình đúng.", details: firebaseConfig.error };
+    }
 
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
