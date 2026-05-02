@@ -10,9 +10,17 @@ export const tokenCache = new Map();
 
 export const checkAdmin = async (req) => {
   try {
-    if (firebaseConfig.error) {
-      console.error("[Server] Firebase config error:", firebaseConfig.error);
-      throw { status: 500, error: "Dịch vụ chưa được cấu hình đúng.", details: firebaseConfig.error };
+    // Ensure initialization first
+    try {
+      getAdminApp();
+    } catch (e) {
+      // getAdminApp handles firebaseConfig.error internally
+    }
+
+    if (!firebaseConfig || firebaseConfig.error) {
+      const errorDetails = firebaseConfig?.error || "Dịch vụ chưa được cấu hình.";
+      console.error("[Server] Firebase config error:", errorDetails);
+      throw { status: 500, error: "Dịch vụ chưa được cấu hình đúng.", details: errorDetails };
     }
 
     const authHeader = req.headers.authorization;
