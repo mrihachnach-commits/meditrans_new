@@ -47,6 +47,7 @@ import {
   Key,
   Activity,
   Zap,
+  Cpu,
   ShieldCheck,
   ShieldAlert,
   User as UserIcon,
@@ -77,7 +78,7 @@ import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 import { saveAs } from 'file-saver';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { TranslationEngine, TranslationService } from './services/translationService';
+import { TranslationEngine, TranslationService, TranslationStyle } from './services/translationService';
 import { 
   auth, 
   firebaseConfig,
@@ -227,14 +228,18 @@ const optimizeCanvasImage = (canvas: HTMLCanvasElement): string => {
 };
 
 // --- COMPONENTS ---
-const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel }: { 
+const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSize }: { 
   content: string; 
   page: number; 
   isStreaming: boolean;
   onCancel: () => void;
+  fontSize?: number;
 }) => {
   return (
-    <div className="markdown-body select-text pb-60 md:pb-0">
+    <div 
+      className="markdown-body select-text pb-60 md:pb-0"
+      style={{ fontSize: fontSize ? `${fontSize}px` : undefined }}
+    >
       <ReactMarkdown remarkPlugins={[remarkGfm]}>
         {content}
       </ReactMarkdown>
@@ -306,11 +311,13 @@ export default function App() {
   useEffect(() => {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
-  const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>('gemini-flash-lite-latest');
+  const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
+    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-flash-lite-latest';
+  });
 
   useEffect(() => {
-    localStorage.setItem('mediTrans_selectedEngine', 'gemini-flash-lite-latest');
-  }, []);
+    localStorage.setItem('mediTrans_selectedEngine', selectedEngine);
+  }, [selectedEngine]);
   
   const [engineKeys, setEngineKeys] = useState<Record<TranslationEngine, string>>(() => {
     const saved = localStorage.getItem('mediTrans_engineKeys');
@@ -318,7 +325,8 @@ export default function App() {
       try {
         const parsed = JSON.parse(saved);
         return { 
-          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-3-flash-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
+          'gemini-3-flash-preview': parsed['gemini-3-flash-preview'] || '',
+          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
         };
       } catch (e) {
         console.error("Failed to parse engine keys:", e);
@@ -326,10 +334,12 @@ export default function App() {
     }
     
     return {
+      'gemini-3-flash-preview': '',
       'gemini-flash-lite-latest': '',
     };
   });
   const [showSettings, setShowSettings] = useState(false);
+  const [showApiSettings, setShowApiSettings] = useState(false);
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [selectedPagesToDownload, setSelectedPagesToDownload] = useState<number[]>([]);
   const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
@@ -356,6 +366,15 @@ export default function App() {
   const [isSavingSummary, setIsSavingSummary] = useState(false);
   const [summaryRange, setSummaryRange] = useState<{from: number, to: number}>({from: 1, to: 1});
   const summarySignalRef = useRef<AbortController | null>(null);
+
+  // New User Preferences
+  const [translationStyle, setTranslationStyle] = useState<TranslationStyle>(() => {
+    return (localStorage.getItem('mediTrans_style') as TranslationStyle) || 'standard';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('mediTrans_style', translationStyle);
+  }, [translationStyle]);
 
   // Initialize summary range when numPages changes
   useEffect(() => {
@@ -682,7 +701,14 @@ export default function App() {
   const renderRequestIdRef = useRef(0);
   const [pdfError, setPdfError] = useState<string | null>(null);
   
-  const [fontSize, setFontSize] = useState(14);
+  const [fontSize, setFontSize] = useState<number>(() => {
+    return Number(localStorage.getItem('mediTrans_fontSize')) || 15;
+  });
+  
+  useEffect(() => {
+    localStorage.setItem('mediTrans_fontSize', fontSize.toString());
+  }, [fontSize]);
+
   const [fontFamily, setFontFamily] = useState('Inter');
   
   // PDF Rendering Cache to prevent re-loading same pages during navigation
@@ -2400,7 +2426,8 @@ export default function App() {
     targetPage: number, 
     signal: AbortSignal, 
     engine?: TranslationEngine,
-    onProgress?: (content: string) => void
+    onProgress?: (content: string) => void,
+    style?: TranslationStyle
   ) => {
     const currentFileId = fileIdRef.current;
     if (!translationService.current || !currentFileId || !pdfDoc) return null;
@@ -2436,7 +2463,8 @@ export default function App() {
         imageBuffer, 
         pageNumber: targetPage, 
         signal,
-        model: engine
+        model: engine || selectedEngine,
+        style: style || translationStyle
       });
 
       let fullContent = "";
@@ -3526,9 +3554,17 @@ export default function App() {
           <button 
             onClick={() => setShowSettings(true)}
             className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
-            title="Cài đặt API Key"
+            title="Cài đặt hệ thống"
           >
             <Settings className="w-4 h-4" />
+          </button>
+
+          <button 
+            onClick={() => setShowApiSettings(true)}
+            className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
+            title="Quản lý API Keys"
+          >
+            <Key className="w-4 h-4" />
           </button>
 
           <button 
@@ -3669,9 +3705,16 @@ export default function App() {
                       <button 
                         onClick={() => setShowSettings(true)}
                         className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
-                        title="Cài đặt"
+                        title="Cài đặt hệ thống"
                       >
                         <Settings className="w-3.5 h-3.5" />
+                      </button>
+                      <button 
+                        onClick={() => setShowApiSettings(true)}
+                        className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
+                        title="Quản lý API Keys"
+                      >
+                        <Key className="w-3.5 h-3.5" />
                       </button>
                       <button 
                         onClick={clearFile}
@@ -3863,8 +3906,16 @@ export default function App() {
                       <button 
                         onClick={() => setShowSettings(true)}
                         className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
+                        title="Cài đặt hệ thống"
                       >
                         <Settings className="w-3.5 h-3.5" />
+                      </button>
+                      <button 
+                        onClick={() => setShowApiSettings(true)}
+                        className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
+                        title="Quản lý API Keys"
+                      >
+                        <Key className="w-3.5 h-3.5" />
                       </button>
                       <button 
                         onClick={clearFile}
@@ -3972,7 +4023,7 @@ export default function App() {
                       </button>
 
                       <button 
-                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
+                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-3-flash-preview')}
                         disabled={isTranslating || isRendering}
                         className={cn(
                           "px-3 md:px-4 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1.5 md:gap-2 shadow-lg",
@@ -3980,7 +4031,7 @@ export default function App() {
                             ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
                             : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 active:scale-95"
                         )}
-                        title="Dịch nhanh bằng Gemini Flash-Lite Latest"
+                        title="Dịch chất lượng cao bằng Gemini 3 Flash"
                       >
                         {isTranslating || isRendering ? (
                           <>
@@ -3990,7 +4041,7 @@ export default function App() {
                         ) : (
                           <>
                             <Sparkles className="w-3 h-3 md:w-3.5 md:h-3.5" />
-                            <span>{translations[currentPage] ? 'Dịch lại' : 'Dịch trang'}</span>
+                            <span>{translations[currentPage] ? 'Dịch lại (Chuyên sâu)' : 'Dịch chuyên sâu'}</span>
                           </>
                         )}
                       </button>
@@ -4293,11 +4344,11 @@ export default function App() {
 
                       <div className="flex flex-wrap justify-center gap-3">
                         <button 
-                          onClick={() => setShowSettings(true)}
+                          onClick={() => setShowApiSettings(true)}
                           className="px-5 py-2.5 bg-rose-600 text-white rounded-2xl text-xs font-bold hover:bg-rose-700 transition-all shadow-lg shadow-rose-200 flex items-center gap-2"
                         >
-                          <Settings className="w-3.5 h-3.5" />
-                          Cấu hình lại Key
+                          <Key className="w-3.5 h-3.5" />
+                          Quản lý API Key
                         </button>
                         <button 
                           onClick={() => translateCurrentPage(currentPage, true)}
@@ -4337,14 +4388,15 @@ export default function App() {
                                    fontFamily
                       }}
                     >
-                      <TranslationMarkdown 
-                        content={activeTranslation && activeTranslation.page === currentPage 
-                          ? activeTranslation.content 
-                          : translations[currentPage]?.content || ''}
-                        page={currentPage}
-                        isStreaming={!!(activeTranslation && activeTranslation.page === currentPage && activeTranslation.status === 'loading')}
-                        onCancel={cancelTranslation}
-                      />
+                        <TranslationMarkdown 
+                          content={activeTranslation && activeTranslation.page === currentPage 
+                            ? activeTranslation.content 
+                            : translations[currentPage]?.content || ''}
+                          page={currentPage}
+                          isStreaming={!!(activeTranslation && activeTranslation.page === currentPage && activeTranslation.status === 'loading')}
+                          onCancel={cancelTranslation}
+                          fontSize={fontSize}
+                        />
 
                       {/* Mobile Navigation Buttons - Removed as redundant with floating bar */}
                     </motion.div>
@@ -4904,6 +4956,68 @@ export default function App() {
                 <div className="space-y-4 pt-4 border-t border-slate-100">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
+                      <ALargeSmall className="w-4 h-4 text-amber-500" />
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
+                        Cỡ chữ bản dịch
+                      </label>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[10px] font-bold text-slate-400">{fontSize}px</span>
+                      <input 
+                        type="range" 
+                        min="10" 
+                        max="24" 
+                        step="1"
+                        value={fontSize}
+                        onChange={(e) => setFontSize(Number(e.target.value))}
+                        className="w-24 h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-violet-500" />
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
+                        Phong cách dịch
+                      </label>
+                    </div>
+                    <select 
+                      value={translationStyle}
+                      onChange={(e) => setTranslationStyle(e.target.value as TranslationStyle)}
+                      className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    >
+                      <option value="standard">Tiêu chuẩn (Chuyên nghiệp)</option>
+                      <option value="simple">Dễ hiểu (Cho bệnh nhân)</option>
+                      <option value="academic">Hàn lâm (Để nghiên cứu)</option>
+                      <option value="expert">Chuyên gia (Phân tích sâu)</option>
+                      <option value="creative">Trực quan (Tóm lược ý)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-4 pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Cpu className="w-4 h-4 text-indigo-500" />
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
+                        Chế độ dịch mặc định
+                      </label>
+                    </div>
+                    <select 
+                      value={selectedEngine}
+                      onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
+                      className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    >
+                      <option value="gemini-flash-lite-latest">Cơ bản (Flash Lite)</option>
+                      <option value="gemini-3-flash-preview">Chuyên sâu (Flash 3)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-4 pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
                       <Zap className="w-4 h-4 text-emerald-500" />
                       <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
                         Tự động dịch (Auto-Translate)
@@ -4965,14 +5079,24 @@ export default function App() {
                             setShowBulkConfirm(false);
                             startBulkTranslation('gemini-flash-lite-latest');
                           }}
+                          className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
+                        >
+                          <Zap className="w-3.5 h-3.5" />
+                          Dịch toàn bộ (Cơ bản)
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowBulkConfirm(false);
+                            startBulkTranslation('gemini-3-flash-preview');
+                          }}
                           className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2"
                         >
-                          <Zap className="w-4 h-4" />
-                          Bắt đầu dịch toàn bộ
+                          <Sparkles className="w-4 h-4" />
+                          Dịch chuyên sâu (Gemini 3)
                         </button>
                         <button
                           onClick={() => setShowBulkConfirm(false)}
-                          className="w-full py-2.5 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-bold uppercase hover:bg-slate-200"
+                          className="w-full py-2.5 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-bold uppercase hover:bg-slate-200 transition-all"
                         >
                           Hủy
                         </button>
@@ -5058,6 +5182,53 @@ export default function App() {
                   )}
                 </div>
 
+                <div className="p-6 border-t border-slate-100 bg-slate-50 flex gap-3 shrink-0">
+                  <button 
+                    onClick={() => setShowSettings(false)}
+                    className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200"
+                  >
+                    Hoàn tất
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* API Keys Modal */}
+      <AnimatePresence>
+        {showApiSettings && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowApiSettings(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="bg-indigo-100 p-2 rounded-xl">
+                    <Key className="text-indigo-600 w-5 h-5" />
+                  </div>
+                  <h3 className="text-xl font-display font-bold text-slate-800">Quản lý API Keys</h3>
+                </div>
+                <button 
+                  onClick={() => setShowApiSettings(false)}
+                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto p-6 space-y-6 no-scrollbar">
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">
@@ -5073,10 +5244,10 @@ export default function App() {
                 </div>
                 
                 {/* Key Vault Section */}
-                <div className="pt-4 border-t border-slate-100">
+                <div className="pt-4">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
-                      <Key className="w-4 h-4 text-indigo-500" />
+                      <ShieldCheck className="w-4 h-4 text-indigo-500" />
                       <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
                         Kho lưu trữ Key (Vault)
                       </label>
@@ -5170,7 +5341,7 @@ export default function App() {
                         </motion.div>
                       )}
 
-                      <div className="max-h-[200px] overflow-y-auto pr-2 space-y-2 no-scrollbar">
+                      <div className="max-h-[300px] overflow-y-auto pr-2 space-y-2 no-scrollbar">
                         {userKeys.length === 0 ? (
                           <p className="text-[10px] text-slate-400 text-center py-4 italic">Chưa có Key nào trong kho lưu trữ.</p>
                         ) : (
@@ -5256,21 +5427,15 @@ export default function App() {
                   )}
                 </div>
               </div>
-              
-                  <div className="p-6 border-t border-slate-100 bg-slate-50 flex gap-3 shrink-0">
-                    <button 
-                      onClick={() => setShowSettings(false)}
-                      className="flex-1 px-6 py-3 rounded-xl text-sm font-bold text-slate-500 hover:bg-slate-100 transition-colors"
-                    >
-                      Đóng
-                    </button>
-                    <button 
-                      onClick={() => saveSettings()}
-                      className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200"
-                    >
-                      Hoàn tất
-                    </button>
-                  </div>
+
+              <div className="p-6 border-t border-slate-100 bg-slate-50 flex gap-3 shrink-0">
+                <button 
+                  onClick={() => setShowApiSettings(false)}
+                  className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200"
+                >
+                  Hoàn tất
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

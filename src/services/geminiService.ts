@@ -133,17 +133,25 @@ export class GeminiService implements TranslationService {
   }
 
   async *translateMedicalPageStream(options: TranslationOptions): AsyncGenerator<string> {
-    const { imageBuffer, pageNumber, signal, model } = options;
+    const { imageBuffer, pageNumber, signal, model, style = 'standard' } = options;
     const requestModel = model || this.modelName;
     
-    console.log(`[MediTrans] Starting stream translation for page: ${pageNumber} using model: ${requestModel}`);
+    console.log(`[MediTrans] Starting stream translation for page: ${pageNumber} using model: ${requestModel}, style: ${style}`);
     const totalStartTime = Date.now();
 
     if (signal?.aborted) {
       throw new Error("Translation aborted");
     }
 
-    const systemInstruction = `BÁC SĨ DỊCH THUẬT: Dịch trang ${pageNumber} sang tiếng Việt. Markdown chuẩn. Thuật ngữ y khoa chính xác. Cực kỳ súc tích. KHÔNG lời dẫn.`;
+    const stylePrompts = {
+      standard: "Thuật ngữ y khoa chính xác, văn phong chuyên nghiệp.",
+      simple: "Giải thích thuật ngữ khó bằng từ ngữ thông dụng, dễ hiểu cho người không chuyên.",
+      academic: "Hàn lâm, bám sát cấu trúc câu gốc, phù hợp cho nghiên cứu.",
+      expert: "Phân tích sâu, giữ các thuật ngữ gốc quan trọng bên cạnh bản dịch.",
+      creative: "Trình bày trực quan, sử dụng các ký hiệu hoặc cấu trúc rõ ràng để tóm lược ý chính."
+    };
+
+    const systemInstruction = `BÁC SĨ DỊCH THUẬT: Dịch trang ${pageNumber} sang tiếng Việt. Markdown chuẩn. ${stylePrompts[style]} Cực kỳ súc tích. KHÔNG lời dẫn.`;
 
     const prompt = `Dịch trang y khoa này sang tiếng Việt.`;
 
@@ -255,16 +263,24 @@ export class GeminiService implements TranslationService {
   }
 
   async translateMedicalPage(options: TranslationOptions): Promise<string> {
-    const { imageBuffer, pageNumber, signal, model } = options;
+    const { imageBuffer, pageNumber, signal, model, style = 'standard' } = options;
     const requestModel = model || this.modelName;
     
-    console.log(`[MediTrans] Starting non-stream translation for page: ${pageNumber} using model: ${requestModel}`);
+    console.log(`[MediTrans] Starting non-stream translation for page: ${pageNumber} using model: ${requestModel}, style: ${style}`);
     const totalStartTime = Date.now();
     
     if (signal?.aborted) throw new Error("Translation aborted");
 
     const MAX_RETRIES = 5;
     let retryCount = 0;
+
+    const stylePrompts = {
+      standard: "Thuật ngữ y khoa chính xác, văn phong chuyên nghiệp.",
+      simple: "Giải thích thuật ngữ khó bằng từ ngữ thông dụng, dễ hiểu cho người không chuyên.",
+      academic: "Hàn lâm, bám sát cấu trúc câu gốc, phù hợp cho nghiên cứu.",
+      expert: "Phân tích sâu, giữ các thuật ngữ gốc quan trọng bên cạnh bản dịch.",
+      creative: "Trình bày trực quan, sử dụng các ký hiệu hoặc cấu trúc rõ ràng để tóm lược ý chính."
+    };
 
     while (retryCount <= MAX_RETRIES) {
       if (signal?.aborted) throw new Error("Translation aborted");
@@ -275,7 +291,7 @@ export class GeminiService implements TranslationService {
         throw new Error("Không tìm thấy API Key khả dụng.");
       }
 
-      const systemInstruction = `Dịch y khoa chuẩn (OCR). Trang ${pageNumber}. Markdown. Cực kỳ súc tích.`;
+      const systemInstruction = `Dịch y khoa chuẩn (OCR). Trang ${pageNumber}. Markdown. ${stylePrompts[style]} Cực kỳ súc tích.`;
       const prompt = `Dịch văn bản trong ảnh sang tiếng Việt.`;
 
       try {
