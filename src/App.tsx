@@ -557,10 +557,13 @@ export default function App() {
         try {
           finalFile = await reconstructPdfForUniversalCompatibility(fileToUpload, (progress) => {
             setUploadTasks(prev => prev.map(t => 
-              t.id === taskId ? { ...t, progress: Math.round(progress * 0.8) } : t
+              t.id === taskId ? { ...t, progress: Math.round(progress) } : t
             ));
           });
           console.log(`[MediTrans AI] Optimization finished: ${(finalFile.size / 1024 / 1024).toFixed(2)}MB`);
+          
+          // Small delay to ensure state updates before next phase
+          await new Promise(r => setTimeout(r, 300));
         } catch (optimizeError) {
           console.warn("[MediTrans AI] Optimization failed, attempting direct upload (may fail on Vercel):", optimizeError);
           // Fallback to original if optimization fails
