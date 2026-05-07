@@ -49,6 +49,7 @@
       "properties": {
         "name": { "type": "string", "description": "The name of the folder." },
         "parentId": { "type": "string", "description": "The ID of the parent folder." },
+        "sharedWith": { "type": "array", "items": { "type": "string" }, "description": "Emails shared with." },
         "createdAt": { "type": "string", "format": "date-time", "description": "When created." }
       },
       "required": ["name", "createdAt"]
