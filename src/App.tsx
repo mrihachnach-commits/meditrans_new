@@ -2082,48 +2082,58 @@ export default function App() {
       
       const outPdf = await PDFDocument.create();
       const numPages = pdf.numPages;
+      const limit = Math.min(numPages, 150);
       
-      // We'll reconstruct a maximum of 50 pages for stability on mobile browser RAM
-      // or use lower quality for very long documents
-      const limit = Math.min(numPages, 100);
-      
-      for (let i = 1; i <= limit; i++) {
-        const page = await pdf.getPage(i);
-        const scale = 1.5; // Standard high quality
-        const viewport = page.getViewport({ scale });
+      // Tính toán chất lượng dựa trên số trang để đảm bảo tốc độ và dung lượng
+      // Càng nhiều trang thì nén càng mạnh để file nhỏ đi nhanh hơn
+      const quality = limit > 50 ? 0.35 : 0.5;
+      const targetWidth = limit > 50 ? 850 : 1000;
+
+      // Xử lý song song theo cụm (Chunks) để đẩy nhanh tốc độ render
+      const chunkSize = 4;
+      let processed = 0;
+
+      for (let i = 1; i <= limit; i += chunkSize) {
+        const chunk = Array.from({ length: Math.min(chunkSize, limit - i + 1) }, (_, j) => i + j);
         
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        if (!context) continue;
-        
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        
-        await page.render({
-          canvasContext: context,
-          viewport: viewport
-        }).promise;
-        
-        // Convert to highly optimized JPEG
-        const imgData = canvas.toDataURL('image/jpeg', 0.6);
-        const imgBytes = await fetch(imgData).then(res => res.arrayBuffer());
-        const embeddedImg = await outPdf.embedJpg(imgBytes);
-        
-        const { width, height } = embeddedImg.scale(1.0);
-        const newPage = outPdf.addPage([width, height]);
-        newPage.drawImage(embeddedImg, {
-          x: 0,
-          y: 0,
-          width,
-          height,
-        });
-        
-        onProgress((i / limit) * 100);
-        
-        // Clean up
-        page.cleanup();
-        canvas.width = 0;
-        canvas.height = 0;
+        const chunkResults = await Promise.all(chunk.map(async (pageNum) => {
+          const page = await pdf.getPage(pageNum);
+          const originalViewport = page.getViewport({ scale: 1.0 });
+          const scale = Math.min(targetWidth / originalViewport.width, 1.2);
+          const viewport = page.getViewport({ scale });
+          
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d', { alpha: false, desynchronized: true });
+          if (!context) return null;
+          
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          
+          await page.render({ canvasContext: context, viewport, intent: 'print' }).promise;
+          
+          const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+          let result = null;
+          if (blob) {
+            const bytes = await blob.arrayBuffer();
+            result = { bytes, width: viewport.width, height: viewport.height };
+          }
+          
+          canvas.width = 0; canvas.height = 0;
+          page.cleanup();
+          return result;
+        }));
+
+        // Thêm vào PDF theo đúng thứ tự đồng bộ để tránh lỗi race condition và thứ tự trang
+        for (const res of chunkResults) {
+          if (res) {
+            const embeddedImg = await outPdf.embedJpg(res.bytes);
+            const { width, height } = embeddedImg.scale(1.0);
+            const newPage = outPdf.addPage([width, height]);
+            newPage.drawImage(embeddedImg, { x: 0, y: 0, width, height });
+          }
+          processed++;
+          if (processed <= limit) onProgress((processed / limit) * 100);
+        }
       }
       
       const finalBytes = await outPdf.save();
@@ -5064,6 +5074,33 @@ export default function App() {
                         onChange={(e) => setFontSize(Number(e.target.value))}
                         className="w-24 h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
                       />
+                    </div>
+                  </div>
+                  <div className="pt-4 border-t border-slate-100 grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Phong cách</label>
+                      <select 
+                        value={translationStyle}
+                        onChange={(e) => setTranslationStyle(e.target.value as TranslationStyle)}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      >
+                        <option value="standard">Tiêu chuẩn</option>
+                        <option value="simple">Dễ hiểu</option>
+                        <option value="academic">Hàn lâm</option>
+                        <option value="expert">Chuyên gia</option>
+                        <option value="creative">Trực quan</option>
+                      </select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Mô hình AI</label>
+                      <select 
+                        value={selectedEngine}
+                        onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      >
+                        <option value="gemini-flash-lite-latest">Flash Lite</option>
+                        <option value="gemini-3-flash-preview">Flash 3</option>
+                      </select>
                     </div>
                   </div>
                 </div>
