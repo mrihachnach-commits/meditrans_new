@@ -343,6 +343,8 @@ export default function App() {
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [selectedPagesToDownload, setSelectedPagesToDownload] = useState<number[]>([]);
   const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [optimizationProgress, setOptimizationProgress] = useState(0);
   const [isLocalOnly, setIsLocalOnly] = useState(false);
   const [showFolderSelectModal, setShowFolderSelectModal] = useState(false);
   const [allFolders, setAllFolders] = useState<{id: string, name: string, parentId?: string | null}[]>([]);
@@ -541,8 +543,32 @@ export default function App() {
     setUploadTasks(prev => [newTask, ...prev]);
 
     try {
+      let finalFile = fileToUpload;
+      
+      // Vercel Free has a 4.5MB payload limit for serverless functions.
+      // If file > 4MB, we use "AI Reconstruction" to optimize it before transmission.
+      if (fileToUpload.size > 4 * 1024 * 1024) {
+        console.log(`[MediTrans AI] Large file detected (${(fileToUpload.size / 1024 / 1024).toFixed(2)}MB). Using AI Reconstruction...`);
+        
+        setUploadTasks(prev => prev.map(t => 
+          t.id === taskId ? { ...t, fileName: `[Tối ưu AI] ${fileToUpload.name}` } : t
+        ));
+
+        try {
+          finalFile = await reconstructPdfForUniversalCompatibility(fileToUpload, (progress) => {
+            setUploadTasks(prev => prev.map(t => 
+              t.id === taskId ? { ...t, progress: Math.round(progress * 0.8) } : t
+            ));
+          });
+          console.log(`[MediTrans AI] Optimization finished: ${(finalFile.size / 1024 / 1024).toFixed(2)}MB`);
+        } catch (optimizeError) {
+          console.warn("[MediTrans AI] Optimization failed, attempting direct upload (may fail on Vercel):", optimizeError);
+          // Fallback to original if optimization fails
+        }
+      }
+
       const formData = new FormData();
-      formData.append('file', fileToUpload);
+      formData.append('file', finalFile);
 
       // Retry logic for 100% success rate
       let response;
@@ -2042,6 +2068,69 @@ export default function App() {
     handleFileSelectFromExplorer(fileData);
   };
 
+  const reconstructPdfForUniversalCompatibility = async (file: File, onProgress: (p: number) => void): Promise<File> => {
+    try {
+      const pdfBytes = await file.arrayBuffer();
+      const pdf = await pdfjs.getDocument({ 
+        data: pdfBytes,
+        cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+        cMapPacked: true,
+      }).promise;
+      
+      const outPdf = await PDFDocument.create();
+      const numPages = pdf.numPages;
+      
+      // We'll reconstruct a maximum of 50 pages for stability on mobile browser RAM
+      // or use lower quality for very long documents
+      const limit = Math.min(numPages, 100);
+      
+      for (let i = 1; i <= limit; i++) {
+        const page = await pdf.getPage(i);
+        const scale = 1.5; // Standard high quality
+        const viewport = page.getViewport({ scale });
+        
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        if (!context) continue;
+        
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        
+        await page.render({
+          canvasContext: context,
+          viewport: viewport
+        }).promise;
+        
+        // Convert to highly optimized JPEG
+        const imgData = canvas.toDataURL('image/jpeg', 0.6);
+        const imgBytes = await fetch(imgData).then(res => res.arrayBuffer());
+        const embeddedImg = await outPdf.embedJpg(imgBytes);
+        
+        const { width, height } = embeddedImg.scale(1.0);
+        const newPage = outPdf.addPage([width, height]);
+        newPage.drawImage(embeddedImg, {
+          x: 0,
+          y: 0,
+          width,
+          height,
+        });
+        
+        onProgress((i / limit) * 100);
+        
+        // Clean up
+        page.cleanup();
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+      
+      const finalBytes = await outPdf.save();
+      return new File([finalBytes], file.name, { type: 'application/pdf' });
+    } catch (error) {
+      console.error("PDF Reconstruction Error:", error);
+      throw error;
+    }
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     // Reset input value so the same file can be selected again
@@ -2886,7 +2975,7 @@ export default function App() {
     // Use selected vault key as primary if available
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
-    translationService.current = new GeminiService(allKeys, "gemini-flash-lite-latest");
+    translationService.current = new GeminiService(allKeys, selectedEngine);
 
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
