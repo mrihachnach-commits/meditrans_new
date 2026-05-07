@@ -5066,55 +5066,6 @@ export default function App() {
                       />
                     </div>
                   </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-violet-500" />
-                      <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
-                        Phong cách dịch
-                      </label>
-                    </div>
-                    <select 
-                      value={translationStyle}
-                      onChange={(e) => setTranslationStyle(e.target.value as TranslationStyle)}
-                      className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
-                    >
-                      <option value="standard">Tiêu chuẩn (Chuyên nghiệp)</option>
-                      <option value="simple">Dễ hiểu (Cho bệnh nhân)</option>
-                      <option value="academic">Hàn lâm (Để nghiên cứu)</option>
-                      <option value="expert">Chuyên gia (Phân tích sâu)</option>
-                      <option value="creative">Trực quan (Tóm lược ý)</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="space-y-4 pt-4 border-t border-slate-100">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Cpu className="w-4 h-4 text-indigo-500" />
-                      <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
-                        Chế độ dịch mặc định
-                      </label>
-                    </div>
-                    <select 
-                      value={selectedEngine}
-                      onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
-                      className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
-                    >
-                      <option value="gemini-flash-lite-latest">Flash Lite (Ưu tiên Hạn mức/Tốc độ)</option>
-                      <option value="gemini-3-flash-preview">Flash 3 (Ưu tiên Chất lượng/Chuyên sâu)</option>
-                    </select>
-                  </div>
-                  <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <ShieldAlert className="w-3 h-3 text-amber-600" />
-                      <span className="text-[9px] font-black text-amber-800 uppercase tracking-wider">Thông tin hạn mức (Quota)</span>
-                    </div>
-                    <p className="text-[10px] leading-relaxed text-amber-700/80">
-                      • <strong className="text-amber-900">Flash Lite:</strong> Hạn mức cao nhất, cực nhanh, phù hợp dịch toàn bộ tài liệu.<br/>
-                      • <strong className="text-amber-900">Flash 3:</strong> Mô hình mới nhất, dịch chuẩn hơn nhưng hạn mức (RPM) có thể bị giới hạn thấp hơn tùy theo bậc API Key của bạn.
-                    </p>
-                  </div>
                 </div>
 
                 <div className="space-y-4 pt-4 border-t border-slate-100">
