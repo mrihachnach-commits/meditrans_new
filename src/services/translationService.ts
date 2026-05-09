@@ -17,7 +17,7 @@ export interface TranslationService {
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
 }
 
-export type TranslationEngine = 'gemini-3-flash-preview' | 'gemini-flash-lite-latest';
+export type TranslationEngine = 'gemini-3-flash-preview' | 'gemini-flash-latest' | 'gemini-flash-lite-latest';
 
 export interface EngineConfig {
   apiKey?: string;
