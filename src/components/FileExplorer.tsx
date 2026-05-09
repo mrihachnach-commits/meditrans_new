@@ -23,7 +23,8 @@ import {
   Type,
   Share2,
   Users,
-  Zap
+  Zap,
+  Link as LinkIcon
 } from 'lucide-react';
 import { 
   db, 
@@ -73,11 +74,22 @@ export interface FileData {
 interface FileExplorerProps {
   onFileSelect: (file: FileData) => void;
   onUploadStart: (file: File, folderId: string | null) => void;
+  onAdminUploadStart?: (file: File, folderId: string | null) => void;
+  onImportFromCode?: (code: string, folderId: string | null) => void;
   onLocalFileOpen: (file: File) => void;
   onBulkTranslate?: (file: FileData) => void;
+  userRole?: 'admin' | 'user' | null;
 }
 
-export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate }) => {
+export const FileExplorer: React.FC<FileExplorerProps> = ({ 
+  onFileSelect, 
+  onUploadStart, 
+  onAdminUploadStart,
+  onImportFromCode,
+  onLocalFileOpen, 
+  onBulkTranslate,
+  userRole
+}) => {
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'my' | 'shared'>('my');
   const [myFolders, setMyFolders] = useState<FolderData[]>([]);
@@ -88,6 +100,9 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
   
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importCode, setImportCode] = useState('');
   
   const [showRenameModal, setShowRenameModal] = useState<{id: string, name: string, type: 'file' | 'folder'} | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -267,6 +282,13 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
     e.target.value = '';
   };
 
+  const handleAdminUploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user || !onAdminUploadStart) return;
+    onAdminUploadStart(file, currentFolderId);
+    e.target.value = '';
+  };
+
   const handleDeleteItem = async () => {
     if (!user || !showDeleteConfirm) return;
 
@@ -296,6 +318,14 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       const collectionName = showRenameModal.type === 'file' ? 'documents' : 'folders';
       handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/${collectionName}/${showRenameModal.id}`);
     }
+  };
+
+  const handleImportSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importCode.trim() || !onImportFromCode) return;
+    onImportFromCode(importCode.trim(), currentFolderId);
+    setImportCode('');
+    setShowImportModal(false);
   };
 
   const handleCloneSharedFile = async (file: FileData, targetFolderId: string | null) => {
@@ -573,6 +603,14 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
           </div>
 
           <button 
+            onClick={() => setShowImportModal(true)}
+            className="p-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-all shadow-sm"
+            title="Nhập từ mã TinyVault"
+          >
+            <LinkIcon className="w-5 h-5" />
+          </button>
+
+          <button 
             onClick={() => setShowNewFolderModal(true)}
             className="p-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-all shadow-sm"
             title="Tạo thư mục mới"
@@ -589,6 +627,13 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
             <Upload className="w-5 h-5" />
             <input type="file" className="hidden" accept=".pdf" onChange={handleUploadFile} />
           </label>
+
+          {userRole === 'admin' && onAdminUploadStart && (
+            <label className="p-2.5 bg-rose-600 text-white rounded-xl hover:bg-rose-700 transition-all shadow-lg shadow-rose-100 cursor-pointer" title="[ADMIN] Tải lên không nén">
+              <Zap className="w-5 h-5" />
+              <input type="file" className="hidden" accept=".pdf" onChange={handleAdminUploadFile} />
+            </label>
+          )}
         </div>
       </div>
 
@@ -1140,6 +1185,62 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                   Tạo mới
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Import Modal */}
+      <AnimatePresence>
+        {showImportModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowImportModal(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden p-8"
+            >
+              <div className="bg-indigo-50 w-16 h-16 rounded-2xl flex items-center justify-center mb-6 mx-auto">
+                <LinkIcon className="w-8 h-8 text-indigo-500" />
+              </div>
+              <h3 className="text-xl font-display font-bold text-slate-800 mb-2 text-center">Nhập từ TinyVault</h3>
+              <p className="text-slate-500 text-sm text-center mb-6">
+                Dán mã truy cập hoặc đường dẫn TinyVault để nhập tài liệu.
+              </p>
+              
+              <form onSubmit={handleImportSubmit}>
+                <input 
+                  type="text" 
+                  placeholder="Mã hoặc Link TinyVault..." 
+                  value={importCode}
+                  onChange={(e) => setImportCode(e.target.value)}
+                  autoFocus
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm mb-6"
+                />
+                
+                <div className="flex gap-3">
+                  <button 
+                    type="button"
+                    onClick={() => setShowImportModal(false)}
+                    className="flex-1 px-6 py-3 rounded-xl text-sm font-bold text-slate-500 hover:bg-slate-100 transition-colors"
+                  >
+                    Hủy
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+                  >
+                    Nhập ngay
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}

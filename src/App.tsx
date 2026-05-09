@@ -368,6 +368,7 @@ export default function App() {
   const [isSavingSummary, setIsSavingSummary] = useState(false);
   const [summaryRange, setSummaryRange] = useState<{from: number, to: number}>({from: 1, to: 1});
   const summarySignalRef = useRef<AbortController | null>(null);
+  const [pendingSkipOptimization, setPendingSkipOptimization] = useState(false);
 
   // New User Preferences
   const [translationStyle, setTranslationStyle] = useState<TranslationStyle>(() => {
@@ -528,7 +529,7 @@ export default function App() {
     }
   };
 
-  const startUpload = async (fileToUpload: File, folderId: string | null) => {
+  const startUpload = async (fileToUpload: File, folderId: string | null, skipOptimization = false) => {
     const user = auth.currentUser;
     if (!user) return;
 
@@ -545,29 +546,31 @@ export default function App() {
     try {
       let finalFile = fileToUpload;
       
-      // Vercel Free has a 4.5MB payload limit for serverless functions.
-      // If file > 4MB, we use "AI Reconstruction" to optimize it before transmission.
-      if (fileToUpload.size > 4 * 1024 * 1024) {
-        console.log(`[MediTrans AI] Large file detected (${(fileToUpload.size / 1024 / 1024).toFixed(2)}MB). Using AI Reconstruction...`);
+      // Vercel Free has a 4.5MB payload limit. 
+      // We only optimize if the file is truly risky (> 4.3MB) to save time for 99% of files.
+      if (!skipOptimization && fileToUpload.size > 4.3 * 1024 * 1024) {
+        console.log(`[MediTrans AI] File lớn (${(fileToUpload.size / 1024 / 1024).toFixed(2)}MB). Đang nén siêu tốc...`);
         
         setUploadTasks(prev => prev.map(t => 
-          t.id === taskId ? { ...t, fileName: `[Tối ưu AI] ${fileToUpload.name}` } : t
+          t.id === taskId ? { ...t, fileName: `[⚡ Nén AI] ${fileToUpload.name}` } : t
         ));
 
         try {
           finalFile = await reconstructPdfForUniversalCompatibility(fileToUpload, (progress) => {
             setUploadTasks(prev => prev.map(t => 
-              t.id === taskId ? { ...t, progress: Math.round(progress) } : t
+              t.id === taskId ? { ...t, progress: Math.round(progress * 0.7) } : t
             ));
           });
-          console.log(`[MediTrans AI] Optimization finished: ${(finalFile.size / 1024 / 1024).toFixed(2)}MB`);
           
-          // Small delay to ensure state updates before next phase
-          await new Promise(r => setTimeout(r, 300));
+          console.log(`[MediTrans AI] Nén xong: ${(finalFile.size / 1024 / 1024).toFixed(2)}MB`);
+          await new Promise(r => setTimeout(r, 200));
         } catch (optimizeError) {
-          console.warn("[MediTrans AI] Optimization failed, attempting direct upload (may fail on Vercel):", optimizeError);
-          // Fallback to original if optimization fails
+          console.warn("[MediTrans AI] Lỗi nén, tải trực tiếp:", optimizeError);
         }
+      } else if (skipOptimization && fileToUpload.size > 4.3 * 1024 * 1024) {
+        // HÀNH VI CŨ (3/5): Nén nhẹ bằng pdf-lib để giữ định dạng gốc nhưng sạch hơn
+        console.log(`[MediTrans AI] Admin Mode: Đang tối ưu nhẹ file...`);
+        finalFile = await lightOptimizePdf(fileToUpload);
       }
 
       const formData = new FormData();
@@ -580,22 +583,52 @@ export default function App() {
 
       while (retries > 0) {
         try {
-          response = await fetch('/api/tinyvault', {
-            method: 'POST',
-            body: formData
+          const uploadPromise = new Promise<any>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/tinyvault');
+            
+            xhr.upload.onprogress = (event) => {
+              if (event.lengthComputable) {
+                const percentComplete = (event.loaded / event.total) * 100;
+                // Nếu nén, nén chiếm 70% thanh progress, tải lên chiếm 30% còn lại
+                const finalProgress = fileToUpload.size > 4.3 * 1024 * 1024 
+                  ? 70 + (percentComplete * 0.3) 
+                  : percentComplete;
+                  
+                setUploadTasks(prev => prev.map(t => 
+                  t.id === taskId ? { ...t, progress: Math.min(99, Math.round(finalProgress)) } : t
+                ));
+              }
+            };
+
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                resolve({ ok: true, status: xhr.status, data: JSON.parse(xhr.responseText) });
+              } else {
+                resolve({ ok: false, status: xhr.status, data: xhr.responseText });
+              }
+            };
+
+            xhr.onerror = () => reject(new Error('Network error during upload'));
+            xhr.send(formData);
           });
-          if (response.ok) break;
+
+          const uploadResult = await uploadPromise;
+          if (uploadResult.ok) {
+            response = { ok: true, json: async () => uploadResult.data, status: uploadResult.status };
+            break;
+          }
           
-          // If 5xx or 429, retry
-          if (response.status >= 500 || response.status === 429) {
+          if (uploadResult.status >= 500 || uploadResult.status === 429) {
             retries--;
             if (retries > 0) {
               await new Promise(resolve => setTimeout(resolve, delay));
-              delay *= 2; // Exponential backoff
+              delay *= 2;
               continue;
             }
           }
-          break; // Other errors don't retry
+          response = { ok: false, status: uploadResult.status, json: async () => ({ error: uploadResult.data }) };
+          break;
         } catch (e) {
           retries--;
           if (retries === 0) throw e;
@@ -648,6 +681,73 @@ export default function App() {
       setUploadTasks(prev => prev.map(t => 
         t.id === taskId ? { ...t, status: 'error' } : t
       ));
+    }
+  };
+
+  const startAdminUpload = async (file: File, folderId: string | null) => {
+    if (userRole !== 'admin') return;
+    showToast("Đang tải lên không nén (Admin mode)", "info");
+    startUpload(file, folderId, true);
+  };
+
+  const handleImportFromCode = async (code: string, folderId: string | null) => {
+    if (!user || !code.trim()) return;
+
+    let input = code.trim();
+    let token = input;
+    
+    // Trích xuất mã ID từ link một cách thông minh
+    try {
+      if (input.includes('tinyvault.space')) {
+        // Dùng URL object để parse chính xác
+        const urlObj = new URL(input.startsWith('http') ? input : `https://${input}`);
+        const parts = urlObj.pathname.split('/').filter(Boolean);
+        // Lấy phần cuối cùng (thường là token)
+        token = parts[parts.length - 1];
+      } else if (input.includes('/')) {
+        token = input.split('/').filter(Boolean).pop()?.split('?')[0] || input;
+      } else {
+        token = input.replace(/\s/g, '');
+      }
+    } catch (e) {
+      token = input.replace(/\s/g, '');
+    }
+
+    if (!token || token.length < 5) {
+      showToast("Mã hoặc liên kết không hợp lệ", "error");
+      return;
+    }
+
+    console.log(`[MediTrans AI] Bắt đầu nhập token: ${token}`);
+
+    try {
+      showToast("Đang xác thực tài liệu...", "loading");
+      
+      const response = await fetch(`/api/resolve-tinyvault?token=${token}`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || "Tài liệu không còn tồn tại hoặc mã sai.");
+      }
+      
+      const metadata = await response.json();
+      
+      await addDoc(collection(db, `users/${user.uid}/documents`), {
+        name: metadata.name || `TL_Nhap_${token.substring(0, 6)}`,
+        folderId: folderId,
+        ownerId: user.uid,
+        sharedWith: [],
+        token: token,
+        downloadUrl: metadata.download_url || `https://tinyvault.space/api/download/${token}`,
+        size: metadata.size || 0,
+        type: metadata.type || 'application/pdf',
+        createdAt: serverTimestamp(),
+        isImported: true
+      });
+      
+      showToast("Đã nhập tài liệu thành công!", "success");
+    } catch (error: any) {
+      console.error("[Import] Lỗi:", error);
+      showToast(error.message || "Không thể nhập tài liệu", "error");
     }
   };
 
@@ -2040,11 +2140,11 @@ export default function App() {
     setAutoTranslate(false);
 
     try {
-      // Use the TinyVault download URL
-      const url = fileData.downloadUrl;
+      // Use the TinyVault download URL via our server proxy to avoid CORS
+      const url = `/api/proxy-pdf?url=${encodeURIComponent(fileData.downloadUrl)}`;
       setFileUrl(url);
       
-      console.log(`[MediTrans AI] Loading PDF from TinyVault: ${fileData.name}`);
+      console.log(`[MediTrans AI] Loading PDF from TinyVault (via Proxy): ${fileData.name}`);
 
       const loadingTask = pdfjs.getDocument({
         url,
@@ -2071,6 +2171,63 @@ export default function App() {
     handleFileSelectFromExplorer(fileData);
   };
 
+  const lightOptimizePdf = async (file: File): Promise<File> => {
+    try {
+      console.log(`[MediTrans AI] Admin Mode: Đang nén nhẹ file...`);
+      const existingPdfBytes = await file.arrayBuffer();
+      const pdfDoc = await PDFDocument.load(existingPdfBytes, { ignoreEncryption: true });
+      
+      // Thử save nhanh trước để xem dung lượng thực tế sau khi dọn metadata
+      const quickBytes = await pdfDoc.save({ useObjectStreams: true });
+      
+      // Nếu file vẫn > 28MB, ta buộc phải nén ảnh để tránh lỗi 413 (Cloud Run 32MB limit)
+      // Dùng ngưỡng 28MB để trừ hao phần overhead của form-data
+      if (quickBytes.length > 28 * 1024 * 1024) {
+        console.log(`[MediTrans AI] File vẫn lớn (${(quickBytes.length / 1024 / 1024).toFixed(2)}MB). Chuyển sang nén ảnh thích ứng...`);
+        
+        const pdf = await pdfjs.getDocument({ data: existingPdfBytes }).promise;
+        const outPdf = await PDFDocument.create();
+        const numPages = pdf.numPages;
+        
+        // Điều chỉnh thông số dựa trên số trang để ép dung lượng xuống < 30MB
+        const adminTargetWidth = numPages > 200 ? 900 : (numPages > 80 ? 1100 : 1300);
+        const adminQuality = numPages > 200 ? 0.22 : (numPages > 80 ? 0.35 : 0.5);
+
+        for (let i = 1; i <= numPages; i++) {
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale: Math.min(adminTargetWidth / page.getViewport({ scale: 1 }).width, 2.0) });
+          
+          const canvas = document.createElement('canvas');
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const ctx = canvas.getContext('2d', { alpha: false });
+          if (ctx) {
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            const imgBlob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/jpeg', adminQuality));
+            if (imgBlob) {
+              const imgBytes = new Uint8Array(await imgBlob.arrayBuffer());
+              const img = await outPdf.embedJpg(imgBytes);
+              const p = outPdf.addPage([img.width, img.height]);
+              p.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+            }
+          }
+          canvas.width = 0; canvas.height = 0;
+          page.cleanup();
+        }
+        
+        const finalBytes = await outPdf.save({ useObjectStreams: true });
+        console.log(`[MediTrans AI] Đã nén Admin thích ứng: ${(file.size / 1024 / 1024).toFixed(2)}MB -> ${(finalBytes.length / 1024 / 1024).toFixed(2)}MB`);
+        return new File([finalBytes], file.name, { type: 'application/pdf' });
+      }
+
+      console.log(`[MediTrans AI] Tối ưu nhẹ xong: ${(file.size / 1024 / 1024).toFixed(2)}MB -> ${(quickBytes.length / 1024 / 1024).toFixed(2)}MB`);
+      return new File([quickBytes], file.name, { type: 'application/pdf' });
+    } catch (error) {
+      console.warn("[MediTrans AI] Lỗi nén nhẹ, dùng file gốc:", error);
+      return file;
+    }
+  };
+
   const reconstructPdfForUniversalCompatibility = async (file: File, onProgress: (p: number) => void): Promise<File> => {
     try {
       const pdfBytes = await file.arrayBuffer();
@@ -2082,64 +2239,86 @@ export default function App() {
       
       const outPdf = await PDFDocument.create();
       const numPages = pdf.numPages;
-      const limit = Math.min(numPages, 150);
+      const limit = Math.min(numPages, 650); 
       
-      // Tính toán chất lượng dựa trên số trang để đảm bảo tốc độ và dung lượng
-      // Càng nhiều trang thì nén càng mạnh để file nhỏ đi nhanh hơn
-      const quality = limit > 50 ? 0.35 : 0.5;
-      const targetWidth = limit > 50 ? 850 : 1000;
+      const isUltra = limit > 180;
+      const isExtreme = limit > 80;
+      const isLarge = limit > 40;
+      
+      const targetWidth = isUltra ? 300 : (isExtreme ? 400 : (isLarge ? 600 : 850));
+      const quality = isUltra ? 0.012 : (isExtreme ? 0.03 : (isLarge ? 0.08 : 0.25));
 
-      // Xử lý song song theo cụm (Chunks) để đẩy nhanh tốc độ render
-      const chunkSize = 4;
       let processed = 0;
+      const results: { bytes: Uint8Array, pageNum: number }[] = [];
+      const queue = Array.from({ length: limit }, (_, i) => i + 1);
+      
+      const concurrency = 6; 
+      
+      const processWorker = async () => {
+        while (queue.length > 0) {
+          const pageNum = queue.shift();
+          if (pageNum === undefined) break;
 
-      for (let i = 1; i <= limit; i += chunkSize) {
-        const chunk = Array.from({ length: Math.min(chunkSize, limit - i + 1) }, (_, j) => i + j);
-        
-        const chunkResults = await Promise.all(chunk.map(async (pageNum) => {
-          const page = await pdf.getPage(pageNum);
-          const originalViewport = page.getViewport({ scale: 1.0 });
-          const scale = Math.min(targetWidth / originalViewport.width, 1.2);
-          const viewport = page.getViewport({ scale });
-          
-          const canvas = document.createElement('canvas');
-          const context = canvas.getContext('2d', { alpha: false, desynchronized: true });
-          if (!context) return null;
-          
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          
-          await page.render({ canvasContext: context, viewport, intent: 'print' }).promise;
-          
-          const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
-          let result = null;
-          if (blob) {
-            const bytes = await blob.arrayBuffer();
-            result = { bytes, width: viewport.width, height: viewport.height };
-          }
-          
-          canvas.width = 0; canvas.height = 0;
-          page.cleanup();
-          return result;
-        }));
+          try {
+            const page = await pdf.getPage(pageNum);
+            const originalViewport = page.getViewport({ scale: 1.0 });
+            const scale = Math.min(targetWidth / originalViewport.width, 1.0);
+            const viewport = page.getViewport({ scale });
+            
+            let canvas: any;
+            if (typeof OffscreenCanvas !== 'undefined') {
+              canvas = new OffscreenCanvas(viewport.width, viewport.height);
+            } else {
+              canvas = document.createElement('canvas');
+              canvas.width = viewport.width; canvas.height = viewport.height;
+            }
+            
+            const context = canvas.getContext('2d', { alpha: false, desynchronized: true });
+            if (!context) continue;
+            
+            context.imageSmoothingEnabled = false;
+            await page.render({ canvasContext: context, viewport, intent: 'display' }).promise;
+            
+            let blob: Blob | null;
+            if (canvas instanceof OffscreenCanvas) {
+              blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+            } else {
+              blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+            }
 
-        // Thêm vào PDF theo đúng thứ tự đồng bộ để tránh lỗi race condition và thứ tự trang
-        for (const res of chunkResults) {
-          if (res) {
-            const embeddedImg = await outPdf.embedJpg(res.bytes);
-            const { width, height } = embeddedImg.scale(1.0);
-            const newPage = outPdf.addPage([width, height]);
-            newPage.drawImage(embeddedImg, { x: 0, y: 0, width, height });
+            if (blob) {
+              const buf = await blob.arrayBuffer();
+              results.push({ bytes: new Uint8Array(buf), pageNum });
+            }
+            
+            if (!(canvas instanceof OffscreenCanvas)) { canvas.width = 0; canvas.height = 0; }
+            page.cleanup();
+            processed++;
+            onProgress((processed / limit) * 100);
+          } catch (e) {
+            console.error(`Page ${pageNum} error:`, e);
           }
-          processed++;
-          if (processed <= limit) onProgress((processed / limit) * 100);
         }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(concurrency, limit) }, () => processWorker()));
+
+      results.sort((a, b) => a.pageNum - b.pageNum);
+      for (const res of results) {
+        try {
+          const img = await outPdf.embedJpg(res.bytes);
+          const p = outPdf.addPage([img.width, img.height]);
+          p.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+        } catch (e) { console.error("Embed error:", e); }
       }
       
       const finalBytes = await outPdf.save();
+      pdf.cleanup();
+      console.log(`[MediTrans AI] Nén xong ${limit} trang: ${(finalBytes.length / 1024 / 1024).toFixed(2)}MB`);
       return new File([finalBytes], file.name, { type: 'application/pdf' });
+
     } catch (error) {
-      console.error("PDF Reconstruction Error:", error);
+      console.error("Lỗi tối ưu PDF:", error);
       throw error;
     }
   };
@@ -3753,8 +3932,11 @@ export default function App() {
             <FileExplorer 
               onFileSelect={handleFileSelectFromExplorer} 
               onUploadStart={startUpload} 
+              onAdminUploadStart={startAdminUpload}
+              onImportFromCode={handleImportFromCode}
               onLocalFileOpen={handleLocalFileOpen}
               onBulkTranslate={handleBulkTranslateFromExplorer}
+              userRole={userRole}
             />
           </div>
         ) : (
@@ -3769,14 +3951,33 @@ export default function App() {
                 <div className="flex items-center gap-3 min-w-max">
                   <div className="flex items-center gap-1.5">
                     {isLocalOnly && (
-                      <button 
-                        onClick={() => setShowFolderSelectModal(true)}
-                        className="flex items-center gap-1.5 px-3 py-1 bg-amber-500 text-white text-[10px] font-bold rounded-full hover:bg-amber-600 transition-all shadow-sm ml-2"
-                        title="Tải tệp này lên đám mây để lưu trữ"
-                      >
-                        <Upload className="w-3 h-3" />
-                        <span>TẢI LÊN ĐÁM MÂY</span>
-                      </button>
+                      <div className="flex items-center gap-1.5 ml-2">
+                        <button 
+                          onClick={() => {
+                            setPendingSkipOptimization(false);
+                            setShowFolderSelectModal(true);
+                          }}
+                          className="flex items-center gap-1.5 px-3 py-1 bg-amber-500 text-white text-[10px] font-bold rounded-full hover:bg-amber-600 transition-all shadow-sm"
+                          title="Tải tệp này lên đám mây để lưu trữ"
+                        >
+                          <Upload className="w-3 h-3" />
+                          <span>TẢI LÊN ĐÁM MÂY</span>
+                        </button>
+
+                        {userRole === 'admin' && (
+                          <button 
+                            onClick={() => {
+                              setPendingSkipOptimization(true);
+                              setShowFolderSelectModal(true);
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1 bg-rose-600 text-white text-[10px] font-bold rounded-full hover:bg-rose-700 transition-all shadow-sm"
+                            title="[ADMIN] Tải lên không qua nén AI"
+                          >
+                            <Zap className="w-3 h-3" />
+                            <span>TẢI LÊN LỚN (KHÔNG NÉN)</span>
+                          </button>
+                        )}
+                      </div>
                     )}
 
                     {isFullScreen && (
@@ -4849,7 +5050,10 @@ export default function App() {
                 <p className="text-xs font-medium text-slate-400 px-2 mb-2 uppercase tracking-wider">Thư mục hiện có</p>
                 
                 <button 
-                  onClick={() => startUpload(file!, null)}
+                  onClick={() => {
+                    startUpload(file!, null, pendingSkipOptimization);
+                    setShowFolderSelectModal(false);
+                  }}
                   className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 rounded-2xl transition-all text-left group border border-transparent hover:border-slate-100"
                 >
                   <div className="bg-slate-100 p-2 rounded-xl group-hover:bg-indigo-100 transition-colors">
@@ -4864,7 +5068,10 @@ export default function App() {
                 {allFolders.map(folder => (
                   <button 
                     key={folder.id}
-                    onClick={() => startUpload(file!, folder.id)}
+                    onClick={() => {
+                      startUpload(file!, folder.id, pendingSkipOptimization);
+                      setShowFolderSelectModal(false);
+                    }}
                     className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 rounded-2xl transition-all text-left group border border-transparent hover:border-slate-100"
                   >
                     <div className="bg-amber-50 p-2 rounded-xl group-hover:bg-amber-100 transition-colors">
