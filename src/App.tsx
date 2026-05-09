@@ -313,7 +313,7 @@ export default function App() {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
   const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
-    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-flash-latest';
+    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-flash-lite-latest';
   });
 
   useEffect(() => {
@@ -327,8 +327,7 @@ export default function App() {
         const parsed = JSON.parse(saved);
         return { 
           'gemini-3-flash-preview': parsed['gemini-3-flash-preview'] || '',
-          'gemini-flash-latest': parsed['gemini-flash-latest'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
-          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || '',
+          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
         };
       } catch (e) {
         console.error("Failed to parse engine keys:", e);
@@ -337,7 +336,6 @@ export default function App() {
     
     return {
       'gemini-3-flash-preview': '',
-      'gemini-flash-latest': '',
       'gemini-flash-lite-latest': '',
     };
   });
@@ -552,10 +550,10 @@ export default function App() {
       // Vercel Free has a 4.5MB payload limit. 
       // We only optimize if the file is truly risky (> 4.3MB) to save time for 99% of files.
       if (!skipOptimization && fileToUpload.size > 4.3 * 1024 * 1024) {
-        console.log(`[MediTrans AI] File lớn (${(fileToUpload.size / 1024 / 1024).toFixed(2)}MB). Đang nén bằng Gemini 1.5 Flash...`);
+        console.log(`[MediTrans AI] File lớn (${(fileToUpload.size / 1024 / 1024).toFixed(2)}MB). Đang nén siêu tốc...`);
         
         setUploadTasks(prev => prev.map(t => 
-          t.id === taskId ? { ...t, fileName: `[⚡ Gemini 1.5 Flash] ${fileToUpload.name}` } : t
+          t.id === taskId ? { ...t, fileName: `[⚡ Nén AI] ${fileToUpload.name}` } : t
         ));
 
         try {
@@ -4364,7 +4362,7 @@ export default function App() {
                   {translationPanelMode === 'translation' ? (
                     <div className="flex items-center gap-1.5 md:gap-2">
                       <button 
-                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-latest')}
+                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
                         disabled={isTranslating || isRendering}
                         className={cn(
                           "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-tight transition-all flex items-center gap-1 border shadow-sm",
@@ -4372,7 +4370,7 @@ export default function App() {
                             ? "bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed" 
                             : "bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100 hover:shadow active:scale-95"
                         )}
-                        title="Dịch thường bằng Gemini 1.5 Flash"
+                        title="Dịch thường bằng Gemini Flash-Lite"
                       >
                         {isTranslating || isRendering ? (
                           <Loader2 className="w-3 h-3 animate-spin" />
@@ -4491,8 +4489,7 @@ export default function App() {
                         <Zap className={cn("w-3 h-3", serviceStatus.activeKeys > 0 ? "text-amber-500 animate-pulse" : "text-slate-400")} />
                         <div className="flex flex-col">
                           <span className="text-[8px] leading-none font-black uppercase tracking-tight text-indigo-700 mb-0.5">
-                            {serviceStatus.model === 'gemini-flash-latest' ? "Gemini 1.5 Flash" : 
-                             serviceStatus.model.toLowerCase().includes('flash') ? "Gemini Flash" : "Gemini Pro"}
+                            {serviceStatus.model.toLowerCase().includes('flash') ? "Gemini Flash" : "Gemini Pro"}
                           </span>
                           <div className="flex items-center gap-1">
                             <span className="text-[7px] font-bold text-indigo-400 leading-none">
@@ -5363,7 +5360,6 @@ export default function App() {
                         onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
                         className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
                       >
-                        <option value="gemini-flash-latest">Gemini 1.5 Flash</option>
                         <option value="gemini-flash-lite-latest">Flash Lite</option>
                         <option value="gemini-3-flash-preview">Flash 3</option>
                       </select>
@@ -5433,12 +5429,12 @@ export default function App() {
                         <button
                           onClick={() => {
                             setShowBulkConfirm(false);
-                            startBulkTranslation('gemini-flash-latest');
+                            startBulkTranslation('gemini-flash-lite-latest');
                           }}
                           className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
                         >
                           <Zap className="w-3.5 h-3.5" />
-                          Dịch toàn bộ (1.5 Flash)
+                          Dịch toàn bộ (Cơ bản)
                         </button>
                         <button
                           onClick={() => {
