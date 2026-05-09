@@ -278,6 +278,7 @@ export default function App() {
   const [fileOwnerId, setFileOwnerId] = useState<string | null>(null);
   const [showExplorer, setShowExplorer] = useState(true);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
+  const [originalDownloadUrl, setOriginalDownloadUrl] = useState<string | null>(null);
   const [translations, setTranslations] = useState<TranslationState>({});
   const translationsRef = useRef<TranslationState>({});
   const currentPageRef = useRef<number>(1);
@@ -653,7 +654,7 @@ export default function App() {
             ownerId: user.uid,
             sharedWith: [],
             token: data.token,
-            downloadUrl: data.download_url,
+            downloadUrl: `https://tinyvault.space/api/download/${data.token}`,
             size: fileToUpload.size,
             type: fileToUpload.type,
             createdAt: serverTimestamp()
@@ -701,9 +702,17 @@ export default function App() {
       if (input.includes('tinyvault.space')) {
         // Dùng URL object để parse chính xác
         const urlObj = new URL(input.startsWith('http') ? input : `https://${input}`);
-        const parts = urlObj.pathname.split('/').filter(Boolean);
-        // Lấy phần cuối cùng (thường là token)
-        token = parts[parts.length - 1];
+        
+        // Nếu là proxy link của chính app mình, lấy url thực từ params
+        if (urlObj.pathname.includes('proxy-pdf')) {
+          const realUrl = urlObj.searchParams.get('url');
+          if (realUrl) {
+            token = realUrl;
+          }
+        } else if (urlObj.pathname.length > 1) {
+          // Nếu là link TinyVault, gửi cả URL để phía server xử lý linh hoạt hơn
+          token = input;
+        }
       } else if (input.includes('/')) {
         token = input.split('/').filter(Boolean).pop()?.split('?')[0] || input;
       } else {
@@ -721,9 +730,9 @@ export default function App() {
     console.log(`[MediTrans AI] Bắt đầu nhập token: ${token}`);
 
     try {
-      showToast("Đang xác thực tài liệu...", "loading");
+      showToast("Đang xác thực tài liệu...", "info");
       
-      const response = await fetch(`/api/resolve-tinyvault?token=${token}`);
+      const response = await fetch(`/api/resolve-tinyvault?token=${encodeURIComponent(token)}`);
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.message || "Tài liệu không còn tồn tại hoặc mã sai.");
@@ -731,14 +740,26 @@ export default function App() {
       
       const metadata = await response.json();
       
+      // Handle different JSON structures from TinyVault
+      const fileName = metadata.name || 
+                       (metadata.data && metadata.data.name) || 
+                       `TL_Nhap_${token.substring(0, 6)}`;
+      
+      const fileSize = metadata.size || 
+                       (metadata.data && metadata.data.size) || 
+                       0;
+
+      // Luôn ưu tiên link dạng official của TinyVault cho mục đích tải về/chia sẻ
+      const officialUrl = `https://tinyvault.space/api/download/${token}`;
+      
       await addDoc(collection(db, `users/${user.uid}/documents`), {
-        name: metadata.name || `TL_Nhap_${token.substring(0, 6)}`,
+        name: fileName,
         folderId: folderId,
         ownerId: user.uid,
         sharedWith: [],
         token: token,
-        downloadUrl: metadata.download_url || `https://tinyvault.space/api/download/${token}`,
-        size: metadata.size || 0,
+        downloadUrl: officialUrl, 
+        size: fileSize,
         type: metadata.type || 'application/pdf',
         createdAt: serverTimestamp(),
         isImported: true
@@ -1861,6 +1882,7 @@ export default function App() {
     setFile(null);
     setCurrentFileName('');
     setFileUrl(null);
+    setOriginalDownloadUrl(null);
     setFileId(null);
     setPdfDoc(null);
     lastRenderedImageRef.current = null;
@@ -2143,23 +2165,56 @@ export default function App() {
       // Use the TinyVault download URL via our server proxy to avoid CORS
       const url = `/api/proxy-pdf?url=${encodeURIComponent(fileData.downloadUrl)}`;
       setFileUrl(url);
+      setOriginalDownloadUrl(fileData.downloadUrl);
       
       console.log(`[MediTrans AI] Loading PDF from TinyVault (via Proxy): ${fileData.name}`);
 
-      const loadingTask = pdfjs.getDocument({
-        url,
-        cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
-        cMapPacked: true,
-        disableAutoFetch: false,
-        disableStream: false,
-      });
+      // Attempt 1: Direct URL loading
+      try {
+        const loadingTask = pdfjs.getDocument({
+          url,
+          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+          cMapPacked: true,
+          disableAutoFetch: true, // Tải toàn bộ file một lần để tránh lỗi 502 khi gọi Range liên tục qua Proxy
+          disableStream: true,    // Tắt streaming của PDF.js để ổn định hơn với Proxy Node.js
+        });
 
-      const pdf = await loadingTask.promise;
-      setPdfDoc(pdf);
-      setNumPages(pdf.numPages);
+        const pdf = await loadingTask.promise;
+        setPdfDoc(pdf);
+        setNumPages(pdf.numPages);
+      } catch (urlLoadError: any) {
+        console.warn("[MediTrans AI] URL load failed, trying full fetch fallback...", urlLoadError);
+        
+        // Attempt 2: Manual fetch fallback via proxy
+        const fetchResponse = await fetch(url);
+        if (!fetchResponse.ok) {
+          throw new Error(`Server returned ${fetchResponse.status}: ${fetchResponse.statusText}`);
+        }
+        
+        const arrayBuffer = await fetchResponse.arrayBuffer();
+        if (arrayBuffer.byteLength < 100) {
+          throw new Error("Dữ liệu tệp không hợp lệ (quá nhỏ).");
+        }
+        
+        const pdf = await pdfjs.getDocument({
+          data: arrayBuffer,
+          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+          cMapPacked: true,
+        }).promise;
+        
+        setPdfDoc(pdf);
+        setNumPages(pdf.numPages);
+      }
     } catch (error: any) {
       console.error("Error loading PDF from TinyVault:", error);
-      setPdfError(`Không thể tải file PDF từ TinyVault: ${error.message || "Lỗi không xác định"}`);
+      
+      if (error.message?.includes('502') || error.message?.includes('504') || error.message?.includes('network')) {
+        setPdfError(`Lỗi kết nối máy chủ (502/504). Có thể tệp quá lớn hoặc kết nối TinyVault đang bị chậm. Vui lòng thử ấn vào nút "TẢI PDF GỐC" ở trên để kiểm tra tệp, hoặc thử lại sau vài giây.`);
+      } else if (error.message?.includes('403') || error.message?.includes('429')) {
+        setPdfError(`Bị chặn bởi máy chủ (403/429). Vui lòng thử tải thủ công tệp gốc hoặc chờ một lát.`);
+      } else {
+        setPdfError(`Không thể tải file PDF từ TinyVault: ${error.message || "Lỗi không xác định"}. Vui lòng thử tải thủ công.`);
+      }
     } finally {
       setIsPdfLoading(false);
     }
@@ -3992,7 +4047,7 @@ export default function App() {
 
                     {fileUrl && !isLocalOnly && (
                       <a 
-                        href={fileUrl}
+                        href={originalDownloadUrl || fileUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500 text-white text-[10px] font-bold rounded-full hover:bg-emerald-600 transition-all shadow-sm ml-2"
