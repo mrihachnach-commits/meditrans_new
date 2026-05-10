@@ -9,17 +9,14 @@ import createUserHandler from "./api/admin/create-user";
 import listUsersHandler from "./api/admin/list-users";
 import deleteUserHandler from "./api/admin/delete-user";
 import changePasswordHandler from "./api/admin/change-password";
-import tinyvaultHandler from "./api/tinyvault";
-import proxyPdfHandler from "./api/proxy-pdf";
-import resolveTinyVaultHandler from "./api/resolve-tinyvault";
 import indexHandler from "./api/index";
 
 const PORT = 3000;
 
 async function start() {
   const app = express();
-  app.use(express.json({ limit: '200mb' }));
-  app.use(express.urlencoded({ limit: '200mb', extended: true }));
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // Manually map routes for local development
   app.get("/api/ping", pingHandler);
@@ -28,9 +25,6 @@ async function start() {
   app.get("/api/admin/list-users", listUsersHandler);
   app.post("/api/admin/delete-user", deleteUserHandler);
   app.post("/api/admin/change-password", changePasswordHandler);
-  app.post("/api/tinyvault", tinyvaultHandler);
-  app.get("/api/proxy-pdf", proxyPdfHandler);
-  app.get("/api/resolve-tinyvault", resolveTinyVaultHandler);
   app.get("/api", indexHandler);
   app.get("/api/index", indexHandler);
 

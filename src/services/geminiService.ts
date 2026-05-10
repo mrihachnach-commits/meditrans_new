@@ -27,13 +27,9 @@ export class GeminiService implements TranslationService {
   }
 
   private getMIN_REQUEST_INTERVAL(): number {
-    // Flash 3 often has more strict rate limits for free tier
-    const isFlash3 = this.modelName.includes('gemini-3');
-    if (isFlash3) {
-      return this.apiKeys.length > 5 ? 2000 : 3000;
-    }
-    
+    // If we have many keys, we can be more aggressive with each key's individual interval
     // Default is usually 4s/RPM for free tier, but 1s is safe for most paid/high-tier keys.
+    // We'll set a lower individual interval if we have many keys.
     return this.apiKeys.length > 5 ? 500 : 800;
   }
 
