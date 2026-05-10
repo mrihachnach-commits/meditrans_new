@@ -530,12 +530,6 @@ export default function App() {
     const user = auth.currentUser;
     if (!user) return;
 
-    const MAX_FILE_SIZE = 100 * 1024 * 1024;
-    if (fileToUpload.size > MAX_FILE_SIZE) {
-      alert('PDF exceeds 100MB limit');
-      return;
-    }
-
     const taskId = Math.random().toString(36).substring(7);
     const newTask: UploadTask = {
       id: taskId,
@@ -547,7 +541,8 @@ export default function App() {
     setUploadTasks(prev => [newTask, ...prev]);
 
     try {
-      const UPLOAD_URL = import.meta.env.DEV ? '/api/tinyvault' : 'https://tinyvault.space/api/upload';
+      const formData = new FormData();
+      formData.append('file', fileToUpload);
 
       // Retry logic for 100% success rate
       let response;
@@ -555,11 +550,8 @@ export default function App() {
       let delay = 1000;
 
       while (retries > 0) {
-        const formData = new FormData();
-        formData.append('file', fileToUpload);
-
         try {
-          response = await fetch(UPLOAD_URL, {
+          response = await fetch('/api/tinyvault', {
             method: 'POST',
             body: formData
           });

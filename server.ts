@@ -9,6 +9,7 @@ import createUserHandler from "./api/admin/create-user";
 import listUsersHandler from "./api/admin/list-users";
 import deleteUserHandler from "./api/admin/delete-user";
 import changePasswordHandler from "./api/admin/change-password";
+import tinyvaultHandler from "./api/tinyvault";
 import indexHandler from "./api/index";
 
 const PORT = 3000;
@@ -25,6 +26,7 @@ async function start() {
   app.get("/api/admin/list-users", listUsersHandler);
   app.post("/api/admin/delete-user", deleteUserHandler);
   app.post("/api/admin/change-password", changePasswordHandler);
+  app.post("/api/tinyvault", tinyvaultHandler);
   app.get("/api", indexHandler);
   app.get("/api/index", indexHandler);
 
