@@ -312,7 +312,7 @@ export default function App() {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
   const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
-    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-1.5-flash';
+    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-flash-lite-latest';
   });
 
   useEffect(() => {
@@ -326,7 +326,7 @@ export default function App() {
         const parsed = JSON.parse(saved);
         return { 
           'gemini-3-flash-preview': parsed['gemini-3-flash-preview'] || '',
-          'gemini-1.5-flash': parsed['gemini-1.5-flash'] || parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-flash'] || '',
+          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
         };
       } catch (e) {
         console.error("Failed to parse engine keys:", e);
@@ -335,7 +335,7 @@ export default function App() {
     
     return {
       'gemini-3-flash-preview': '',
-      'gemini-1.5-flash': '',
+      'gemini-flash-lite-latest': '',
     };
   });
   const [showSettings, setShowSettings] = useState(false);
@@ -813,7 +813,7 @@ export default function App() {
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
-          const vService = new GeminiService(vKey.value, "gemini-1.5-flash");
+          const vService = new GeminiService(vKey.value, "gemini-flash-lite-latest");
           const vRes = await vService.checkAvailableKeys();
           const isActive = vRes.manualKey;
           
@@ -2875,7 +2875,7 @@ export default function App() {
     // Use selected vault key as primary if available
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
-    translationService.current = new GeminiService(allKeys, "gemini-1.5-flash");
+    translationService.current = new GeminiService(allKeys, "gemini-flash-lite-latest");
 
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
@@ -3993,7 +3993,7 @@ export default function App() {
                   {translationPanelMode === 'translation' ? (
                     <div className="flex items-center gap-1.5 md:gap-2">
                       <button 
-                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-1.5-flash')}
+                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
                         disabled={isTranslating || isRendering}
                         className={cn(
                           "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-tight transition-all flex items-center gap-1 border shadow-sm",
@@ -4978,7 +4978,7 @@ export default function App() {
                       onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
                       className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
                     >
-                      <option value="gemini-1.5-flash">Cơ bản (1.5 Flash)</option>
+                      <option value="gemini-flash-lite-latest">Cơ bản (Flash Lite)</option>
                       <option value="gemini-3-flash-preview">Chuyên sâu (Flash 3)</option>
                     </select>
                   </div>
@@ -5046,7 +5046,7 @@ export default function App() {
                         <button
                           onClick={() => {
                             setShowBulkConfirm(false);
-                            startBulkTranslation('gemini-1.5-flash');
+                            startBulkTranslation('gemini-flash-lite-latest');
                           }}
                           className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
                         >
