@@ -1,5 +1,3 @@
-export type TranslationStyle = 'standard' | 'simple' | 'academic' | 'expert' | 'creative';
-
 export interface TranslationOptions {
   imageBuffer: string;
   textContent?: string;
@@ -7,7 +5,6 @@ export interface TranslationOptions {
   signal?: AbortSignal;
   part?: 'top' | 'bottom' | 'full';
   model?: TranslationEngine;
-  style?: TranslationStyle;
 }
 
 export interface TranslationService {
@@ -17,7 +14,7 @@ export interface TranslationService {
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
 }
 
-export type TranslationEngine = 'gemini-3-flash-preview' | 'gemini-flash-lite-latest';
+export type TranslationEngine = 'gemini-3-flash-preview' | 'gemini-1.5-flash';
 
 export interface EngineConfig {
   apiKey?: string;
