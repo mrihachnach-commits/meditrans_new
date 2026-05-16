@@ -8,7 +8,7 @@ export class GeminiService implements TranslationService {
   private static globalKeyLastUsed: Map<string, number> = new Map();
   private static lastSuccessfulKey: string | null = null;
 
-  constructor(apiKeys?: string | string[], modelName: string = "gemini-flash-lite-latest") {
+  constructor(apiKeys?: string | string[], modelName: string = "gemini-1.5-flash") {
     this.modelName = modelName;
     
     if (Array.isArray(apiKeys)) {
@@ -27,9 +27,19 @@ export class GeminiService implements TranslationService {
   }
 
   private getMIN_REQUEST_INTERVAL(): number {
-    // If we have many keys, we can be more aggressive with each key's individual interval
+    // Flash 3 often has more strict rate limits for free tier
+    const isFlash3 = this.modelName.includes('gemini-3');
+    if (isFlash3) {
+      return this.apiKeys.length > 5 ? 2000 : 3000;
+    }
+
+    // Flash 1.5 free tier is also relatively strict
+    const isFlash15 = this.modelName.includes('gemini-1.5');
+    if (isFlash15) {
+      return this.apiKeys.length > 5 ? 1000 : 2000;
+    }
+    
     // Default is usually 4s/RPM for free tier, but 1s is safe for most paid/high-tier keys.
-    // We'll set a lower individual interval if we have many keys.
     return this.apiKeys.length > 5 ? 500 : 800;
   }
 

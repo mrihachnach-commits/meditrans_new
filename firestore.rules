@@ -48,6 +48,12 @@ service cloud.firestore {
       );
     }
 
+    function isFolderSharedWithMe(userId, folderId) {
+      let email = (request.auth != null && 'email' in request.auth.token && request.auth.token.email is string) ? request.auth.token.email.lower() : '';
+      return folderId != null && isValidId(folderId) && request.auth != null && email != "" && 
+             get(/databases/$(database)/documents/users/$(userId)/folders/$(folderId)).data.get('sharedWith', []).hasAny([email]);
+    }
+
     // ===============================================================
     // VALIDATION HELPERS
     // ===============================================================
@@ -83,6 +89,7 @@ service cloud.firestore {
       return data.keys().hasAll(['name', 'createdAt']) &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
              (data.createdAt is timestamp || data.createdAt is string) &&
+             (data.get('sharedWith', []) is list) &&
              (data.get('parentId', null) == null || isValidId(data.parentId));
     }
 
@@ -135,26 +142,26 @@ service cloud.firestore {
       allow delete: if isAdmin();
       
       match /folders/{folderId} {
-        allow read: if isOwner(userId) || isAdmin();
+        allow read: if isOwner(userId) || isSharedWithMe(existing()) || isAdmin();
         allow create: if isOwner(userId) && isValidFolder(incoming()) && isValidId(folderId);
-        allow update: if (isOwner(userId) && isValidFolder(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'parentId'])) || isAdmin();
+        allow update: if (isOwner(userId) && isValidFolder(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'parentId', 'sharedWith'])) || isAdmin();
         allow delete: if isOwner(userId) || isAdmin();
       }
 
       match /documents/{docId} {
-        allow get: if isOwner(userId) || isSharedWithMe(existing()) || isAdmin();
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isOwner(userId) || isSharedWithMe(existing()) || isFolderSharedWithMe(userId, existing().get('folderId', null)) || isAdmin();
+        allow list: if isOwner(userId) || isAdmin() || (isSignedIn() && resource.data.get('folderId', null) != null && isFolderSharedWithMe(userId, resource.data.folderId));
         allow create: if isOwner(userId) && isValidDocument(incoming()) && isValidId(docId);
         allow update: if (isOwner(userId) && isValidDocument(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'folderId', 'sharedWith'])) || isAdmin();
         allow delete: if isOwner(userId) || isAdmin();
 
         match /pages/{pageNum} {
-          allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isAdmin();
+          allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isFolderSharedWithMe(userId, get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data.get('folderId', null)) || isAdmin();
           allow write: if (isOwner(userId) || isAdmin()) && isValidTranslation(incoming());
         }
 
         match /summaries/{summaryId} {
-          allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isAdmin();
+          allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isFolderSharedWithMe(userId, get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data.get('folderId', null)) || isAdmin();
           allow write: if (isOwner(userId) || isAdmin()) && isValidSummary(incoming());
         }
       }
@@ -173,6 +180,11 @@ service cloud.firestore {
       allow list: if isAdmin();
       allow create, update: if isAdmin() && isValidBlacklist(incoming());
       allow delete: if isAdmin();
+    }
+
+    // Collection Group for Shared Folders
+    match /{path=**}/folders/{folderId} {
+      allow list: if isSharedWithMe(resource.data) || isAdmin();
     }
 
     // Collection Group for Shared Documents

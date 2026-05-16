@@ -23,7 +23,8 @@ import {
   Type,
   Share2,
   Users,
-  Zap
+  Zap,
+  Link as LinkIcon
 } from 'lucide-react';
 import { 
   db, 
@@ -52,6 +53,8 @@ interface FolderData {
   id: string;
   name: string;
   parentId: string | null;
+  ownerId?: string; // Track who owns this folder
+  sharedWith?: string[];
   createdAt: any;
 }
 
@@ -71,29 +74,44 @@ export interface FileData {
 interface FileExplorerProps {
   onFileSelect: (file: FileData) => void;
   onUploadStart: (file: File, folderId: string | null) => void;
+  onAdminUploadStart?: (file: File, folderId: string | null) => void;
+  onImportFromCode?: (code: string, folderId: string | null) => void;
   onLocalFileOpen: (file: File) => void;
   onBulkTranslate?: (file: FileData) => void;
+  userRole?: 'admin' | 'user' | null;
 }
 
-export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate }) => {
+export const FileExplorer: React.FC<FileExplorerProps> = ({ 
+  onFileSelect, 
+  onUploadStart, 
+  onAdminUploadStart,
+  onImportFromCode,
+  onLocalFileOpen, 
+  onBulkTranslate,
+  userRole
+}) => {
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'my' | 'shared'>('my');
   const [myFolders, setMyFolders] = useState<FolderData[]>([]);
   const [folders, setFolders] = useState<FolderData[]>([]);
   const [files, setFiles] = useState<FileData[]>([]);
   const [loading, setLoading] = useState(true);
-  const [path, setPath] = useState<{id: string | null, name: string}[]>([{id: null, name: 'Root'}]);
+  const [path, setPath] = useState<{id: string | null, name: string, ownerId?: string}[]>([{id: null, name: 'Root'}]);
   
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importCode, setImportCode] = useState('');
   
   const [showRenameModal, setShowRenameModal] = useState<{id: string, name: string, type: 'file' | 'folder'} | null>(null);
   const [renameValue, setRenameValue] = useState('');
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<{id: string, type: 'file' | 'folder', name: string} | null>(null);
-  const [showShareModal, setShowShareModal] = useState<{id: string, type: 'file', name: string} | null>(null);
+  const [showShareModal, setShowShareModal] = useState<{id: string, type: 'file' | 'folder', name: string} | null>(null);
   const [shareEmail, setShareEmail] = useState('');
   const [isSharing, setIsSharing] = useState(false);
+  const [emailToRemoveConfirm, setEmailToRemoveConfirm] = useState<string | null>(null);
   
   const [showMoveModal, setShowMoveModal] = useState<{id: string, type: 'file' | 'folder'} | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -134,7 +152,6 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
         collection(db, `users/${user.uid}/documents`),
         where('folderId', '==', currentFolderId)
       );
-
       const unsubscribeFolders = onSnapshot(foldersQuery, (snapshot) => {
         const folderList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FolderData));
         setFolders(folderList);
@@ -155,28 +172,77 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
         unsubscribeFiles();
       };
     } else {
-      // Shared mode - use collectionGroup to find files shared with this user's email
-      setFolders([]); // We don't support sharing folders yet for simplicity
-      const q = query(
-        collectionGroup(db, 'documents'),
-        where('sharedWith', 'array-contains', user.email)
-      );
+      // Shared mode
+      if (currentFolderId === null) {
+        // Fetch top-level shared folders and files
+        const foldersQ = query(
+          collectionGroup(db, 'folders'),
+          where('sharedWith', 'array-contains', user.email)
+        );
 
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        const fileList = snapshot.docs.map(doc => {
-          const data = doc.data();
-          return { id: doc.id, ...data } as FileData;
+        const filesQ = query(
+          collectionGroup(db, 'documents'),
+          where('sharedWith', 'array-contains', user.email)
+        );
+
+        const unsubscribeFolders = onSnapshot(foldersQ, (snapshot) => {
+          const folderList = snapshot.docs.map(doc => {
+            const data = doc.data();
+            // Deduce owner from path: users/{ownerId}/folders/{folderId}
+            const ownerId = doc.ref.parent.parent?.id;
+            return { id: doc.id, ownerId, ...data } as FolderData;
+          });
+          setFolders(folderList);
+          setLoading(false);
         });
-        setFiles(fileList);
-        setLoading(false);
-      }, (error) => {
-        console.error("Error fetching shared files:", error);
-        setLoading(false);
-        // collectionGroup might need an index which user needs to create, 
-        // but it will fail fast if index is missing.
-      });
 
-      return unsubscribe;
+        const unsubscribeFiles = onSnapshot(filesQ, (snapshot) => {
+          const fileList = snapshot.docs.map(doc => {
+            const data = doc.data();
+            const ownerId = doc.ref.parent.parent?.id || data.ownerId;
+            return { id: doc.id, ownerId, ...data } as FileData;
+          });
+          setFiles(fileList);
+        });
+
+        return () => {
+          unsubscribeFolders();
+          unsubscribeFiles();
+        };
+      } else {
+        // We are inside a shared folder. We need to fetch documents from THAT owner's subcollection.
+        const currentPathEntry = path.find(p => p.id === currentFolderId);
+        const ownerId = currentPathEntry?.ownerId;
+
+        if (ownerId) {
+          const foldersQ = query(
+            collection(db, `users/${ownerId}/folders`),
+            where('parentId', '==', currentFolderId)
+          );
+          const filesQ = query(
+            collection(db, `users/${ownerId}/documents`),
+            where('folderId', '==', currentFolderId)
+          );
+
+          const unsubscribeFolders = onSnapshot(foldersQ, (snapshot) => {
+            const folderList = snapshot.docs.map(doc => ({ id: doc.id, ownerId, ...doc.data() } as FolderData));
+            setFolders(folderList);
+            setLoading(false);
+          });
+
+          const unsubscribeFiles = onSnapshot(filesQ, (snapshot) => {
+            const fileList = snapshot.docs.map(doc => ({ id: doc.id, ownerId, ...doc.data() } as FileData));
+            setFiles(fileList);
+          });
+
+          return () => {
+            unsubscribeFolders();
+            unsubscribeFiles();
+          };
+        } else {
+          setLoading(false);
+        }
+      }
     }
   }, [user, currentFolderId, viewMode]);
 
@@ -216,6 +282,13 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
     e.target.value = '';
   };
 
+  const handleAdminUploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user || !onAdminUploadStart) return;
+    onAdminUploadStart(file, currentFolderId);
+    e.target.value = '';
+  };
+
   const handleDeleteItem = async () => {
     if (!user || !showDeleteConfirm) return;
 
@@ -245,6 +318,14 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       const collectionName = showRenameModal.type === 'file' ? 'documents' : 'folders';
       handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/${collectionName}/${showRenameModal.id}`);
     }
+  };
+
+  const handleImportSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importCode.trim() || !onImportFromCode) return;
+    onImportFromCode(importCode.trim(), currentFolderId);
+    setImportCode('');
+    setShowImportModal(false);
   };
 
   const handleCloneSharedFile = async (file: FileData, targetFolderId: string | null) => {
@@ -325,28 +406,49 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
     if (!user || !showShareModal || !shareEmail.trim()) return;
     setIsSharing(true);
     try {
-      const docRef = doc(db, `users/${user.uid}/documents`, showShareModal.id);
+      const collectionName = showShareModal.type === 'file' ? 'documents' : 'folders';
+      const docRef = doc(db, `users/${user.uid}/${collectionName}`, showShareModal.id);
       
       const snap = await getDoc(docRef);
       if (snap.exists()) {
         const data = snap.data();
         const currentSharedWith = data.sharedWith || [];
-        if (!currentSharedWith.includes(shareEmail.trim())) {
+        if (!currentSharedWith.includes(shareEmail.trim().toLowerCase())) {
           await updateDoc(docRef, {
-            sharedWith: [...currentSharedWith, shareEmail.trim()]
+            sharedWith: [...currentSharedWith, shareEmail.trim().toLowerCase()]
           });
         }
       }
       setShareEmail('');
-      setShowShareModal(null);
     } catch (error: any) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/documents/${showShareModal.id}`);
+      const collectionName = showShareModal.type === 'file' ? 'documents' : 'folders';
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/${collectionName}/${showShareModal.id}`);
     } finally {
       setIsSharing(false);
     }
   };
 
-  const navigateToFolder = async (folderId: string | null, folderName: string) => {
+  const handleRemoveShare = async (emailToRemove: string) => {
+    if (!user || !showShareModal) return;
+    try {
+      const collectionName = showShareModal.type === 'file' ? 'documents' : 'folders';
+      const docRef = doc(db, `users/${user.uid}/${collectionName}`, showShareModal.id);
+      
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        const currentSharedWith = data.sharedWith || [];
+        await updateDoc(docRef, {
+          sharedWith: currentSharedWith.filter((email: string) => email !== emailToRemove)
+        });
+      }
+    } catch (error: any) {
+      const collectionName = showShareModal.type === 'file' ? 'documents' : 'folders';
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}/${collectionName}/${showShareModal.id}`);
+    }
+  };
+
+  const navigateToFolder = async (folderId: string | null, folderName: string, folderOwnerId?: string) => {
     if (folderId === null) {
       setPath([{id: null, name: 'Root'}]);
     } else {
@@ -356,7 +458,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       if (index !== -1) {
         setPath(newPath.slice(0, index + 1));
       } else {
-        setPath([...newPath, {id: folderId, name: folderName}]);
+        setPath([...newPath, {id: folderId, name: folderName, ownerId: folderOwnerId}]);
       }
     }
     setCurrentFolderId(folderId);
@@ -501,6 +603,14 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
           </div>
 
           <button 
+            onClick={() => setShowImportModal(true)}
+            className="p-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-all shadow-sm"
+            title="Nhập từ mã TinyVault"
+          >
+            <LinkIcon className="w-5 h-5" />
+          </button>
+
+          <button 
             onClick={() => setShowNewFolderModal(true)}
             className="p-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-all shadow-sm"
             title="Tạo thư mục mới"
@@ -517,6 +627,13 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
             <Upload className="w-5 h-5" />
             <input type="file" className="hidden" accept=".pdf" onChange={handleUploadFile} />
           </label>
+
+          {userRole === 'admin' && onAdminUploadStart && (
+            <label className="p-2.5 bg-rose-600 text-white rounded-xl hover:bg-rose-700 transition-all shadow-lg shadow-rose-100 cursor-pointer" title="[ADMIN] Tải lên không nén">
+              <Zap className="w-5 h-5" />
+              <input type="file" className="hidden" accept=".pdf" onChange={handleAdminUploadFile} />
+            </label>
+          )}
         </div>
       </div>
 
@@ -546,7 +663,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
                 className="group relative bg-white border border-slate-100 rounded-2xl p-4 hover:border-indigo-200 hover:shadow-xl hover:shadow-indigo-50 transition-all cursor-pointer"
-                onClick={() => navigateToFolder(folder.id, folder.name)}
+                onClick={() => navigateToFolder(folder.id, folder.name, folder.ownerId)}
               >
                 <div className="flex flex-col items-center gap-3">
                   <div className="bg-amber-100 p-3 rounded-xl group-hover:bg-amber-200 transition-colors">
@@ -571,6 +688,19 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                     "flex flex-col gap-1 transition-all",
                     activeMenuId === folder.id ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2 pointer-events-none absolute"
                   )}>
+                    {viewMode === 'my' && (
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowShareModal({ id: folder.id, type: 'folder', name: folder.name });
+                          setActiveMenuId(null);
+                        }}
+                        className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
+                        title="Chia sẻ"
+                      >
+                        <Share2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <button 
                       onClick={(e) => {
                         e.stopPropagation();
@@ -905,7 +1035,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setShowShareModal(null)}
+              onClick={() => {
+                setShowShareModal(null);
+                setEmailToRemoveConfirm(null);
+              }}
               className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
             />
             <motion.div 
@@ -917,7 +1050,9 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
               <div className="bg-indigo-50 w-16 h-16 rounded-2xl flex items-center justify-center mb-6 mx-auto">
                 <Share2 className="w-8 h-8 text-indigo-500" />
               </div>
-              <h3 className="text-xl font-display font-bold text-slate-800 mb-2 text-center">Chia sẻ tài liệu</h3>
+              <h3 className="text-xl font-display font-bold text-slate-800 mb-2 text-center">
+                Chia sẻ {showShareModal.type === 'file' ? 'tài liệu' : 'thư mục'}
+              </h3>
               <p className="text-slate-500 text-sm text-center mb-6">
                 Chia sẻ <span className="font-bold text-slate-700">"{showShareModal.name}"</span> với người dùng khác qua email.
               </p>
@@ -925,31 +1060,84 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
               <div className="space-y-4 mb-8">
                 <div>
                   <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Email người nhận</label>
-                  <input 
-                    type="email" 
-                    placeholder="example@gmail.com" 
-                    value={shareEmail}
-                    onChange={(e) => setShareEmail(e.target.value)}
-                    autoFocus
-                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
-                  />
+                  <div className="flex gap-2">
+                    <input 
+                      type="email" 
+                      placeholder="example@gmail.com" 
+                      value={shareEmail}
+                      onChange={(e) => setShareEmail(e.target.value)}
+                      autoFocus
+                      className="flex-1 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleShare();
+                      }}
+                    />
+                    <button 
+                      onClick={handleShare}
+                      disabled={isSharing || !shareEmail.trim()}
+                      className="px-4 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all shadow-md disabled:opacity-50"
+                    >
+                      {isSharing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Shared users list */}
+                <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Đã chia sẻ với</label>
+                  {(() => {
+                    const item = showShareModal.type === 'file' 
+                      ? files.find(f => f.id === showShareModal.id) 
+                      : folders.find(f => f.id === showShareModal.id);
+                    const sharedWith = item?.sharedWith || [];
+                    
+                    if (sharedWith.length === 0) {
+                      return <p className="text-[10px] text-slate-400 italic ml-1">Chưa chia sẻ với ai</p>;
+                    }
+
+                    return sharedWith.map(email => (
+                      <div key={email} className="flex items-center justify-between p-2.5 bg-slate-50 rounded-xl group transition-all">
+                        <span className="text-[11px] font-medium text-slate-600 truncate max-w-[200px]">{email}</span>
+                        {emailToRemoveConfirm === email ? (
+                          <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-2 duration-200">
+                            <span className="text-[9px] font-black text-rose-500 uppercase tracking-tighter">Xác nhận?</span>
+                            <button 
+                              onClick={() => { handleRemoveShare(email); setEmailToRemoveConfirm(null); }}
+                              className="p-1 px-2 bg-rose-500 text-white rounded-lg text-[9px] font-black uppercase shadow-sm hover:bg-rose-600 transition-colors"
+                            >
+                              Xóa
+                            </button>
+                            <button 
+                              onClick={() => setEmailToRemoveConfirm(null)}
+                              className="p-1 px-2 bg-slate-200 text-slate-600 rounded-lg text-[9px] font-black uppercase hover:bg-slate-300 transition-colors"
+                            >
+                              Hủy
+                            </button>
+                          </div>
+                        ) : (
+                          <button 
+                            onClick={() => setEmailToRemoveConfirm(email)}
+                            className="p-1 text-slate-300 hover:text-rose-500 transition-colors"
+                            title="Xóa quyền truy cập"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    ));
+                  })()}
                 </div>
               </div>
 
               <div className="flex gap-3">
                 <button 
-                  onClick={() => setShowShareModal(null)}
-                  className="flex-1 px-6 py-3 rounded-xl text-sm font-bold text-slate-500 hover:bg-slate-100 transition-colors"
+                  onClick={() => {
+                    setShowShareModal(null);
+                    setEmailToRemoveConfirm(null);
+                  }}
+                  className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors"
                 >
-                  Hủy
-                </button>
-                <button 
-                  onClick={handleShare}
-                  disabled={isSharing || !shareEmail.trim()}
-                  className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  {isSharing && <Loader2 className="w-4 h-4 animate-spin" />}
-                  Chia sẻ ngay
+                  Đóng
                 </button>
               </div>
             </motion.div>
@@ -997,6 +1185,62 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                   Tạo mới
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Import Modal */}
+      <AnimatePresence>
+        {showImportModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowImportModal(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden p-8"
+            >
+              <div className="bg-indigo-50 w-16 h-16 rounded-2xl flex items-center justify-center mb-6 mx-auto">
+                <LinkIcon className="w-8 h-8 text-indigo-500" />
+              </div>
+              <h3 className="text-xl font-display font-bold text-slate-800 mb-2 text-center">Nhập từ TinyVault</h3>
+              <p className="text-slate-500 text-sm text-center mb-6">
+                Dán mã truy cập hoặc đường dẫn TinyVault để nhập tài liệu.
+              </p>
+              
+              <form onSubmit={handleImportSubmit}>
+                <input 
+                  type="text" 
+                  placeholder="Mã hoặc Link TinyVault..." 
+                  value={importCode}
+                  onChange={(e) => setImportCode(e.target.value)}
+                  autoFocus
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm mb-6"
+                />
+                
+                <div className="flex gap-3">
+                  <button 
+                    type="button"
+                    onClick={() => setShowImportModal(false)}
+                    className="flex-1 px-6 py-3 rounded-xl text-sm font-bold text-slate-500 hover:bg-slate-100 transition-colors"
+                  >
+                    Hủy
+                  </button>
+                  <button 
+                    type="submit"
+                    className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+                  >
+                    Nhập ngay
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}
