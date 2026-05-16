@@ -208,8 +208,8 @@ interface TranslationState {
 }
 
 // --- UTILITIES ---
-const OPTIMIZED_IMAGE_DIM = 1536; // Increased from 850 for better medical document OCR resolution
-const OPTIMIZED_IMAGE_QUALITY = 0.8; // Increased from 0.5 for non-blurry text quality
+const OPTIMIZED_IMAGE_DIM = 850;
+const OPTIMIZED_IMAGE_QUALITY = 0.5;
 
 const optimizeCanvasImage = (canvas: HTMLCanvasElement): string => {
   const { width, height } = canvas;
@@ -278,7 +278,6 @@ export default function App() {
   const [fileOwnerId, setFileOwnerId] = useState<string | null>(null);
   const [showExplorer, setShowExplorer] = useState(true);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
-  const [originalDownloadUrl, setOriginalDownloadUrl] = useState<string | null>(null);
   const [translations, setTranslations] = useState<TranslationState>({});
   const translationsRef = useRef<TranslationState>({});
   const currentPageRef = useRef<number>(1);
@@ -313,7 +312,7 @@ export default function App() {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
   const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
-    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-1.5-flash';
+    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-flash-lite-latest';
   });
 
   useEffect(() => {
@@ -326,9 +325,8 @@ export default function App() {
       try {
         const parsed = JSON.parse(saved);
         return { 
-          'gemini-1.5-flash': parsed['gemini-1.5-flash'] || parsed['gemini-flash'] || '',
           'gemini-3-flash-preview': parsed['gemini-3-flash-preview'] || '',
-          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || '',
+          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
         };
       } catch (e) {
         console.error("Failed to parse engine keys:", e);
@@ -336,7 +334,6 @@ export default function App() {
     }
     
     return {
-      'gemini-1.5-flash': '',
       'gemini-3-flash-preview': '',
       'gemini-flash-lite-latest': '',
     };
@@ -346,8 +343,6 @@ export default function App() {
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [selectedPagesToDownload, setSelectedPagesToDownload] = useState<number[]>([]);
   const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
-  const [isOptimizing, setIsOptimizing] = useState(false);
-  const [optimizationProgress, setOptimizationProgress] = useState(0);
   const [isLocalOnly, setIsLocalOnly] = useState(false);
   const [showFolderSelectModal, setShowFolderSelectModal] = useState(false);
   const [allFolders, setAllFolders] = useState<{id: string, name: string, parentId?: string | null}[]>([]);
@@ -371,7 +366,6 @@ export default function App() {
   const [isSavingSummary, setIsSavingSummary] = useState(false);
   const [summaryRange, setSummaryRange] = useState<{from: number, to: number}>({from: 1, to: 1});
   const summarySignalRef = useRef<AbortController | null>(null);
-  const [pendingSkipOptimization, setPendingSkipOptimization] = useState(false);
 
   // New User Preferences
   const [translationStyle, setTranslationStyle] = useState<TranslationStyle>(() => {
@@ -532,7 +526,7 @@ export default function App() {
     }
   };
 
-  const startUpload = async (fileToUpload: File, folderId: string | null, skipOptimization = false) => {
+  const startUpload = async (fileToUpload: File, folderId: string | null) => {
     const user = auth.currentUser;
     if (!user) return;
 
@@ -547,37 +541,8 @@ export default function App() {
     setUploadTasks(prev => [newTask, ...prev]);
 
     try {
-      let finalFile = fileToUpload;
-      
-      // Vercel Free has a 4.5MB payload limit. 
-      // We only optimize if the file is truly risky (> 4.3MB) to save time for 99% of files.
-      if (!skipOptimization && fileToUpload.size > 4.3 * 1024 * 1024) {
-        console.log(`[MediTrans AI] File lớn (${(fileToUpload.size / 1024 / 1024).toFixed(2)}MB). Đang nén siêu tốc...`);
-        
-        setUploadTasks(prev => prev.map(t => 
-          t.id === taskId ? { ...t, fileName: `[⚡ Nén AI] ${fileToUpload.name}` } : t
-        ));
-
-        try {
-          finalFile = await reconstructPdfForUniversalCompatibility(fileToUpload, (progress) => {
-            setUploadTasks(prev => prev.map(t => 
-              t.id === taskId ? { ...t, progress: Math.round(progress * 0.7) } : t
-            ));
-          });
-          
-          console.log(`[MediTrans AI] Nén xong: ${(finalFile.size / 1024 / 1024).toFixed(2)}MB`);
-          await new Promise(r => setTimeout(r, 200));
-        } catch (optimizeError) {
-          console.warn("[MediTrans AI] Lỗi nén, tải trực tiếp:", optimizeError);
-        }
-      } else if (skipOptimization && fileToUpload.size > 4.3 * 1024 * 1024) {
-        // HÀNH VI CŨ (3/5): Nén nhẹ bằng pdf-lib để giữ định dạng gốc nhưng sạch hơn
-        console.log(`[MediTrans AI] Admin Mode: Đang tối ưu nhẹ file...`);
-        finalFile = await lightOptimizePdf(fileToUpload);
-      }
-
       const formData = new FormData();
-      formData.append('file', finalFile);
+      formData.append('file', fileToUpload);
 
       // Retry logic for 100% success rate
       let response;
@@ -586,52 +551,22 @@ export default function App() {
 
       while (retries > 0) {
         try {
-          const uploadPromise = new Promise<any>((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/api/tinyvault');
-            
-            xhr.upload.onprogress = (event) => {
-              if (event.lengthComputable) {
-                const percentComplete = (event.loaded / event.total) * 100;
-                // Nếu nén, nén chiếm 70% thanh progress, tải lên chiếm 30% còn lại
-                const finalProgress = fileToUpload.size > 4.3 * 1024 * 1024 
-                  ? 70 + (percentComplete * 0.3) 
-                  : percentComplete;
-                  
-                setUploadTasks(prev => prev.map(t => 
-                  t.id === taskId ? { ...t, progress: Math.min(99, Math.round(finalProgress)) } : t
-                ));
-              }
-            };
-
-            xhr.onload = () => {
-              if (xhr.status >= 200 && xhr.status < 300) {
-                resolve({ ok: true, status: xhr.status, data: JSON.parse(xhr.responseText) });
-              } else {
-                resolve({ ok: false, status: xhr.status, data: xhr.responseText });
-              }
-            };
-
-            xhr.onerror = () => reject(new Error('Network error during upload'));
-            xhr.send(formData);
+          response = await fetch('/api/tinyvault', {
+            method: 'POST',
+            body: formData
           });
-
-          const uploadResult = await uploadPromise;
-          if (uploadResult.ok) {
-            response = { ok: true, json: async () => uploadResult.data, status: uploadResult.status };
-            break;
-          }
+          if (response.ok) break;
           
-          if (uploadResult.status >= 500 || uploadResult.status === 429) {
+          // If 5xx or 429, retry
+          if (response.status >= 500 || response.status === 429) {
             retries--;
             if (retries > 0) {
               await new Promise(resolve => setTimeout(resolve, delay));
-              delay *= 2;
+              delay *= 2; // Exponential backoff
               continue;
             }
           }
-          response = { ok: false, status: uploadResult.status, json: async () => ({ error: uploadResult.data }) };
-          break;
+          break; // Other errors don't retry
         } catch (e) {
           retries--;
           if (retries === 0) throw e;
@@ -656,7 +591,7 @@ export default function App() {
             ownerId: user.uid,
             sharedWith: [],
             token: data.token,
-            downloadUrl: `https://tinyvault.space/api/download/${data.token}`,
+            downloadUrl: data.download_url,
             size: fileToUpload.size,
             type: fileToUpload.type,
             createdAt: serverTimestamp()
@@ -684,93 +619,6 @@ export default function App() {
       setUploadTasks(prev => prev.map(t => 
         t.id === taskId ? { ...t, status: 'error' } : t
       ));
-    }
-  };
-
-  const startAdminUpload = async (file: File, folderId: string | null) => {
-    if (userRole !== 'admin') return;
-    showToast("Đang tải lên không nén (Admin mode)", "info");
-    startUpload(file, folderId, true);
-  };
-
-  const handleImportFromCode = async (code: string, folderId: string | null) => {
-    if (!user || !code.trim()) return;
-
-    let input = code.trim();
-    let token = input;
-    
-    // Trích xuất mã ID từ link một cách thông minh
-    try {
-      if (input.includes('tinyvault.space')) {
-        // Dùng URL object để parse chính xác
-        const urlObj = new URL(input.startsWith('http') ? input : `https://${input}`);
-        
-        // Nếu là proxy link của chính app mình, lấy url thực từ params
-        if (urlObj.pathname.includes('proxy-pdf')) {
-          const realUrl = urlObj.searchParams.get('url');
-          if (realUrl) {
-            token = realUrl;
-          }
-        } else if (urlObj.pathname.length > 1) {
-          // Nếu là link TinyVault, gửi cả URL để phía server xử lý linh hoạt hơn
-          token = input;
-        }
-      } else if (input.includes('/')) {
-        token = input.split('/').filter(Boolean).pop()?.split('?')[0] || input;
-      } else {
-        token = input.replace(/\s/g, '');
-      }
-    } catch (e) {
-      token = input.replace(/\s/g, '');
-    }
-
-    if (!token || token.length < 5) {
-      showToast("Mã hoặc liên kết không hợp lệ", "error");
-      return;
-    }
-
-    console.log(`[MediTrans AI] Bắt đầu nhập token: ${token}`);
-
-    try {
-      showToast("Đang xác thực tài liệu...", "info");
-      
-      const response = await fetch(`/api/resolve-tinyvault?token=${encodeURIComponent(token)}`);
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || "Tài liệu không còn tồn tại hoặc mã sai.");
-      }
-      
-      const metadata = await response.json();
-      
-      // Handle different JSON structures from TinyVault
-      const fileName = metadata.name || 
-                       (metadata.data && metadata.data.name) || 
-                       `TL_Nhap_${token.substring(0, 6)}`;
-      
-      const fileSize = metadata.size || 
-                       (metadata.data && metadata.data.size) || 
-                       0;
-
-      // Luôn ưu tiên link dạng official của TinyVault cho mục đích tải về/chia sẻ
-      const officialUrl = `https://tinyvault.space/api/download/${token}`;
-      
-      await addDoc(collection(db, `users/${user.uid}/documents`), {
-        name: fileName,
-        folderId: folderId,
-        ownerId: user.uid,
-        sharedWith: [],
-        token: token,
-        downloadUrl: officialUrl, 
-        size: fileSize,
-        type: metadata.type || 'application/pdf',
-        createdAt: serverTimestamp(),
-        isImported: true
-      });
-      
-      showToast("Đã nhập tài liệu thành công!", "success");
-    } catch (error: any) {
-      console.error("[Import] Lỗi:", error);
-      showToast(error.message || "Không thể nhập tài liệu", "error");
     }
   };
 
@@ -1884,7 +1732,6 @@ export default function App() {
     setFile(null);
     setCurrentFileName('');
     setFileUrl(null);
-    setOriginalDownloadUrl(null);
     setFileId(null);
     setPdfDoc(null);
     lastRenderedImageRef.current = null;
@@ -2164,59 +2011,26 @@ export default function App() {
     setAutoTranslate(false);
 
     try {
-      // Use the TinyVault download URL via our server proxy to avoid CORS
-      const url = `/api/proxy-pdf?url=${encodeURIComponent(fileData.downloadUrl)}`;
+      // Use the TinyVault download URL
+      const url = fileData.downloadUrl;
       setFileUrl(url);
-      setOriginalDownloadUrl(fileData.downloadUrl);
       
-      console.log(`[MediTrans AI] Loading PDF from TinyVault (via Proxy): ${fileData.name}`);
+      console.log(`[MediTrans AI] Loading PDF from TinyVault: ${fileData.name}`);
 
-      // Attempt 1: Direct URL loading
-      try {
-        const loadingTask = pdfjs.getDocument({
-          url,
-          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
-          cMapPacked: true,
-          disableAutoFetch: true, // Tải toàn bộ file một lần để tránh lỗi 502 khi gọi Range liên tục qua Proxy
-          disableStream: true,    // Tắt streaming của PDF.js để ổn định hơn với Proxy Node.js
-        });
+      const loadingTask = pdfjs.getDocument({
+        url,
+        cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+        cMapPacked: true,
+        disableAutoFetch: false,
+        disableStream: false,
+      });
 
-        const pdf = await loadingTask.promise;
-        setPdfDoc(pdf);
-        setNumPages(pdf.numPages);
-      } catch (urlLoadError: any) {
-        console.warn("[MediTrans AI] URL load failed, trying full fetch fallback...", urlLoadError);
-        
-        // Attempt 2: Manual fetch fallback via proxy
-        const fetchResponse = await fetch(url);
-        if (!fetchResponse.ok) {
-          throw new Error(`Server returned ${fetchResponse.status}: ${fetchResponse.statusText}`);
-        }
-        
-        const arrayBuffer = await fetchResponse.arrayBuffer();
-        if (arrayBuffer.byteLength < 100) {
-          throw new Error("Dữ liệu tệp không hợp lệ (quá nhỏ).");
-        }
-        
-        const pdf = await pdfjs.getDocument({
-          data: arrayBuffer,
-          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
-          cMapPacked: true,
-        }).promise;
-        
-        setPdfDoc(pdf);
-        setNumPages(pdf.numPages);
-      }
+      const pdf = await loadingTask.promise;
+      setPdfDoc(pdf);
+      setNumPages(pdf.numPages);
     } catch (error: any) {
       console.error("Error loading PDF from TinyVault:", error);
-      
-      if (error.message?.includes('502') || error.message?.includes('504') || error.message?.includes('network')) {
-        setPdfError(`Lỗi kết nối máy chủ (502/504). Có thể tệp quá lớn hoặc kết nối TinyVault đang bị chậm. Vui lòng thử ấn vào nút "TẢI PDF GỐC" ở trên để kiểm tra tệp, hoặc thử lại sau vài giây.`);
-      } else if (error.message?.includes('403') || error.message?.includes('429')) {
-        setPdfError(`Bị chặn bởi máy chủ (403/429). Vui lòng thử tải thủ công tệp gốc hoặc chờ một lát.`);
-      } else {
-        setPdfError(`Không thể tải file PDF từ TinyVault: ${error.message || "Lỗi không xác định"}. Vui lòng thử tải thủ công.`);
-      }
+      setPdfError(`Không thể tải file PDF từ TinyVault: ${error.message || "Lỗi không xác định"}`);
     } finally {
       setIsPdfLoading(false);
     }
@@ -2226,158 +2040,6 @@ export default function App() {
     shouldAutoBulkRef.current = true;
     setShowTranslationPanel(true);
     handleFileSelectFromExplorer(fileData);
-  };
-
-  const lightOptimizePdf = async (file: File): Promise<File> => {
-    try {
-      console.log(`[MediTrans AI] Admin Mode: Đang nén nhẹ file...`);
-      const existingPdfBytes = await file.arrayBuffer();
-      const pdfDoc = await PDFDocument.load(existingPdfBytes, { ignoreEncryption: true });
-      
-      // Thử save nhanh trước để xem dung lượng thực tế sau khi dọn metadata
-      const quickBytes = await pdfDoc.save({ useObjectStreams: true });
-      
-      // Nếu file vẫn > 28MB, ta buộc phải nén ảnh để tránh lỗi 413 (Cloud Run 32MB limit)
-      // Dùng ngưỡng 28MB để trừ hao phần overhead của form-data
-      if (quickBytes.length > 28 * 1024 * 1024) {
-        console.log(`[MediTrans AI] File vẫn lớn (${(quickBytes.length / 1024 / 1024).toFixed(2)}MB). Chuyển sang nén ảnh thích ứng...`);
-        
-        const pdf = await pdfjs.getDocument({ data: existingPdfBytes }).promise;
-        const outPdf = await PDFDocument.create();
-        const numPages = pdf.numPages;
-        
-        // Điều chỉnh thông số dựa trên số trang để ép dung lượng xuống < 30MB
-        const adminTargetWidth = numPages > 200 ? 1100 : (numPages > 80 ? 1400 : 1800);
-        const adminQuality = numPages > 200 ? 0.4 : (numPages > 80 ? 0.6 : 0.8);
-
-        for (let i = 1; i <= numPages; i++) {
-          const page = await pdf.getPage(i);
-          const viewport = page.getViewport({ scale: Math.min(adminTargetWidth / page.getViewport({ scale: 1 }).width, 2.0) });
-          
-          const canvas = document.createElement('canvas');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          const ctx = canvas.getContext('2d', { alpha: false });
-          if (ctx) {
-            await page.render({ canvasContext: ctx, viewport }).promise;
-            const imgBlob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/jpeg', adminQuality));
-            if (imgBlob) {
-              const imgBytes = new Uint8Array(await imgBlob.arrayBuffer());
-              const img = await outPdf.embedJpg(imgBytes);
-              const p = outPdf.addPage([img.width, img.height]);
-              p.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
-            }
-          }
-          canvas.width = 0; canvas.height = 0;
-          page.cleanup();
-        }
-        
-        const finalBytes = await outPdf.save({ useObjectStreams: true });
-        console.log(`[MediTrans AI] Đã nén Admin thích ứng: ${(file.size / 1024 / 1024).toFixed(2)}MB -> ${(finalBytes.length / 1024 / 1024).toFixed(2)}MB`);
-        return new File([finalBytes], file.name, { type: 'application/pdf' });
-      }
-
-      console.log(`[MediTrans AI] Tối ưu nhẹ xong: ${(file.size / 1024 / 1024).toFixed(2)}MB -> ${(quickBytes.length / 1024 / 1024).toFixed(2)}MB`);
-      return new File([quickBytes], file.name, { type: 'application/pdf' });
-    } catch (error) {
-      console.warn("[MediTrans AI] Lỗi nén nhẹ, dùng file gốc:", error);
-      return file;
-    }
-  };
-
-  const reconstructPdfForUniversalCompatibility = async (file: File, onProgress: (p: number) => void): Promise<File> => {
-    try {
-      const pdfBytes = await file.arrayBuffer();
-      const pdf = await pdfjs.getDocument({ 
-        data: pdfBytes,
-        cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
-        cMapPacked: true,
-      }).promise;
-      
-      const outPdf = await PDFDocument.create();
-      const numPages = pdf.numPages;
-      const limit = Math.min(numPages, 650); 
-      
-      const isUltra = limit > 180;
-      const isExtreme = limit > 80;
-      const isLarge = limit > 40;
-      
-      const targetWidth = isUltra ? 1024 : (isExtreme ? 1280 : (isLarge ? 1536 : 2048));
-      const quality = isUltra ? 0.35 : (isExtreme ? 0.5 : (isLarge ? 0.7 : 0.85));
-
-      let processed = 0;
-      const results: { bytes: Uint8Array, pageNum: number }[] = [];
-      const queue = Array.from({ length: limit }, (_, i) => i + 1);
-      
-      const concurrency = 6; 
-      
-      const processWorker = async () => {
-        while (queue.length > 0) {
-          const pageNum = queue.shift();
-          if (pageNum === undefined) break;
-
-          try {
-            const page = await pdf.getPage(pageNum);
-            const originalViewport = page.getViewport({ scale: 1.0 });
-            const scale = Math.min(targetWidth / originalViewport.width, 1.0);
-            const viewport = page.getViewport({ scale });
-            
-            let canvas: any;
-            if (typeof OffscreenCanvas !== 'undefined') {
-              canvas = new OffscreenCanvas(viewport.width, viewport.height);
-            } else {
-              canvas = document.createElement('canvas');
-              canvas.width = viewport.width; canvas.height = viewport.height;
-            }
-            
-            const context = canvas.getContext('2d', { alpha: false, desynchronized: true });
-            if (!context) continue;
-            
-            context.imageSmoothingEnabled = false;
-            await page.render({ canvasContext: context, viewport, intent: 'display' }).promise;
-            
-            let blob: Blob | null;
-            if (canvas instanceof OffscreenCanvas) {
-              blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
-            } else {
-              blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
-            }
-
-            if (blob) {
-              const buf = await blob.arrayBuffer();
-              results.push({ bytes: new Uint8Array(buf), pageNum });
-            }
-            
-            if (!(canvas instanceof OffscreenCanvas)) { canvas.width = 0; canvas.height = 0; }
-            page.cleanup();
-            processed++;
-            onProgress((processed / limit) * 100);
-          } catch (e) {
-            console.error(`Page ${pageNum} error:`, e);
-          }
-        }
-      };
-
-      await Promise.all(Array.from({ length: Math.min(concurrency, limit) }, () => processWorker()));
-
-      results.sort((a, b) => a.pageNum - b.pageNum);
-      for (const res of results) {
-        try {
-          const img = await outPdf.embedJpg(res.bytes);
-          const p = outPdf.addPage([img.width, img.height]);
-          p.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
-        } catch (e) { console.error("Embed error:", e); }
-      }
-      
-      const finalBytes = await outPdf.save();
-      pdf.cleanup();
-      console.log(`[MediTrans AI] Nén xong ${limit} trang: ${(finalBytes.length / 1024 / 1024).toFixed(2)}MB`);
-      return new File([finalBytes], file.name, { type: 'application/pdf' });
-
-    } catch (error) {
-      console.error("Lỗi tối ưu PDF:", error);
-      throw error;
-    }
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3224,7 +2886,7 @@ export default function App() {
     // Use selected vault key as primary if available
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
-    translationService.current = new GeminiService(allKeys, selectedEngine);
+    translationService.current = new GeminiService(allKeys, "gemini-flash-lite-latest");
 
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
@@ -3989,11 +3651,8 @@ export default function App() {
             <FileExplorer 
               onFileSelect={handleFileSelectFromExplorer} 
               onUploadStart={startUpload} 
-              onAdminUploadStart={startAdminUpload}
-              onImportFromCode={handleImportFromCode}
               onLocalFileOpen={handleLocalFileOpen}
               onBulkTranslate={handleBulkTranslateFromExplorer}
-              userRole={userRole}
             />
           </div>
         ) : (
@@ -4008,33 +3667,14 @@ export default function App() {
                 <div className="flex items-center gap-3 min-w-max">
                   <div className="flex items-center gap-1.5">
                     {isLocalOnly && (
-                      <div className="flex items-center gap-1.5 ml-2">
-                        <button 
-                          onClick={() => {
-                            setPendingSkipOptimization(false);
-                            setShowFolderSelectModal(true);
-                          }}
-                          className="flex items-center gap-1.5 px-3 py-1 bg-amber-500 text-white text-[10px] font-bold rounded-full hover:bg-amber-600 transition-all shadow-sm"
-                          title="Tải tệp này lên đám mây để lưu trữ"
-                        >
-                          <Upload className="w-3 h-3" />
-                          <span>TẢI LÊN ĐÁM MÂY</span>
-                        </button>
-
-                        {userRole === 'admin' && (
-                          <button 
-                            onClick={() => {
-                              setPendingSkipOptimization(true);
-                              setShowFolderSelectModal(true);
-                            }}
-                            className="flex items-center gap-1.5 px-3 py-1 bg-rose-600 text-white text-[10px] font-bold rounded-full hover:bg-rose-700 transition-all shadow-sm"
-                            title="[ADMIN] Tải lên không qua nén AI"
-                          >
-                            <Zap className="w-3 h-3" />
-                            <span>TẢI LÊN LỚN (KHÔNG NÉN)</span>
-                          </button>
-                        )}
-                      </div>
+                      <button 
+                        onClick={() => setShowFolderSelectModal(true)}
+                        className="flex items-center gap-1.5 px-3 py-1 bg-amber-500 text-white text-[10px] font-bold rounded-full hover:bg-amber-600 transition-all shadow-sm ml-2"
+                        title="Tải tệp này lên đám mây để lưu trữ"
+                      >
+                        <Upload className="w-3 h-3" />
+                        <span>TẢI LÊN ĐÁM MÂY</span>
+                      </button>
                     )}
 
                     {isFullScreen && (
@@ -4049,7 +3689,7 @@ export default function App() {
 
                     {fileUrl && !isLocalOnly && (
                       <a 
-                        href={originalDownloadUrl || fileUrl}
+                        href={fileUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500 text-white text-[10px] font-bold rounded-full hover:bg-emerald-600 transition-all shadow-sm ml-2"
@@ -4364,22 +4004,22 @@ export default function App() {
                   {translationPanelMode === 'translation' ? (
                     <div className="flex items-center gap-1.5 md:gap-2">
                       <button 
-                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-1.5-flash')}
+                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
                         disabled={isTranslating || isRendering}
                         className={cn(
                           "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-tight transition-all flex items-center gap-1 border shadow-sm",
                           (isTranslating || isRendering)
                             ? "bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed" 
-                            : "bg-emerald-50 text-emerald-600 border-emerald-100 hover:bg-emerald-100 hover:shadow active:scale-95"
+                            : "bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100 hover:shadow active:scale-95"
                         )}
-                        title="Dịch tiêu chuẩn bằng Gemini 1.5 Flash"
+                        title="Dịch thường bằng Gemini Flash-Lite"
                       >
                         {isTranslating || isRendering ? (
                           <Loader2 className="w-3 h-3 animate-spin" />
                         ) : (
                           <Zap className="w-3 h-3" />
                         )}
-                        <span>{translations[currentPage] ? 'Dịch lại' : 'Dịch tiêu chuẩn'}</span>
+                        <span>{translations[currentPage] ? 'Dịch lại' : 'Dịch thường'}</span>
                       </button>
 
                       <button 
@@ -5107,10 +4747,7 @@ export default function App() {
                 <p className="text-xs font-medium text-slate-400 px-2 mb-2 uppercase tracking-wider">Thư mục hiện có</p>
                 
                 <button 
-                  onClick={() => {
-                    startUpload(file!, null, pendingSkipOptimization);
-                    setShowFolderSelectModal(false);
-                  }}
+                  onClick={() => startUpload(file!, null)}
                   className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 rounded-2xl transition-all text-left group border border-transparent hover:border-slate-100"
                 >
                   <div className="bg-slate-100 p-2 rounded-xl group-hover:bg-indigo-100 transition-colors">
@@ -5125,10 +4762,7 @@ export default function App() {
                 {allFolders.map(folder => (
                   <button 
                     key={folder.id}
-                    onClick={() => {
-                      startUpload(file!, folder.id, pendingSkipOptimization);
-                      setShowFolderSelectModal(false);
-                    }}
+                    onClick={() => startUpload(file!, folder.id)}
                     className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 rounded-2xl transition-all text-left group border border-transparent hover:border-slate-100"
                   >
                     <div className="bg-amber-50 p-2 rounded-xl group-hover:bg-amber-100 transition-colors">
@@ -5340,33 +4974,44 @@ export default function App() {
                       />
                     </div>
                   </div>
-                  <div className="pt-4 border-t border-slate-100 grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Phong cách</label>
-                      <select 
-                        value={translationStyle}
-                        onChange={(e) => setTranslationStyle(e.target.value as TranslationStyle)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
-                      >
-                        <option value="standard">Tiêu chuẩn</option>
-                        <option value="simple">Dễ hiểu</option>
-                        <option value="academic">Hàn lâm</option>
-                        <option value="expert">Chuyên gia</option>
-                        <option value="creative">Trực quan</option>
-                      </select>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-violet-500" />
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
+                        Phong cách dịch
+                      </label>
                     </div>
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Mô hình AI</label>
-                      <select 
-                        value={selectedEngine}
-                        onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
-                      >
-                        <option value="gemini-1.5-flash">Gemini 1.5 Flash (Default)</option>
-                        <option value="gemini-flash-lite-latest">Flash Lite (Speed)</option>
-                        <option value="gemini-3-flash-preview">Flash 3 (High Quality)</option>
-                      </select>
+                    <select 
+                      value={translationStyle}
+                      onChange={(e) => setTranslationStyle(e.target.value as TranslationStyle)}
+                      className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    >
+                      <option value="standard">Tiêu chuẩn (Chuyên nghiệp)</option>
+                      <option value="simple">Dễ hiểu (Cho bệnh nhân)</option>
+                      <option value="academic">Hàn lâm (Để nghiên cứu)</option>
+                      <option value="expert">Chuyên gia (Phân tích sâu)</option>
+                      <option value="creative">Trực quan (Tóm lược ý)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-4 pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Cpu className="w-4 h-4 text-indigo-500" />
+                      <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
+                        Chế độ dịch mặc định
+                      </label>
                     </div>
+                    <select 
+                      value={selectedEngine}
+                      onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
+                      className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    >
+                      <option value="gemini-flash-lite-latest">Cơ bản (Flash Lite)</option>
+                      <option value="gemini-3-flash-preview">Chuyên sâu (Flash 3)</option>
+                    </select>
                   </div>
                 </div>
 
@@ -5432,22 +5077,12 @@ export default function App() {
                         <button
                           onClick={() => {
                             setShowBulkConfirm(false);
-                            startBulkTranslation('gemini-1.5-flash');
-                          }}
-                          className="w-full py-2.5 bg-emerald-50 text-emerald-600 rounded-xl text-[10px] font-bold uppercase hover:bg-emerald-100 border border-emerald-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
-                        >
-                          <Zap className="w-3.5 h-3.5" />
-                          Dịch toàn bộ (Tiêu chuẩn 1.5)
-                        </button>
-                        <button
-                          onClick={() => {
-                            setShowBulkConfirm(false);
                             startBulkTranslation('gemini-flash-lite-latest');
                           }}
-                          className="w-full py-2 bg-slate-50 text-slate-500 rounded-xl text-[9px] font-bold uppercase hover:bg-slate-100 border border-slate-100 transition-all active:scale-95 flex items-center justify-center gap-2"
+                          className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
                         >
-                          <Zap className="w-3 h-3" />
-                          Dịch nhanh (Flash-Lite)
+                          <Zap className="w-3.5 h-3.5" />
+                          Dịch toàn bộ (Cơ bản)
                         </button>
                         <button
                           onClick={() => {

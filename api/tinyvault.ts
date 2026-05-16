@@ -2,10 +2,7 @@ import axios from "axios";
 import FormData from "form-data";
 import multer from "multer";
 
-const upload = multer({ 
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 200 * 1024 * 1024 } // Cho phép tệp lên tới 200MB (tùy thuộc hạ tầng hạ tầng chặn ở 32MB)
-}).single("file");
+const upload = multer({ storage: multer.memoryStorage() }).single("file");
 
 // Helper to run middleware in serverless function
 function runMiddleware(req: any, res: any, fn: any) {
@@ -27,7 +24,7 @@ export default async function handler(req: any, res: any) {
     await runMiddleware(req, res, upload);
     
     if (!req.file) {
-      return res.status(400).json({ error: "Không nhận được tệp (Tệp quá lớn hoặc sai định dạng)" });
+      return res.status(400).json({ error: "Lỗi xử lý tệp tin hoặc không có tệp tin" });
     }
 
     const formData = new FormData();
@@ -37,10 +34,7 @@ export default async function handler(req: any, res: any) {
     });
 
     const response = await axios.post("https://tinyvault.space/api/upload", formData, { 
-      headers: { ...formData.getHeaders() },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      timeout: 300000 // 5 phút cho tệp cực lớn
+      headers: { ...formData.getHeaders() } 
     });
     
     return res.status(200).json(response.data);
