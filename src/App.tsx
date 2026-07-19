@@ -44,6 +44,7 @@ import {
   LogIn,
   LogOut,
   Plus,
+  Minus,
   Key,
   Activity,
   Zap,
@@ -228,12 +229,13 @@ const optimizeCanvasImage = (canvas: HTMLCanvasElement): string => {
 };
 
 // --- COMPONENTS ---
-const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSize }: { 
+const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSize, fontFamily }: { 
   content: string; 
   page: number; 
   isStreaming: boolean;
   onCancel: () => void;
   fontSize?: number;
+  fontFamily?: string;
 }) => {
   const processedContent = useMemo(() => {
     if (!content) return '';
@@ -241,10 +243,25 @@ const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSi
     return content.replace(/(\s*\.\s*){4,}/g, ' ... ');
   }, [content]);
 
+  const fontStyle = useMemo(() => {
+    const styleObj: React.CSSProperties = {};
+    if (fontSize) {
+      styleObj.fontSize = `${fontSize}px`;
+    }
+    if (fontFamily) {
+      styleObj.fontFamily = fontFamily === 'Inter' ? 'var(--font-sans)' : 
+                             fontFamily === 'JetBrains Mono' ? 'var(--font-mono)' : 
+                             fontFamily === 'Playfair Display' ? 'var(--font-display)' :
+                             fontFamily === 'Cormorant Garamond' ? 'var(--font-serif)' :
+                             fontFamily;
+    }
+    return styleObj;
+  }, [fontSize, fontFamily]);
+
   return (
     <div 
       className="markdown-body select-text pb-60 md:pb-0"
-      style={{ fontSize: fontSize ? `${fontSize}px` : undefined }}
+      style={fontStyle}
     >
       <ReactMarkdown remarkPlugins={[remarkGfm]}>
         {processedContent}
@@ -706,7 +723,13 @@ export default function App() {
     localStorage.setItem('mediTrans_fontSize', fontSize.toString());
   }, [fontSize]);
 
-  const [fontFamily, setFontFamily] = useState('Inter');
+  const [fontFamily, setFontFamily] = useState<string>(() => {
+    return localStorage.getItem('mediTrans_fontFamily') || 'Inter';
+  });
+  
+  useEffect(() => {
+    localStorage.setItem('mediTrans_fontFamily', fontFamily);
+  }, [fontFamily]);
   
   // PDF Rendering Cache to prevent re-loading same pages during navigation
   const pageCacheRef = useRef<Map<number, { canvas: HTMLCanvasElement, zoom: number, textContent: any }>>(new Map());
@@ -4186,36 +4209,60 @@ export default function App() {
                   )}
 
                   <div className="h-4 w-px bg-slate-200 hidden md:block" />
-
+                  
                   {/* Font Controls at the end */}
-                  <div className="flex items-center gap-1.5 bg-slate-50 rounded-md p-0.5 border border-slate-100">
-                    <div className="flex items-center gap-1 px-1">
-                      <FontIcon className="w-3 h-3 text-slate-400" />
+                  <div className="flex items-center gap-1.5 bg-slate-50 rounded-xl p-1 border border-slate-200/80 shadow-sm">
+                    {/* Font Family Selector */}
+                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg hover:bg-slate-100 transition-colors">
+                      <FontIcon className="w-3.5 h-3.5 text-indigo-500" />
                       <select 
                         value={fontFamily}
                         onChange={(e) => setFontFamily(e.target.value)}
-                        className="text-[10px] font-bold bg-transparent border-none focus:ring-0 cursor-pointer text-slate-600 px-0"
+                        className="text-[11px] font-bold bg-transparent border-none focus:ring-0 cursor-pointer text-slate-700 p-0 outline-none select-none"
+                        title="Kiểu phông chữ"
                       >
-                        <option value="Inter">Sans</option>
-                        <option value="Cormorant Garamond">Serif</option>
-                        <option value="Playfair Display">Display</option>
-                        <option value="JetBrains Mono">Mono</option>
+                        <option value="Inter">Không chân (Inter)</option>
+                        <option value="Cormorant Garamond">Dễ đọc (Cormorant)</option>
+                        <option value="Playfair Display">Nghệ thuật (Playfair)</option>
+                        <option value="JetBrains Mono">Đơn cách (Mono)</option>
                       </select>
                     </div>
                     
-                    <div className="w-px h-3 bg-slate-200 mx-0.5" />
+                    <div className="w-px h-4 bg-slate-200" />
                     
-                    <div className="flex items-center gap-1 px-1">
-                      <ALargeSmall className="w-3 h-3 text-slate-400" />
-                      <select 
-                        value={fontSize}
-                        onChange={(e) => setFontSize(Number(e.target.value))}
-                        className="text-[10px] font-bold bg-transparent border-none focus:ring-0 cursor-pointer text-slate-600 px-0"
+                    {/* Font Size Selector & Quick Controls */}
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setFontSize(prev => Math.max(12, prev - 1))}
+                        disabled={fontSize <= 12}
+                        className="p-1 rounded-lg hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent text-slate-500 hover:text-indigo-600 transition-all active:scale-90"
+                        title="Giảm cỡ chữ"
                       >
-                        {[12, 14, 16, 18, 20].map(size => (
-                          <option key={size} value={size}>{size}px</option>
-                        ))}
-                      </select>
+                        <Minus className="w-3 h-3" />
+                      </button>
+
+                      <div className="flex items-center gap-0.5 px-1 rounded-lg hover:bg-slate-100 transition-colors">
+                        <ALargeSmall className="w-3.5 h-3.5 text-indigo-500" />
+                        <select 
+                          value={fontSize}
+                          onChange={(e) => setFontSize(Number(e.target.value))}
+                          className="text-[11px] font-black bg-transparent border-none focus:ring-0 cursor-pointer text-slate-700 p-0 outline-none w-10 text-center"
+                          title="Cỡ chữ"
+                        >
+                          {[12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 28, 30].map(size => (
+                            <option key={size} value={size}>{size}px</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <button
+                        onClick={() => setFontSize(prev => Math.min(30, prev + 1))}
+                        disabled={fontSize >= 30}
+                        className="p-1 rounded-lg hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent text-slate-500 hover:text-indigo-600 transition-all active:scale-90"
+                        title="Tăng cỡ chữ"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -4239,7 +4286,14 @@ export default function App() {
                       ) : (
                         <div 
                           className="markdown-body select-text pb-60 md:pb-0"
-                          style={{ fontSize: `${fontSize}px` }}
+                          style={{ 
+                            fontSize: `${fontSize}px`,
+                            fontFamily: fontFamily === 'Inter' ? 'var(--font-sans)' : 
+                                       fontFamily === 'JetBrains Mono' ? 'var(--font-mono)' : 
+                                       fontFamily === 'Playfair Display' ? 'var(--font-display)' :
+                                       fontFamily === 'Cormorant Garamond' ? 'var(--font-serif)' :
+                                       fontFamily
+                          }}
                         >
                           {isSummarizing && !summaryText && (
                             <div className="flex flex-col items-center justify-center py-20 gap-4">
@@ -4384,6 +4438,7 @@ export default function App() {
                           isStreaming={!!(activeTranslation && activeTranslation.page === currentPage && activeTranslation.status === 'loading')}
                           onCancel={cancelTranslation}
                           fontSize={fontSize}
+                          fontFamily={fontFamily}
                         />
 
                       {/* Mobile Navigation Buttons - Removed as redundant with floating bar */}
