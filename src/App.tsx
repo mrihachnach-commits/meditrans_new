@@ -235,13 +235,19 @@ const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSi
   onCancel: () => void;
   fontSize?: number;
 }) => {
+  const processedContent = useMemo(() => {
+    if (!content) return '';
+    // Replace sequences of 4 or more dots (possibly with spaces) with a clean ' ... '
+    return content.replace(/(\s*\.\s*){4,}/g, ' ... ');
+  }, [content]);
+
   return (
     <div 
       className="markdown-body select-text pb-60 md:pb-0"
       style={{ fontSize: fontSize ? `${fontSize}px` : undefined }}
     >
       <ReactMarkdown remarkPlugins={[remarkGfm]}>
-        {content}
+        {processedContent}
       </ReactMarkdown>
 
       {isStreaming && (
@@ -3982,10 +3988,10 @@ export default function App() {
                       }
                       setShowDownloadModal(true);
                     }}
-                    className="flex items-center gap-1.5 px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black text-indigo-600 bg-indigo-50 hover:bg-indigo-100 uppercase tracking-tighter transition-all border border-indigo-100 shadow-sm"
+                    className="flex items-center justify-center p-2 rounded-xl text-indigo-600 bg-indigo-50 hover:bg-indigo-100 transition-all border border-indigo-100 shadow-sm hover:scale-105 active:scale-95"
+                    title="Tải tập tin dịch"
                   >
-                    <Download className="w-3 h-3 md:w-3.5 md:h-3.5" /> 
-                    <span>Tải tập tin</span>
+                    <Download className="w-4 h-4" />
                   </button>
 
                   <div className="h-4 w-px bg-slate-200 hidden xs:block" />
@@ -3996,42 +4002,35 @@ export default function App() {
                         onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
                         disabled={isTranslating || isRendering}
                         className={cn(
-                          "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-tight transition-all flex items-center gap-1 border shadow-sm",
+                          "p-2 rounded-xl transition-all flex items-center justify-center border shadow-sm",
                           (isTranslating || isRendering)
                             ? "bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed" 
-                            : "bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100 hover:shadow active:scale-95"
+                            : "bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100 hover:shadow hover:scale-105 active:scale-95"
                         )}
-                        title="Dịch thường bằng Gemini Flash-Lite"
+                        title={isTranslating ? (isRendering ? 'Đang vẽ trang...' : 'Đang dịch thường...') : (translations[currentPage] ? 'Dịch lại (Thường)' : 'Dịch thường')}
                       >
                         {isTranslating || isRendering ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
+                          <Loader2 className="w-4 h-4 animate-spin" />
                         ) : (
-                          <Zap className="w-3 h-3" />
+                          <Zap className="w-4 h-4" />
                         )}
-                        <span>{translations[currentPage] ? 'Dịch lại' : 'Dịch thường'}</span>
                       </button>
 
                       <button 
                         onClick={() => translateCurrentPage(currentPage, true, 'gemini-3-flash-preview')}
                         disabled={isTranslating || isRendering}
                         className={cn(
-                          "px-3 md:px-4 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1.5 md:gap-2 shadow-lg",
+                          "p-2 rounded-xl transition-all flex items-center justify-center shadow-lg",
                           (isTranslating || isRendering)
                             ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
-                            : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 active:scale-95"
+                            : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 hover:scale-105 active:scale-95"
                         )}
-                        title="Dịch chất lượng cao bằng Gemini 3 Flash"
+                        title={isTranslating ? (isRendering ? 'Đang vẽ trang...' : 'Đang dịch chuyên sâu...') : (translations[currentPage] ? 'Dịch lại (Chuyên sâu)' : 'Dịch chuyên sâu')}
                       >
                         {isTranslating || isRendering ? (
-                          <>
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            <span>{isRendering ? 'Vẽ...' : 'Đang dịch...'}</span>
-                          </>
+                          <Loader2 className="w-4 h-4 animate-spin" />
                         ) : (
-                          <>
-                            <Sparkles className="w-3 h-3 md:w-3.5 md:h-3.5" />
-                            <span>{translations[currentPage] ? 'Dịch lại (Chuyên sâu)' : 'Dịch chuyên sâu'}</span>
-                          </>
+                          <Sparkles className="w-4 h-4" />
                         )}
                       </button>
                     </div>

@@ -143,7 +143,9 @@ export class GeminiService implements TranslationService {
       throw new Error("Translation aborted");
     }
 
-    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA. Dịch nội dung trang ${pageNumber} sang tiếng Việt. Giữ nguyên định dạng Markdown. Dịch chính xác tuyệt đối từng từ, từng câu so với bản gốc y khoa. Không tự ý thêm bớt, không thay đổi ý nghĩa, không giải thích thêm. Bám sát thuật ngữ chuyên ngành y khoa nhất có thể. KHÔNG lời dẫn.`;
+    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA. Dịch nội dung trang ${pageNumber} sang tiếng Việt. Giữ nguyên định dạng Markdown. Dịch chính xác tuyệt đối từng từ, từng câu so với bản gốc y khoa. Không tự ý thêm bớt, không thay đổi ý nghĩa, không giải thích thêm. Bám sát thuật ngữ chuyên ngành y khoa nhất có thể. KHÔNG lời dẫn.
+
+Đặc biệt đối với trang mục lục (Table of Contents / Index) hoặc danh sách có nhiều dấu chấm nối dòng (dot leaders): Hãy dọn dẹp các dấu chấm dư thừa (chỉ giữ lại tối đa 3-5 dấu chấm phân tách) hoặc trình bày lại dưới dạng danh sách phân cấp (bullet list/hierarchy) sạch sẽ, đồng nhất, dễ đọc và chuyên nghiệp. Tuyệt đối không lặp lại dấu chấm liên tục để tránh lỗi sinh chuỗi lặp vô hạn.`;
 
     const prompt = `Dịch trang y khoa này sang tiếng Việt.`;
 
@@ -204,8 +206,8 @@ export class GeminiService implements TranslationService {
           }
 
           if (chunkText) {
-            // Basic deduplication or cleaning if needed
-            chunkText = chunkText.replace(/\.{6,}/g, '.....');
+            // Basic deduplication or cleaning of long period sequences
+            chunkText = chunkText.replace(/(\s*\.\s*){4,}/g, ' ... ');
             fullText += chunkText;
             yield chunkText;
           }
@@ -275,7 +277,9 @@ export class GeminiService implements TranslationService {
         throw new Error("Không tìm thấy API Key khả dụng.");
       }
 
-      const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA. Dịch nội dung trang ${pageNumber} sang tiếng Việt. Giữ nguyên định dạng Markdown. Dịch chính xác tuyệt đối từng từ, từng câu so với bản gốc y khoa. Không tự ý thêm bớt, không thay đổi ý nghĩa, không giải thích thêm. Bám sát thuật ngữ chuyên ngành y khoa nhất có thể. KHÔNG lời dẫn.`;
+      const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA. Dịch nội dung trang ${pageNumber} sang tiếng Việt. Giữ nguyên định dạng Markdown. Dịch chính xác tuyệt đối từng từ, từng câu so với bản gốc y khoa. Không tự ý thêm bớt, không thay đổi ý nghĩa, không giải thích thêm. Bám sát thuật ngữ chuyên ngành y khoa nhất có thể. KHÔNG lời dẫn.
+
+Đặc biệt đối với trang mục lục (Table of Contents / Index) hoặc danh sách có nhiều dấu chấm nối dòng (dot leaders): Hãy dọn dẹp các dấu chấm dư thừa (chỉ giữ lại tối đa 3-5 dấu chấm phân tách) hoặc trình bày lại dưới dạng danh sách phân cấp (bullet list/hierarchy) sạch sẽ, đồng nhất, dễ đọc và chuyên nghiệp. Tuyệt đối không lặp lại dấu chấm liên tục để tránh lỗi sinh chuỗi lặp vô hạn.`;
       const prompt = `Dịch văn bản trong ảnh sang tiếng Việt.`;
 
       try {
@@ -292,7 +296,7 @@ export class GeminiService implements TranslationService {
 
         const response = await result.response;
         let text = response.text() || "";
-        const resultText = text.replace(/\.{6,}/g, '.....');
+        const resultText = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
         console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
         return resultText;
       } catch (error: any) {
