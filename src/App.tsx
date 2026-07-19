@@ -5032,123 +5032,125 @@ export default function App() {
                 </div>
 
                 {/* Bulk Translation Button with Confirmation */}
-                <div className="pt-4 border-t border-slate-100">
-                  {showBulkConfirm && !isBulkTranslating ? (
-                    <div className="space-y-3 animate-in zoom-in-95 duration-200">
-                      <div className="bg-amber-50 border border-amber-100 p-3 rounded-xl">
-                        <p className="text-[10px] font-bold text-amber-900 leading-relaxed">
-                          Xác nhận dịch toàn bộ {numPages} trang? 
-                          <span className="block font-normal mt-1 text-amber-700">Hành động này sẽ tiêu tốn hạn mức API của bạn.</span>
+                {pdfDoc && (
+                  <div className="pt-4 border-t border-slate-100">
+                    {showBulkConfirm && !isBulkTranslating ? (
+                      <div className="space-y-3 animate-in zoom-in-95 duration-200">
+                        <div className="bg-amber-50 border border-amber-100 p-3 rounded-xl">
+                          <p className="text-[10px] font-bold text-amber-900 leading-relaxed">
+                            Xác nhận dịch toàn bộ {numPages} trang? 
+                            <span className="block font-normal mt-1 text-amber-700">Hành động này sẽ tiêu tốn hạn mức API của bạn.</span>
+                          </p>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          <button
+                            onClick={() => {
+                              setShowBulkConfirm(false);
+                              startBulkTranslation('gemini-flash-lite-latest');
+                            }}
+                            className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
+                          >
+                            <Zap className="w-3.5 h-3.5" />
+                            Dịch toàn bộ (Cơ bản)
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShowBulkConfirm(false);
+                              startBulkTranslation('gemini-3-flash-preview');
+                            }}
+                            className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2"
+                          >
+                            <Sparkles className="w-4 h-4" />
+                            Dịch chuyên sâu (Gemini 3)
+                          </button>
+                          <button
+                            onClick={() => setShowBulkConfirm(false)}
+                            className="w-full py-2.5 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-bold uppercase hover:bg-slate-200 transition-all"
+                          >
+                            Hủy
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          if (isBulkTranslating) {
+                            startBulkTranslation(); // This handles stopping
+                          } else {
+                            setShowBulkConfirm(true);
+                          }
+                        }}
+                        disabled={!pdfDoc}
+                        className={cn(
+                          "w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all font-bold text-xs uppercase tracking-wider",
+                          bulkTranslateStatus === 'translating' 
+                            ? "bg-amber-100 text-amber-700 border border-amber-200" 
+                            : bulkTranslateStatus === 'completed'
+                            ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                            : bulkTranslateStatus === 'failed'
+                            ? "bg-rose-100 text-rose-700 border border-rose-200"
+                            : "bg-indigo-600 text-white shadow-lg shadow-indigo-100 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0"
+                        )}
+                      >
+                        {bulkTranslateStatus === 'translating' ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Dừng dịch (Stop)
+                          </>
+                        ) : bulkTranslateStatus === 'completed' ? (
+                          <>
+                            <CheckCircle2 className="w-4 h-4" />
+                            Đã dịch xong
+                          </>
+                        ) : bulkTranslateStatus === 'failed' ? (
+                          <>
+                            <AlertTriangle className="w-4 h-4" />
+                            Lỗi/Hết Key
+                          </>
+                        ) : (
+                          <>
+                            <Zap className="w-4 h-4" />
+                            Dịch toàn bộ tài liệu
+                          </>
+                        )}
+                      </button>
+                    )}
+                    
+                    {bulkTranslateStatus !== 'idle' && (
+                      <div className="mt-3 space-y-1.5 px-1 animate-in fade-in slide-in-from-top-2">
+                        <div className="flex justify-between items-center text-[9px] font-bold text-slate-500 uppercase">
+                          <span>
+                            {bulkTranslateStatus === 'translating' ? 'Tiến độ dịch thuật' : 
+                             bulkTranslateStatus === 'completed' ? 'Hoàn tất dịch thuật' : 'Hết hạn mức API'}
+                          </span>
+                          <span className={cn(
+                            bulkTranslateStatus === 'completed' ? 'text-emerald-600' :
+                            bulkTranslateStatus === 'failed' ? 'text-rose-600' :
+                            'text-indigo-600'
+                          )}>{bulkTranslateProgress}%</span>
+                        </div>
+                        <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                          <div 
+                            className={cn(
+                              "h-full transition-all duration-300 rounded-full",
+                              bulkTranslateStatus === 'completed' ? 'bg-emerald-500' :
+                              bulkTranslateStatus === 'failed' ? 'bg-rose-500' :
+                              'bg-indigo-600'
+                            )}
+                            style={{ width: `${bulkTranslateProgress}%` }}
+                          />
+                        </div>
+                        <p className="text-[8px] text-slate-400 text-center italic">
+                          {bulkTranslateStatus === 'translating' 
+                            ? `Đang sử dụng pool keys (${userKeys.length} keys) để dịch song song...`
+                            : bulkTranslateStatus === 'completed'
+                            ? "Tất cả các trang đã được dịch thành công."
+                            : "Đã dừng dịch do hết API Key khả dụng."}
                         </p>
                       </div>
-                      <div className="flex flex-col gap-2">
-                        <button
-                          onClick={() => {
-                            setShowBulkConfirm(false);
-                            startBulkTranslation('gemini-flash-lite-latest');
-                          }}
-                          className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
-                        >
-                          <Zap className="w-3.5 h-3.5" />
-                          Dịch toàn bộ (Cơ bản)
-                        </button>
-                        <button
-                          onClick={() => {
-                            setShowBulkConfirm(false);
-                            startBulkTranslation('gemini-3-flash-preview');
-                          }}
-                          className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2"
-                        >
-                          <Sparkles className="w-4 h-4" />
-                          Dịch chuyên sâu (Gemini 3)
-                        </button>
-                        <button
-                          onClick={() => setShowBulkConfirm(false)}
-                          className="w-full py-2.5 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-bold uppercase hover:bg-slate-200 transition-all"
-                        >
-                          Hủy
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => {
-                        if (isBulkTranslating) {
-                          startBulkTranslation(); // This handles stopping
-                        } else {
-                          setShowBulkConfirm(true);
-                        }
-                      }}
-                      disabled={!pdfDoc}
-                      className={cn(
-                        "w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all font-bold text-xs uppercase tracking-wider",
-                        bulkTranslateStatus === 'translating' 
-                          ? "bg-amber-100 text-amber-700 border border-amber-200" 
-                          : bulkTranslateStatus === 'completed'
-                          ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
-                          : bulkTranslateStatus === 'failed'
-                          ? "bg-rose-100 text-rose-700 border border-rose-200"
-                          : "bg-indigo-600 text-white shadow-lg shadow-indigo-100 hover:bg-indigo-700 hover:-translate-y-0.5 active:translate-y-0"
-                      )}
-                    >
-                      {bulkTranslateStatus === 'translating' ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          Dừng dịch (Stop)
-                        </>
-                      ) : bulkTranslateStatus === 'completed' ? (
-                        <>
-                          <CheckCircle2 className="w-4 h-4" />
-                          Đã dịch xong
-                        </>
-                      ) : bulkTranslateStatus === 'failed' ? (
-                        <>
-                          <AlertTriangle className="w-4 h-4" />
-                          Lỗi/Hết Key
-                        </>
-                      ) : (
-                        <>
-                          <Zap className="w-4 h-4" />
-                          Dịch toàn bộ tài liệu
-                        </>
-                      )}
-                    </button>
-                  )}
-                  
-                  {bulkTranslateStatus !== 'idle' && (
-                    <div className="mt-3 space-y-1.5 px-1 animate-in fade-in slide-in-from-top-2">
-                      <div className="flex justify-between items-center text-[9px] font-bold text-slate-500 uppercase">
-                        <span>
-                          {bulkTranslateStatus === 'translating' ? 'Tiến độ dịch thuật' : 
-                           bulkTranslateStatus === 'completed' ? 'Hoàn tất dịch thuật' : 'Hết hạn mức API'}
-                        </span>
-                        <span className={cn(
-                          bulkTranslateStatus === 'completed' ? 'text-emerald-600' :
-                          bulkTranslateStatus === 'failed' ? 'text-rose-600' :
-                          'text-indigo-600'
-                        )}>{bulkTranslateProgress}%</span>
-                      </div>
-                      <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
-                        <div 
-                          className={cn(
-                            "h-full transition-all duration-300 rounded-full",
-                            bulkTranslateStatus === 'completed' ? 'bg-emerald-500' :
-                            bulkTranslateStatus === 'failed' ? 'bg-rose-500' :
-                            'bg-indigo-600'
-                          )}
-                          style={{ width: `${bulkTranslateProgress}%` }}
-                        />
-                      </div>
-                      <p className="text-[8px] text-slate-400 text-center italic">
-                        {bulkTranslateStatus === 'translating' 
-                          ? `Đang sử dụng pool keys (${userKeys.length} keys) để dịch song song...`
-                          : bulkTranslateStatus === 'completed'
-                          ? "Tất cả các trang đã được dịch thành công."
-                          : "Đã dừng dịch do hết API Key khả dụng."}
-                      </p>
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="p-6 border-t border-slate-100 bg-slate-50 flex gap-3 shrink-0">
                   <button 
