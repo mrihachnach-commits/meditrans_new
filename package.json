@@ -6,6 +6,11 @@
   "engines": {
     "node": ">=20"
   },
+  "browserslist": [
+    "> 0.2%",
+    "not dead",
+    "chrome 109"
+  ],
   "scripts": {
     "dev": "tsx server.ts",
     "start": "NODE_ENV=production node server.ts",
@@ -54,6 +59,7 @@
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "eslint": "^9.39.4",
+    "lightningcss": "^1.32.0",
     "mocha": "^11.7.5",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
