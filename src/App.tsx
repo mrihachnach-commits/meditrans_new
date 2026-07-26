@@ -11,6 +11,8 @@ import { GeminiService } from './services/geminiService';
 import { Logo, LogoWithText } from './components/Logo';
 import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
+import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
+import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, DriveFileMetadata } from './services/googleDriveService';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
 
@@ -28,6 +30,7 @@ import {
   CheckCircle2,
   Maximize2,
   Minimize2,
+  HardDrive,
   Search,
   Hand,
   Trash2,
@@ -300,6 +303,7 @@ export default function App() {
   const [fileId, setFileId] = useState<string | null>(null);
   const [fileOwnerId, setFileOwnerId] = useState<string | null>(null);
   const [showExplorer, setShowExplorer] = useState(true);
+  const [showDrivePickerModal, setShowDrivePickerModal] = useState(false);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [translations, setTranslations] = useState<TranslationState>({});
   const translationsRef = useRef<TranslationState>({});
@@ -559,84 +563,42 @@ export default function App() {
     setUploadTasks(prev => [newTask, ...prev]);
 
     try {
-      const formData = new FormData();
-      formData.append('file', fileToUpload);
+      // Upload directly to user's Google Drive
+      const uploadedDriveFile = await uploadFileToDrive(fileToUpload);
 
-      // Retry logic for 100% success rate
-      let response;
-      let retries = 3;
-      let delay = 1000;
-
-      while (retries > 0) {
-        try {
-          response = await fetch('/api/tinyvault', {
-            method: 'POST',
-            body: formData
-          });
-          if (response.ok) break;
-          
-          // If 5xx or 429, retry
-          if (response.status >= 500 || response.status === 429) {
-            retries--;
-            if (retries > 0) {
-              await new Promise(resolve => setTimeout(resolve, delay));
-              delay *= 2; // Exponential backoff
-              continue;
-            }
-          }
-          break; // Other errors don't retry
-        } catch (e) {
-          retries--;
-          if (retries === 0) throw e;
-          await new Promise(resolve => setTimeout(resolve, delay));
-          delay *= 2;
-        }
+      try {
+        await addDoc(collection(db, `users/${user.uid}/documents`), {
+          name: fileToUpload.name,
+          folderId: folderId,
+          ownerId: user.uid,
+          sharedWith: [],
+          driveFileId: uploadedDriveFile.id,
+          downloadUrl: uploadedDriveFile.webViewLink || '',
+          size: fileToUpload.size,
+          type: fileToUpload.type,
+          createdAt: serverTimestamp()
+        });
+      } catch (error: any) {
+        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/documents`);
       }
 
-      if (!response || !response.ok) {
-        const errorData = response ? await response.json().catch(() => ({})) : {};
-        console.error("Upload failed after retries:", errorData);
-        throw new Error(errorData.details || errorData.error || `Upload failed with status ${response?.status || 'unknown'}`);
-      }
+      setIsLocalOnly(false);
+      setShowFolderSelectModal(false);
 
-      const data = await response.json();
-      
-      if (data.token) {
-        try {
-          await addDoc(collection(db, `users/${user.uid}/documents`), {
-            name: fileToUpload.name,
-            folderId: folderId,
-            ownerId: user.uid,
-            sharedWith: [],
-            token: data.token,
-            downloadUrl: data.download_url,
-            size: fileToUpload.size,
-            type: fileToUpload.type,
-            createdAt: serverTimestamp()
-          });
-        } catch (error: any) {
-          handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/documents`);
-        }
+      setUploadTasks(prev => prev.map(t => 
+        t.id === taskId ? { ...t, status: 'success' } : t
+      ));
 
-        setIsLocalOnly(false);
-        setShowFolderSelectModal(false);
-
-        setUploadTasks(prev => prev.map(t => 
-          t.id === taskId ? { ...t, status: 'success' } : t
-        ));
-
-        // Auto dismiss success after 5 seconds
-        setTimeout(() => {
-          setUploadTasks(prev => prev.filter(t => t.id !== taskId));
-        }, 5000);
-      } else {
-        throw new Error("Upload failed");
-      }
-    } catch (error) {
-      console.error("Error uploading file:", error);
+      // Auto dismiss success after 5 seconds
+      setTimeout(() => {
+        setUploadTasks(prev => prev.filter(t => t.id !== taskId));
+      }, 5000);
+    } catch (error: any) {
+      console.error("Error uploading to Google Drive:", error);
       setUploadTasks(prev => prev.map(t => 
         t.id === taskId ? { ...t, status: 'error' } : t
       ));
+      showToast(`Lỗi tải lên Google Drive: ${error.message || 'Lỗi không xác định'}`, 'error');
     }
   };
 
@@ -2035,14 +1997,75 @@ export default function App() {
     setAutoTranslate(false);
 
     try {
-      // Use the TinyVault download URL
-      const url = fileData.downloadUrl;
-      setFileUrl(url);
-      
-      console.log(`[MediTrans AI] Loading PDF from TinyVault: ${fileData.name}`);
+      console.log(`[MediTrans AI] Loading PDF document: ${fileData.name}`);
+      setCurrentFileName(fileData.name);
+      let loadingTask;
 
+      if (fileData.driveFileId) {
+        // Fetch ArrayBuffer directly from Google Drive API
+        const arrayBuffer = await downloadDriveFileAsArrayBuffer(fileData.driveFileId);
+        loadingTask = pdfjs.getDocument({
+          data: arrayBuffer,
+          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+          cMapPacked: true,
+          disableAutoFetch: false,
+          disableStream: false,
+        });
+      } else if (fileData.downloadUrl) {
+        setFileUrl(fileData.downloadUrl);
+        loadingTask = pdfjs.getDocument({
+          url: fileData.downloadUrl,
+          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+          cMapPacked: true,
+          disableAutoFetch: false,
+          disableStream: false,
+        });
+      } else {
+        throw new Error("Không tìm thấy thông tin tệp trên Google Drive.");
+      }
+
+      const pdf = await loadingTask.promise;
+      setPdfDoc(pdf);
+      setNumPages(pdf.numPages);
+    } catch (error: any) {
+      console.error("Error loading PDF from Google Drive:", error);
+      if (error.message === 'CHUA_KET_NOI_DRIVE') {
+        setPdfError('Chưa kết nối tài khoản Google Drive. Vui lòng bấm "Google Drive" trên thanh công cụ để kết nối và cấp quyền.');
+      } else {
+        setPdfError(`Không thể tải tệp PDF từ Google Drive: ${error.message || "Lỗi không xác định"}`);
+      }
+    } finally {
+      setIsPdfLoading(false);
+    }
+  };
+
+  const handleSelectDriveFile = async (driveFile: DriveFileMetadata) => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      showToast("Vui lòng đăng nhập để mở tài liệu.", "info");
+      return;
+    }
+
+    setShowExplorer(false);
+    setIsPdfLoading(true);
+    setPdfError(null);
+
+    // Abort previous
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    preTranslateControllersRef.current.forEach(c => c.abort());
+    preTranslateControllersRef.current.clear();
+    translatingPagesRef.current.clear();
+    pageCacheRef.current.clear();
+
+    try {
+      console.log(`[MediTrans AI] Opening Google Drive File: ${driveFile.name} (${driveFile.id})`);
+      const arrayBuffer = await downloadDriveFileAsArrayBuffer(driveFile.id);
+      
       const loadingTask = pdfjs.getDocument({
-        url,
+        data: arrayBuffer,
         cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
         cMapPacked: true,
         disableAutoFetch: false,
@@ -2052,9 +2075,34 @@ export default function App() {
       const pdf = await loadingTask.promise;
       setPdfDoc(pdf);
       setNumPages(pdf.numPages);
+      setCurrentFileName(driveFile.name);
+      setFile(null);
+      setTranslations({});
+      setCurrentPage(1);
+
+      // Save reference in user's documents if not already saved
+      try {
+        await addDoc(collection(db, `users/${currentUser.uid}/documents`), {
+          name: driveFile.name,
+          folderId: null,
+          ownerId: currentUser.uid,
+          sharedWith: [],
+          driveFileId: driveFile.id,
+          downloadUrl: driveFile.webViewLink || '',
+          size: driveFile.size || 0,
+          type: driveFile.mimeType || 'application/pdf',
+          createdAt: serverTimestamp()
+        });
+      } catch (e) {
+        console.warn('Could not save Drive reference to Firestore:', e);
+      }
     } catch (error: any) {
-      console.error("Error loading PDF from TinyVault:", error);
-      setPdfError(`Không thể tải file PDF từ TinyVault: ${error.message || "Lỗi không xác định"}`);
+      console.error("Error opening file from Google Drive:", error);
+      if (error.message === 'CHUA_KET_NOI_DRIVE') {
+        setPdfError('Chưa kết nối Google Drive. Vui lòng mở lại Google Drive và bấm "Kết nối & Cấp quyền Google Drive".');
+      } else {
+        setPdfError(`Không thể mở tài liệu từ Google Drive: ${error.message || 'Lỗi không xác định'}`);
+      }
     } finally {
       setIsPdfLoading(false);
     }
@@ -3574,6 +3622,15 @@ export default function App() {
           )}
 
           <button 
+            onClick={() => setShowDrivePickerModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 border border-indigo-100 text-indigo-600 hover:bg-indigo-100 rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm"
+            title="Mở hoặc chọn tài liệu từ Google Drive"
+          >
+            <HardDrive className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Google Drive</span>
+          </button>
+
+          <button 
             onClick={() => setShowSettings(true)}
             className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
             title="Cài đặt hệ thống"
@@ -3675,6 +3732,7 @@ export default function App() {
               onUploadStart={startUpload} 
               onLocalFileOpen={handleLocalFileOpen}
               onBulkTranslate={handleBulkTranslateFromExplorer}
+              onOpenGoogleDrive={() => setShowDrivePickerModal(true)}
             />
           </div>
         ) : (
@@ -6287,6 +6345,13 @@ export default function App() {
         </div>
       )}
     </AnimatePresence>
+
+    {/* Google Drive Picker Modal */}
+    <GoogleDrivePickerModal 
+      isOpen={showDrivePickerModal}
+      onClose={() => setShowDrivePickerModal(false)}
+      onSelectDriveFile={handleSelectDriveFile}
+    />
 
     {/* Toast Notification */}
     <AnimatePresence>

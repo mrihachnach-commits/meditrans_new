@@ -23,7 +23,8 @@ import {
   Type,
   Share2,
   Users,
-  Zap
+  Zap,
+  HardDrive
 } from 'lucide-react';
 import { 
   db, 
@@ -61,8 +62,9 @@ export interface FileData {
   folderId: string | null;
   ownerId?: string;
   sharedWith?: string[];
-  token: string;
-  downloadUrl: string;
+  driveFileId?: string;
+  token?: string;
+  downloadUrl?: string;
   size: number;
   type: string;
   createdAt: any;
@@ -73,9 +75,10 @@ interface FileExplorerProps {
   onUploadStart: (file: File, folderId: string | null) => void;
   onLocalFileOpen: (file: File) => void;
   onBulkTranslate?: (file: FileData) => void;
+  onOpenGoogleDrive?: () => void;
 }
 
-export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate }) => {
+export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate, onOpenGoogleDrive }) => {
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'my' | 'shared'>('my');
   const [myFolders, setMyFolders] = useState<FolderData[]>([]);
@@ -499,6 +502,17 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
               {sortBy === 'size' && (sortOrder === 'asc' ? <SortAsc className="w-3 h-3" /> : <SortDesc className="w-3 h-3" />)}
             </button>
           </div>
+
+          {onOpenGoogleDrive && (
+            <button 
+              onClick={onOpenGoogleDrive}
+              className="p-2.5 bg-indigo-50 border border-indigo-100 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-all shadow-sm flex items-center gap-1.5"
+              title="Mở hoặc chọn tài liệu từ Google Drive"
+            >
+              <HardDrive className="w-5 h-5" />
+              <span className="text-xs font-bold hidden md:inline">Google Drive</span>
+            </button>
+          )}
 
           <button 
             onClick={() => setShowNewFolderModal(true)}
