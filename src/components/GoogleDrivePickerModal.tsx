@@ -10,7 +10,8 @@ import {
   CheckCircle2, 
   AlertCircle,
   ExternalLink,
-  Plus
+  Plus,
+  FolderPlus
 } from 'lucide-react';
 import { 
   listUserDriveFiles, 
@@ -24,14 +25,16 @@ import { motion } from 'motion/react';
 interface GoogleDrivePickerModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSelectDriveFile: (file: DriveFileMetadata) => void;
+  onOpenDriveFile: (file: DriveFileMetadata) => void;
+  onSaveDriveFile: (file: DriveFileMetadata) => void;
   onFileUploaded?: (file: DriveFileMetadata) => void;
 }
 
 export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
   isOpen,
   onClose,
-  onSelectDriveFile,
+  onOpenDriveFile,
+  onSaveDriveFile,
   onFileUploaded
 }) => {
   const [files, setFiles] = useState<DriveFileMetadata[]>([]);
@@ -80,7 +83,7 @@ export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
       if (onFileUploaded) {
         onFileUploaded(uploaded);
       } else {
-        onSelectDriveFile(uploaded);
+        onSaveDriveFile(uploaded);
       }
       setTimeout(() => {
         setIsUploading(false);
@@ -241,13 +244,15 @@ export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
               {files.map((file) => (
                 <div 
                   key={file.id}
-                  onClick={() => {
-                    onSelectDriveFile(file);
-                    onClose();
-                  }}
-                  className="p-3 bg-white border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/30 rounded-2xl flex items-center justify-between gap-3 cursor-pointer transition-all group"
+                  className="p-3 bg-white border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/30 rounded-2xl flex items-center justify-between gap-3 transition-all group"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
+                  <div 
+                    onClick={() => {
+                      onOpenDriveFile(file);
+                      onClose();
+                    }}
+                    className="flex items-center gap-3 min-w-0 cursor-pointer flex-1"
+                  >
                     <div className="p-2.5 bg-rose-50 text-rose-600 rounded-xl group-hover:bg-indigo-600 group-hover:text-white transition-all shrink-0">
                       <FileText className="w-5 h-5" />
                     </div>
@@ -267,10 +272,29 @@ export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
                     </div>
                   </div>
 
-                  <button className="px-3 py-1.5 bg-slate-100 text-slate-600 group-hover:bg-indigo-600 group-hover:text-white rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1">
-                    <span>Mở dịch</span>
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button 
+                      onClick={() => {
+                        onOpenDriveFile(file);
+                        onClose();
+                      }}
+                      className="px-3 py-1.5 bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1"
+                      title="Mở tài liệu để dịch ngay"
+                    >
+                      <span>Mở dịch</span>
+                    </button>
+                    <button 
+                      onClick={() => {
+                        onSaveDriveFile(file);
+                        onClose();
+                      }}
+                      className="px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-800 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1"
+                      title="Lưu vào quản lý tài liệu và chọn thư mục"
+                    >
+                      <FolderPlus className="w-3.5 h-3.5" />
+                      <span>Lưu</span>
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

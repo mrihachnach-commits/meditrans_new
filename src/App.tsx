@@ -401,6 +401,8 @@ export default function App() {
   const [selectedPagesToDownload, setSelectedPagesToDownload] = useState<number[]>([]);
   const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
   const [showFolderSelectModal, setShowFolderSelectModal] = useState(false);
+  const [driveFileToSave, setDriveFileToSave] = useState<any | null>(null);
+  const [showDriveFolderModal, setShowDriveFolderModal] = useState<boolean>(false);
   const [allFolders, setAllFolders] = useState<{id: string, name: string, parentId?: string | null}[]>([]);
   const [isFirebaseConnected, setIsFirebaseConnected] = useState<boolean | null>(null);
   const [toast, setToast] = useState<{message: string, type: 'success' | 'error' | 'info'} | null>(null);
@@ -989,7 +991,7 @@ export default function App() {
           }
         } else if (activeSession.driveFile) {
           activeDriveFileRef.current = activeSession.driveFile;
-          await handleSelectDriveFile(activeSession.driveFile);
+          await handleOpenDriveFile(activeSession.driveFile);
           if (activeSession.currentPage > 1 && isSubscribed) {
             setCurrentPage(activeSession.currentPage);
           }
@@ -2181,12 +2183,11 @@ export default function App() {
     }
   };
 
-  const handleSelectDriveFile = async (driveFile: DriveFileMetadata) => {
+  const handleOpenDriveFile = async (driveFile: DriveFileMetadata) => {
     activeFileDataRef.current = null;
     activeDriveFileRef.current = driveFile;
     activeFileBufferRef.current = null;
 
-    // Immediately close Google Drive Picker Modal
     setShowDrivePickerModal(false);
 
     const currentUser = auth.currentUser;
@@ -2205,7 +2206,6 @@ export default function App() {
       }
     });
 
-    // Abort previous
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
@@ -2216,7 +2216,7 @@ export default function App() {
     pageCacheRef.current.clear();
 
     try {
-      console.log(`[MediTrans AI] Opening Google Drive File: ${driveFile.name} (${driveFile.id})`);
+      console.log(`[MediTrans AI] Opening Google Drive File (No Auto-Save): ${driveFile.name} (${driveFile.id})`);
       const arrayBuffer = await downloadDriveFileAsArrayBuffer(driveFile.id);
       
       const loadingTask = pdfjs.getDocument({
@@ -2234,54 +2234,54 @@ export default function App() {
       setFile(null);
       setTranslations({});
       setCurrentPage(1);
+      setFileId(null);
+      setFileOwnerId(currentUser.uid);
 
-      // Save reference in user's documents root if not already saved
-      try {
-        const existingDocsQuery = query(
-          collection(db, `users/${currentUser.uid}/documents`),
-          where('driveFileId', '==', driveFile.id)
-        );
-        const existingSnap = await getDocs(existingDocsQuery);
-
-        let docId: string;
-        if (!existingSnap.empty) {
-          docId = existingSnap.docs[0].id;
-        } else {
-          const docRef = await addDoc(collection(db, `users/${currentUser.uid}/documents`), {
-            name: driveFile.name,
-            folderId: null, // Root of document manager
-            ownerId: currentUser.uid,
-            sharedWith: [],
-            driveFileId: driveFile.id,
-            downloadUrl: driveFile.webViewLink || '',
-            size: driveFile.size || 0,
-            type: driveFile.mimeType || 'application/pdf',
-            createdAt: serverTimestamp()
-          });
-          docId = docRef.id;
-        }
-
-        setFileId(docId);
-        setFileOwnerId(currentUser.uid);
-
-        saveActiveDocSession({
-          fileId: docId,
-          fileName: driveFile.name,
-          currentPage: 1,
-          driveFile
-        });
-      } catch (e) {
-        console.warn('Could not save Drive reference to Firestore:', e);
-      }
+      saveActiveDocSession({
+        fileName: driveFile.name,
+        currentPage: 1,
+        driveFile
+      });
     } catch (error: any) {
-      console.error("Error opening file from Google Drive:", error);
+      console.error("Error opening PDF from Google Drive:", error);
       if (error.message === 'CHUA_KET_NOI_DRIVE') {
-        setPdfError('Chưa kết nối Google Drive. Vui lòng mở lại Google Drive và bấm "Kết nối & Cấp quyền Google Drive".');
+        setPdfError('Chưa kết nối tài khoản Google Drive. Vui lòng bấm "Google Drive" trên thanh công cụ để kết nối và cấp quyền.');
       } else {
-        setPdfError(`Không thể mở tài liệu từ Google Drive: ${error.message || 'Lỗi không xác định'}`);
+        setPdfError(`Không thể tải tệp PDF từ Google Drive: ${error.message || "Lỗi không xác định"}`);
       }
     } finally {
       setIsPdfLoading(false);
+    }
+  };
+
+  const handleSaveDriveFile = (driveFile: DriveFileMetadata) => {
+    setDriveFileToSave(driveFile);
+    setShowDriveFolderModal(true);
+  };
+
+  const confirmSaveDriveFileToFolder = async (folderId: string | null) => {
+    setShowDriveFolderModal(false);
+    const currentUser = auth.currentUser;
+    if (!currentUser || !driveFileToSave) return;
+
+    try {
+      await addDoc(collection(db, `users/${currentUser.uid}/documents`), {
+        name: driveFileToSave.name,
+        folderId: folderId,
+        ownerId: currentUser.uid,
+        sharedWith: [],
+        driveFileId: driveFileToSave.id,
+        downloadUrl: driveFileToSave.webViewLink || '',
+        size: driveFileToSave.size || 0,
+        type: driveFileToSave.mimeType || 'application/pdf',
+        createdAt: serverTimestamp()
+      });
+
+      showToast(`Đã lưu "${driveFileToSave.name}" vào quản lý tài liệu thành công.`, 'success');
+      setDriveFileToSave(null);
+    } catch (error: any) {
+      console.error("Error saving drive file:", error);
+      showToast("Lỗi khi lưu tài liệu: " + error.message, 'error');
     }
   };
 
@@ -6417,8 +6417,96 @@ export default function App() {
     <GoogleDrivePickerModal 
       isOpen={showDrivePickerModal}
       onClose={() => setShowDrivePickerModal(false)}
-      onSelectDriveFile={handleSelectDriveFile}
+      onOpenDriveFile={handleOpenDriveFile}
+      onSaveDriveFile={handleSaveDriveFile}
     />
+
+    {/* Drive Folder Selection Modal for Saving */}
+    <AnimatePresence>
+      {showDriveFolderModal && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setShowDriveFolderModal(false)}
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+          />
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.9, y: 20 }}
+            className="relative bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+          >
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="bg-indigo-100 p-2 rounded-xl">
+                  <Folder className="text-indigo-600 w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-display font-bold text-slate-800">Chọn thư mục lưu trữ</h3>
+                  <p className="text-xs text-slate-400 truncate max-w-[240px]">{driveFileToSave?.name}</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowDriveFolderModal(false)}
+                className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+              >
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-4 space-y-2 no-scrollbar">
+              <p className="text-xs font-medium text-slate-400 px-2 mb-2 uppercase tracking-wider">Thư mục hiện có</p>
+              
+              <button 
+                onClick={() => confirmSaveDriveFileToFolder(null)}
+                className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 rounded-2xl transition-all text-left group border border-transparent hover:border-slate-100"
+              >
+                <div className="bg-slate-100 p-2 rounded-xl group-hover:bg-indigo-100 transition-colors">
+                  <Home className="w-5 h-5 text-slate-500 group-hover:text-indigo-600" />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-slate-700">Root (Thư mục gốc)</p>
+                  <p className="text-[10px] text-slate-400">Lưu trực tiếp vào thư mục chính</p>
+                </div>
+              </button>
+
+              {allFolders.map(folder => (
+                <button 
+                  key={folder.id}
+                  onClick={() => confirmSaveDriveFileToFolder(folder.id)}
+                  className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 rounded-2xl transition-all text-left group border border-transparent hover:border-slate-100"
+                >
+                  <div className="bg-amber-50 p-2 rounded-xl group-hover:bg-amber-100 transition-colors">
+                    <Folder className="w-5 h-5 text-amber-600" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-slate-700">{folder.name}</p>
+                    <p className="text-[10px] text-slate-400">{getFolderPath(folder.id)}</p>
+                  </div>
+                </button>
+              ))}
+
+              {allFolders.length === 0 && (
+                <div className="py-8 text-center">
+                  <p className="text-sm text-slate-400">Chưa có thư mục nào. Bạn có thể lưu vào Root.</p>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+              <button 
+                onClick={() => setShowDriveFolderModal(false)}
+                className="px-6 py-2 text-slate-500 text-sm font-bold hover:bg-slate-100 rounded-xl transition-colors"
+              >
+                Hủy bỏ
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
 
     {/* Toast Notification */}
     <AnimatePresence>
