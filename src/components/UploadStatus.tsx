@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Loader2, CheckCircle2, XCircle, FileText, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -15,6 +15,18 @@ interface UploadStatusProps {
 }
 
 export const UploadStatus: React.FC<UploadStatusProps> = ({ tasks, onDismiss }) => {
+  useEffect(() => {
+    const successTasks = tasks.filter(t => t.status === 'success');
+    if (successTasks.length > 0) {
+      const timers = successTasks.map(t => 
+        setTimeout(() => {
+          onDismiss(t.id);
+        }, 1500)
+      );
+      return () => timers.forEach(clearTimeout);
+    }
+  }, [tasks, onDismiss]);
+
   if (tasks.length === 0) return null;
 
   return (

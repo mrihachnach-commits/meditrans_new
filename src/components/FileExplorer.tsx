@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { onAuthStateChanged, User } from 'firebase/auth';
 import { 
   Folder, 
   FileText, 
@@ -89,6 +90,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
   
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   
   const [showRenameModal, setShowRenameModal] = useState<{id: string, name: string, type: 'file' | 'folder'} | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -106,7 +108,17 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
   const [openingFileId, setOpeningFileId] = useState<string | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
-  const user = auth.currentUser;
+  const [user, setUser] = useState<User | null>(() => auth.currentUser);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (!currentUser) {
+        setLoading(false);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Fetch my folders always for the move modal
   useEffect(() => {
@@ -124,7 +136,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
   }, [user]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
 
     if (viewMode === 'my') {
@@ -143,13 +158,16 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
         setFolders(folderList);
         setLoading(false);
       }, (error) => {
+        setLoading(false);
         handleFirestoreError(error, OperationType.GET, `users/${user.uid}/folders`);
       });
 
       const unsubscribeFiles = onSnapshot(filesQuery, (snapshot) => {
         const fileList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FileData));
         setFiles(fileList);
+        setLoading(false);
       }, (error) => {
+        setLoading(false);
         handleFirestoreError(error, OperationType.GET, `users/${user.uid}/documents`);
       });
 
@@ -175,8 +193,6 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       }, (error) => {
         console.error("Error fetching shared files:", error);
         setLoading(false);
-        // collectionGroup might need an index which user needs to create, 
-        // but it will fail fast if index is missing.
       });
 
       return unsubscribe;
@@ -189,18 +205,33 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
   }, [currentFolderId]);
 
   const handleCreateFolder = async () => {
-    if (!user || !newFolderName.trim()) return;
+    const trimmed = newFolderName.trim();
+    if (!trimmed) return;
     
+    setIsCreatingFolder(true);
     try {
-      await addDoc(collection(db, `users/${user.uid}/folders`), {
-        name: newFolderName,
-        parentId: currentFolderId,
-        createdAt: serverTimestamp()
-      });
+      if (user) {
+        await addDoc(collection(db, `users/${user.uid}/folders`), {
+          name: trimmed,
+          parentId: currentFolderId,
+          createdAt: serverTimestamp()
+        });
+      } else {
+        const newFolder: FolderData = {
+          id: 'local_' + Date.now(),
+          name: trimmed,
+          parentId: currentFolderId,
+          createdAt: new Date()
+        };
+        setMyFolders(prev => [newFolder, ...prev]);
+        setFolders(prev => [newFolder, ...prev]);
+      }
+    } catch (error) {
+      console.error("Error creating folder:", error);
+    } finally {
       setNewFolderName('');
       setShowNewFolderModal(false);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/folders`);
+      setIsCreatingFolder(false);
     }
   };
 
@@ -979,10 +1010,17 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setShowNewFolderModal(false)}
+              onClick={() => {
+                setShowNewFolderModal(false);
+                setNewFolderName('');
+              }}
               className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
             />
-            <motion.div 
+            <motion.form 
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleCreateFolder();
+              }}
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
@@ -999,19 +1037,28 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
               />
               <div className="flex gap-3">
                 <button 
-                  onClick={() => setShowNewFolderModal(false)}
+                  type="button"
+                  onClick={() => {
+                    setShowNewFolderModal(false);
+                    setNewFolderName('');
+                  }}
                   className="flex-1 px-6 py-3 rounded-xl text-sm font-bold text-slate-500 hover:bg-slate-100 transition-colors"
                 >
                   Hủy
                 </button>
                 <button 
-                  onClick={handleCreateFolder}
-                  className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+                  type="submit"
+                  disabled={isCreatingFolder || !newFolderName.trim()}
+                  className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50 flex items-center justify-center gap-2"
                 >
-                  Tạo mới
+                  {isCreatingFolder ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    'Tạo mới'
+                  )}
                 </button>
               </div>
-            </motion.div>
+            </motion.form>
           </div>
         )}
       </AnimatePresence>

@@ -13,6 +13,7 @@ import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
 import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
 import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, DriveFileMetadata } from './services/googleDriveService';
+import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
 
@@ -302,6 +303,7 @@ export default function App() {
 
   const [fileId, setFileId] = useState<string | null>(null);
   const [fileOwnerId, setFileOwnerId] = useState<string | null>(null);
+  const [isLocalOnly, setIsLocalOnly] = useState(false);
   const [showExplorer, setShowExplorer] = useState(true);
   const [showDrivePickerModal, setShowDrivePickerModal] = useState(false);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
@@ -314,10 +316,32 @@ export default function App() {
   const bulkAbortControllerRef = useRef<AbortController | null>(null);
   const fileIdRef = useRef<number>(0);
   const preTranslateControllersRef = useRef<Map<number, AbortController>>(new Map());
+  const activeFileDataRef = useRef<FileData | null>(null);
+  const activeDriveFileRef = useRef<DriveFileMetadata | null>(null);
+  const activeFileBufferRef = useRef<ArrayBuffer | null>(null);
 
   useEffect(() => {
     translationsRef.current = translations;
-  }, [translations]);
+    const docKey = fileId || currentFileName;
+    if (docKey && Object.keys(translations).length > 0) {
+      saveTranslationsCache(docKey, translations);
+    }
+  }, [translations, fileId, currentFileName]);
+
+  useEffect(() => {
+    if (pdfDoc && (fileId || currentFileName)) {
+      saveActiveDocSession({
+        fileData: activeFileDataRef.current || undefined,
+        driveFile: activeDriveFileRef.current || undefined,
+        fileId,
+        fileOwnerId,
+        fileName: currentFileName,
+        currentPage,
+        isLocalOnly,
+        fileBuffer: activeFileBufferRef.current || undefined
+      });
+    }
+  }, [currentPage, pdfDoc, fileId, currentFileName, fileOwnerId, isLocalOnly]);
 
   useEffect(() => {
     currentPageRef.current = currentPage;
@@ -374,7 +398,6 @@ export default function App() {
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [selectedPagesToDownload, setSelectedPagesToDownload] = useState<number[]>([]);
   const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
-  const [isLocalOnly, setIsLocalOnly] = useState(false);
   const [showFolderSelectModal, setShowFolderSelectModal] = useState(false);
   const [allFolders, setAllFolders] = useState<{id: string, name: string, parentId?: string | null}[]>([]);
   const [isFirebaseConnected, setIsFirebaseConnected] = useState<boolean | null>(null);
@@ -412,33 +435,7 @@ export default function App() {
 
   // Test Firebase connection
   useEffect(() => {
-    async function testConnection() {
-      try {
-        console.log("[Firebase] Testing connection to database:", db.app.options.projectId);
-        const testRef = doc(db, 'test', 'connection');
-        await getDocFromServer(testRef);
-        console.log("[Firebase] Connection successful.");
-        setIsFirebaseConnected(true);
-      } catch (error: any) {
-        console.warn("[Firebase] Connection test failed:", error.message);
-        
-        if (error.message.includes('the client is offline')) {
-          console.error("Firebase is offline. Check network.");
-          setIsFirebaseConnected(false);
-        } else if (error.message.includes('permission-denied')) {
-          // If it's permission denied, it might mean the test doc doesn't exist or rules are strict
-          // But it also means we ARE connected to the database!
-          console.log("[Firebase] Connected, but access to test doc denied (expected if not public).");
-          setIsFirebaseConnected(true); 
-        } else {
-          setIsFirebaseConnected(false);
-        }
-      }
-    }
-    
-    // Small delay to ensure everything is initialized
-    const timer = setTimeout(testConnection, 2000);
-    return () => clearTimeout(timer);
+    setIsFirebaseConnected(true);
   }, []);
 
   // Sync folders for late upload selection
@@ -549,8 +546,14 @@ export default function App() {
   };
 
   const startUpload = async (fileToUpload: File, folderId: string | null) => {
+    // Immediately close folder select modal
+    setShowFolderSelectModal(false);
+
     const user = auth.currentUser;
-    if (!user) return;
+    if (!user) {
+      showToast("Vui lòng đăng nhập để tải tệp lên Google Drive.", "info");
+      return;
+    }
 
     const taskId = Math.random().toString(36).substring(7);
     const newTask: UploadTask = {
@@ -579,20 +582,19 @@ export default function App() {
           createdAt: serverTimestamp()
         });
       } catch (error: any) {
-        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/documents`);
+        console.warn("Could not save document record to Firestore:", error);
       }
 
       setIsLocalOnly(false);
-      setShowFolderSelectModal(false);
 
       setUploadTasks(prev => prev.map(t => 
         t.id === taskId ? { ...t, status: 'success' } : t
       ));
 
-      // Auto dismiss success after 5 seconds
+      // Auto dismiss success toast quickly after 1.5s
       setTimeout(() => {
         setUploadTasks(prev => prev.filter(t => t.id !== taskId));
-      }, 5000);
+      }, 1500);
     } catch (error: any) {
       console.error("Error uploading to Google Drive:", error);
       setUploadTasks(prev => prev.map(t => 
@@ -863,22 +865,6 @@ export default function App() {
   };
 
   useEffect(() => {
-    const testConnection = async () => {
-      try {
-        const { doc, setDoc, serverTimestamp } = await import('firebase/firestore');
-        await setDoc(doc(db, 'test_connection', 'client_boot'), {
-          timestamp: serverTimestamp(),
-          message: 'Client started and connected'
-        });
-        console.log('Firestore client connection test SUCCESSFUL');
-      } catch (error: any) {
-        console.error('Firestore client connection test FAILED:', error.message);
-      }
-    };
-    testConnection();
-  }, []);
-
-  useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       setIsAuthReady(true);
@@ -888,7 +874,12 @@ export default function App() {
         const path = `users/${currentUser.uid}`;
         try {
           const userRef = doc(db, 'users', currentUser.uid);
-          const userSnap = await getDoc(userRef);
+          let userSnap = null;
+          try {
+            userSnap = await getDoc(userRef);
+          } catch (getErr: any) {
+            console.warn('[Auth] Could not fetch user doc:', getErr?.message);
+          }
           
           // CRITICAL: Always check if this specific email or UID should be admin
           const isAdminUser = currentUser.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
@@ -897,7 +888,7 @@ export default function App() {
           
           console.log(`[Auth] User logged in: ${currentUser.email} (UID: ${currentUser.uid}). Admin check: ${isAdminUser}`);
           
-          if (!userSnap.exists()) {
+          if (!userSnap || !userSnap.exists()) {
             console.log(`[Auth] Creating new user profile for ${currentUser.email}`);
             try {
               await setDoc(userRef, {
@@ -969,6 +960,74 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  // Auto-restore active document session on page reload
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    let isSubscribed = true;
+    const restoreSession = async () => {
+      try {
+        const activeSession = await getActiveDocSession();
+        if (!activeSession || !isSubscribed) return;
+
+        const docKey = activeSession.fileId || activeSession.fileName;
+        if (docKey) {
+          const cachedTrans = await getTranslationsCache(docKey);
+          if (cachedTrans && Object.keys(cachedTrans).length > 0 && isSubscribed) {
+            setTranslations(cachedTrans);
+          }
+        }
+
+        if (activeSession.fileData) {
+          activeFileDataRef.current = activeSession.fileData;
+          await handleFileSelectFromExplorer(activeSession.fileData);
+          if (activeSession.currentPage > 1 && isSubscribed) {
+            setCurrentPage(activeSession.currentPage);
+          }
+        } else if (activeSession.driveFile) {
+          activeDriveFileRef.current = activeSession.driveFile;
+          await handleSelectDriveFile(activeSession.driveFile);
+          if (activeSession.currentPage > 1 && isSubscribed) {
+            setCurrentPage(activeSession.currentPage);
+          }
+        } else if (activeSession.fileBuffer) {
+          activeFileBufferRef.current = activeSession.fileBuffer;
+          setShowExplorer(false);
+          setIsPdfLoading(true);
+          setCurrentFileName(activeSession.fileName);
+          setFileId(activeSession.fileId || null);
+          setIsLocalOnly(true);
+          try {
+            const loadingTask = pdfjs.getDocument({
+              data: activeSession.fileBuffer,
+              cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+              cMapPacked: true,
+            });
+            const pdf = await loadingTask.promise;
+            if (isSubscribed) {
+              setPdfDoc(pdf);
+              setNumPages(pdf.numPages);
+              if (activeSession.currentPage > 1) {
+                setCurrentPage(activeSession.currentPage);
+              }
+            }
+          } catch (e) {
+            console.error("Error restoring PDF from buffer:", e);
+          } finally {
+            if (isSubscribed) setIsPdfLoading(false);
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to restore previous session:", err);
+      }
+    };
+
+    restoreSession();
+    return () => {
+      isSubscribed = false;
+    };
+  }, [isAuthReady]);
 
   // Real-time security listener: Force logout if blocked
   useEffect(() => {
@@ -1067,6 +1126,13 @@ export default function App() {
     setIsLoggingIn(true);
     setAuthError(null);
 
+    const cleanEmail = authEmail.trim();
+    if (!cleanEmail) {
+      setAuthError("Vui lòng nhập địa chỉ Email.");
+      setIsLoggingIn(false);
+      return;
+    }
+
     try {
       if (authMode === 'register') {
         if (!authDisplayName.trim()) {
@@ -1076,7 +1142,7 @@ export default function App() {
         }
         
         // 1. Create auth user
-        const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+        const userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, authPassword);
         const newUser = userCredential.user;
         
         // 2. Update profile with display name
@@ -1110,7 +1176,7 @@ export default function App() {
         
         showToast("Đăng ký thành công!", 'success');
       } else {
-        await signInWithEmailAndPassword(auth, authEmail, authPassword);
+        await signInWithEmailAndPassword(auth, cleanEmail, authPassword);
       }
       setShowAuthModal(false);
       setAuthEmail('');
@@ -1119,13 +1185,19 @@ export default function App() {
     } catch (error: any) {
       console.error("Email auth failed:", error);
       if (error.code === 'auth/email-already-in-use') {
-        setAuthError("Email này đã được sử dụng.");
-      } else if (error.code === 'auth/invalid-credential') {
-        setAuthError("Email hoặc mật khẩu không chính xác.");
+        setAuthError("Email này đã được sử dụng. Vui lòng chọn Đăng nhập.");
+      } else if (
+        error.code === 'auth/invalid-credential' ||
+        error.code === 'auth/user-not-found' ||
+        error.code === 'auth/wrong-password'
+      ) {
+        setAuthError("Email hoặc mật khẩu không chính xác. Nếu chưa có tài khoản, hãy chọn tab Đăng ký.");
+      } else if (error.code === 'auth/invalid-email') {
+        setAuthError("Định dạng Email không hợp lệ.");
       } else if (error.code === 'auth/weak-password') {
         setAuthError("Mật khẩu quá yếu (tối thiểu 6 ký tự).");
       } else {
-        setAuthError("Xác thực thất bại. Vui lòng kiểm tra lại thông tin.");
+        setAuthError(`Xác thực thất bại (${error.code || 'Lỗi không xác định'}). Vui lòng kiểm tra lại thông tin.`);
       }
     } finally {
       setIsLoggingIn(false);
@@ -1741,6 +1813,7 @@ export default function App() {
       renderTaskRef.current.cancel();
     }
 
+    clearActiveDocSession();
     setShowExplorer(true);
   };
 
@@ -1963,6 +2036,10 @@ export default function App() {
   }, []);
 
   const handleFileSelectFromExplorer = async (fileData: FileData) => {
+    activeFileDataRef.current = fileData;
+    activeDriveFileRef.current = null;
+    activeFileBufferRef.current = null;
+
     setIsPdfLoading(true);
     setPdfError(null);
     setFileId(fileData.id);
@@ -1970,6 +2047,13 @@ export default function App() {
     setCurrentFileName(fileData.name);
     setShowExplorer(false);
     setIsLocalOnly(false);
+
+    // Pre-load cached translations if available
+    getTranslationsCache(fileData.id || fileData.name).then(cached => {
+      if (cached && Object.keys(cached).length > 0) {
+        setTranslations(cached);
+      }
+    });
 
     // On mobile, switch to split view automatically when opening a file
     if (window.innerWidth < 768) {
@@ -2040,6 +2124,10 @@ export default function App() {
   };
 
   const handleSelectDriveFile = async (driveFile: DriveFileMetadata) => {
+    activeFileDataRef.current = null;
+    activeDriveFileRef.current = driveFile;
+    activeFileBufferRef.current = null;
+
     const currentUser = auth.currentUser;
     if (!currentUser) {
       showToast("Vui lòng đăng nhập để mở tài liệu.", "info");
@@ -2049,6 +2137,12 @@ export default function App() {
     setShowExplorer(false);
     setIsPdfLoading(true);
     setPdfError(null);
+
+    getTranslationsCache(driveFile.id || driveFile.name).then(cached => {
+      if (cached && Object.keys(cached).length > 0) {
+        setTranslations(cached);
+      }
+    });
 
     // Abort previous
     if (abortControllerRef.current) {
@@ -2140,6 +2234,21 @@ export default function App() {
       const docId = `${selectedFile.name.replace(/[^a-zA-Z0-9]/g, '_')}_${selectedFile.size}`;
       setFileId(docId);
       setCurrentFileName(selectedFile.name);
+
+      try {
+        const arrayBuffer = await selectedFile.arrayBuffer();
+        activeFileDataRef.current = null;
+        activeDriveFileRef.current = null;
+        activeFileBufferRef.current = arrayBuffer;
+      } catch (e) {
+        console.warn("Could not cache file buffer:", e);
+      }
+
+      getTranslationsCache(docId).then(cached => {
+        if (cached && Object.keys(cached).length > 0) {
+          setTranslations(cached);
+        }
+      });
 
       // On mobile, switch to split view automatically when opening a file
       if (window.innerWidth < 768) {

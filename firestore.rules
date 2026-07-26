@@ -91,8 +91,9 @@ service cloud.firestore {
              data.ownerId is string &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
              data.value is string && data.value.size() > 0 && data.value.size() <= 4096 &&
-             data.engine in ['gemini', 'openai', 'anthropic', 'medical-specialized', 'gemini-3-flash-preview', 'gemini-flash-lite-latest', 'gemini-flash-latest'] &&
+             data.engine is string && data.engine.size() > 0 && data.engine.size() <= 128 &&
              (data.createdAt is timestamp || data.createdAt is string) &&
+             (data.get('lastUsed', null) == null || data.lastUsed is timestamp || data.lastUsed is string) &&
              (data.get('sharedWith', []) is list) &&
              (data.get('status', 'active') in ['active', 'error']);
     }
@@ -162,8 +163,8 @@ service cloud.firestore {
 
     match /apiKeys/{keyId} {
       allow get: if isSignedIn() && (existing().ownerId == request.auth.uid || isSharedWithMe(existing()) || isAdmin());
-      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isSharedWithMe(resource.data) || isAdmin());
-      allow create: if isSignedIn() && isValidApiKey(incoming()) && isValidId(keyId);
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || (request.auth.token.email != null && resource.data.get('sharedWith', []).hasAny([request.auth.token.email.lower()])) || isAdmin());
+      allow create: if isSignedIn() && isValidApiKey(incoming());
       allow update: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()) && isValidApiKey(incoming()));
       allow delete: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()));
     }
@@ -185,7 +186,8 @@ service cloud.firestore {
       allow read, write: if isSignedIn();
     }
     match /test/{docId} {
-      allow read, write: if isSignedIn();
+      allow read: if docId == 'connection' || isSignedIn();
+      allow write: if isSignedIn();
     }
   }
 }
