@@ -3562,15 +3562,27 @@ export default function App() {
 
           <div className="space-y-4">
             <button 
-              onClick={() => {
-                setAuthMode('login');
-                setShowAuthModal(true);
-              }}
-              className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95 flex items-center justify-center gap-3"
+              onClick={handleGoogleAuth}
+              disabled={isLoggingIn}
+              className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95 flex items-center justify-center gap-3 disabled:opacity-50"
             >
-              <LogIn className="w-5 h-5" />
-              Đăng nhập để bắt đầu
+              {isLoggingIn ? (
+                <Loader2 className="w-5 h-5 animate-spin" />
+              ) : (
+                <svg className="w-5 h-5" viewBox="0 0 24 24">
+                  <path fill="#ffffff" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                  <path fill="#ffffff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#ffffff" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#ffffff" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                </svg>
+              )}
+              <span>Đăng nhập với Google (Gmail)</span>
             </button>
+            {authError && (
+              <div className="p-3 bg-rose-50 text-rose-600 rounded-xl text-xs font-bold text-center">
+                {authError}
+              </div>
+            )}
           </div>
 
           <div className="mt-10 pt-8 border-t border-slate-50 text-center">
@@ -3579,144 +3591,6 @@ export default function App() {
             </p>
           </div>
         </div>
-
-        {/* Auth Modal */}
-        <AnimatePresence>
-          {showAuthModal && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setShowAuthModal(false)}
-                className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
-              />
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="relative bg-white w-full max-w-md rounded-[40px] shadow-2xl overflow-hidden"
-              >
-                <div className="p-10">
-                  <div className="flex items-center justify-between mb-8">
-                    <h3 className="text-2xl font-display font-black text-slate-800">
-                      {authMode === 'login' ? 'Chào mừng trở lại' : 'Tạo tài khoản mới'}
-                    </h3>
-                    <button onClick={() => setShowAuthModal(false)} className="p-2 hover:bg-slate-50 rounded-full transition-colors">
-                      <ChevronLeft className="w-6 h-6 text-slate-400 rotate-180" />
-                    </button>
-                  </div>
-
-                  <div className="mb-6">
-                    <button
-                      type="button"
-                      onClick={handleGoogleAuth}
-                      disabled={isLoggingIn}
-                      className="w-full py-4 bg-white border-2 border-slate-200 hover:border-indigo-600 hover:bg-indigo-50/20 text-slate-700 rounded-2xl font-bold shadow-sm transition-all active:scale-95 flex items-center justify-center gap-3"
-                    >
-                      <svg className="w-5 h-5" viewBox="0 0 24 24">
-                        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
-                        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-                      </svg>
-                      <span>Đăng nhập nhanh với Google (Gmail)</span>
-                    </button>
-                    <div className="relative my-5 text-center">
-                      <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100"></div></div>
-                      <span className="relative px-3 bg-white text-[10px] font-black text-slate-400 uppercase tracking-widest">hoặc bằng Email</span>
-                    </div>
-                  </div>
-
-                  <form onSubmit={handleEmailAuth} className="space-y-5">
-                    {authMode === 'register' && (
-                      <div>
-                        <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2 ml-1">Tên hiển thị</label>
-                        <div className="relative">
-                          <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300" />
-                          <input 
-                            type="text"
-                            required
-                            value={authDisplayName}
-                            onChange={(e) => setAuthDisplayName(e.target.value)}
-                            className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold text-slate-700"
-                            placeholder="BS. Nguyễn Văn A"
-                          />
-                        </div>
-                      </div>
-                    )}
-                    <div>
-                      <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2 ml-1">Email</label>
-                      <div className="relative">
-                        <Languages className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300" />
-                        <input 
-                          type="email"
-                          required
-                          value={authEmail}
-                          onChange={(e) => setAuthEmail(e.target.value)}
-                          className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold text-slate-700"
-                          placeholder="bacsi@example.com"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2 ml-1">Mật khẩu</label>
-                      <div className="relative">
-                        <ShieldCheck className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300 pointer-events-none" />
-                        <input 
-                          type={showAuthPassword ? "text" : "password"}
-                          required
-                          value={authPassword}
-                          onChange={(e) => setAuthPassword(e.target.value)}
-                          className="w-full pl-12 pr-12 py-4 bg-slate-50 border border-slate-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-bold text-slate-700"
-                          placeholder="••••••••"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowAuthPassword(!showAuthPassword)}
-                          className="absolute right-4 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-indigo-600 transition-colors"
-                        >
-                          {showAuthPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                        </button>
-                      </div>
-                    </div>
-
-                    {authError && (
-                      <div className="p-4 bg-rose-50 border border-rose-100 rounded-2xl flex items-center gap-3 text-rose-600 text-xs font-bold animate-in fade-in slide-in-from-top-2">
-                        <AlertCircle className="w-5 h-5 shrink-0" />
-                        {authError}
-                      </div>
-                    )}
-
-                    <button 
-                      type="submit"
-                      disabled={isLoggingIn}
-                      className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95 flex items-center justify-center gap-3 disabled:opacity-50"
-                    >
-                      {isLoggingIn ? (
-                        <Loader2 className="w-6 h-6 animate-spin" />
-                      ) : (
-                        authMode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'
-                      )}
-                    </button>
-                  </form>
-
-                  <div className="mt-8 text-center">
-                    <button 
-                      onClick={() => {
-                        setAuthMode(authMode === 'login' ? 'register' : 'login');
-                        setAuthError(null);
-                      }}
-                      className="text-xs font-bold text-indigo-600 hover:text-indigo-700 transition-colors"
-                    >
-                      {authMode === 'login' ? 'Chưa có tài khoản? Đăng ký ngay' : 'Đã có tài khoản? Đăng nhập'}
-                    </button>
-                  </div>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
       </div>
     );
   }
@@ -4779,97 +4653,53 @@ export default function App() {
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
               className="relative bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
-              <div className="p-8 overflow-y-auto no-scrollbar">
-                <div className="text-center mb-8">
+              <div className="p-8">
+                <div className="text-center mb-6">
                   <div className="bg-indigo-600 w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-indigo-200">
                     <UserIcon className="text-white w-6 h-6" />
                   </div>
                   <h3 className="text-2xl font-display font-bold text-slate-800">
-                    Chào mừng trở lại
+                    Đăng nhập tài khoản
                   </h3>
                   <p className="text-slate-500 text-sm mt-1">
-                    Đăng nhập để quản lý API Key của bạn
+                    Sử dụng tài khoản Google để tiếp tục
                   </p>
                 </div>
 
-                <div className="mb-6">
+                <div className="mb-4">
                   <button
                     type="button"
                     onClick={handleGoogleAuth}
                     disabled={isLoggingIn}
-                    className="w-full py-3.5 bg-white border-2 border-slate-200 hover:border-indigo-600 hover:bg-indigo-50/20 text-slate-700 rounded-xl font-bold shadow-sm transition-all active:scale-95 flex items-center justify-center gap-3 text-sm"
-                  >
-                    <svg className="w-5 h-5" viewBox="0 0 24 24">
-                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
-                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-                    </svg>
-                    <span>Đăng nhập nhanh với Google (Gmail)</span>
-                  </button>
-                  <div className="relative my-4 text-center">
-                    <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100"></div></div>
-                    <span className="relative px-3 bg-white text-[10px] font-black text-slate-400 uppercase tracking-widest">hoặc bằng Email</span>
-                  </div>
-                </div>
-
-                <form onSubmit={handleEmailAuth} className="space-y-4">
-                  <div>
-                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Email</label>
-                    <input 
-                      type="email"
-                      required
-                      value={authEmail}
-                      onChange={(e) => setAuthEmail(e.target.value)}
-                      placeholder="email@example.com"
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Mật khẩu</label>
-                    <div className="relative">
-                      <input 
-                        type={showAuthPassword ? "text" : "password"}
-                        required
-                        minLength={6}
-                        value={authPassword}
-                        onChange={(e) => setAuthPassword(e.target.value)}
-                        placeholder="••••••••"
-                        className="w-full pl-4 pr-10 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowAuthPassword(!showAuthPassword)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-indigo-600 transition-colors"
-                      >
-                        {showAuthPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
-
-                  {authError && (
-                    <div className="flex items-center gap-2 p-3 bg-rose-50 text-rose-500 rounded-xl text-xs font-bold animate-shake">
-                      <AlertCircle className="w-4 h-4 shrink-0" />
-                      <span>{authError}</span>
-                    </div>
-                  )}
-
-                  <button 
-                    type="submit"
-                    disabled={isLoggingIn}
-                    className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold text-sm hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-[0.98] disabled:opacity-70 flex items-center justify-center gap-2"
+                    className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold shadow-lg shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-3 text-sm disabled:opacity-50"
                   >
                     {isLoggingIn ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <Loader2 className="w-5 h-5 animate-spin" />
                     ) : (
-                      'Đăng nhập'
+                      <svg className="w-5 h-5" viewBox="0 0 24 24">
+                        <path fill="#ffffff" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                        <path fill="#ffffff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                        <path fill="#ffffff" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                        <path fill="#ffffff" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                      </svg>
                     )}
+                    <span>Đăng nhập với Google (Gmail)</span>
                   </button>
-                </form>
+                  {authError && (
+                    <div className="mt-3 p-3 bg-rose-50 text-rose-600 rounded-xl text-xs font-bold text-center">
+                      {authError}
+                    </div>
+                  )}
+                </div>
 
-                <p className="mt-8 text-center text-xs text-slate-500">
-                  Chưa có tài khoản? Vui lòng liên hệ quản trị viên.
-                </p>
+                <div className="mt-6 text-center">
+                  <button 
+                    onClick={() => setShowAuthModal(false)}
+                    className="text-xs font-bold text-slate-400 hover:text-slate-600 transition-colors"
+                  >
+                    Hủy bỏ
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>

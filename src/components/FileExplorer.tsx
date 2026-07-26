@@ -257,10 +257,11 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       const collectionName = showDeleteConfirm.type === 'file' ? 'documents' : 'folders';
       const path = `users/${user.uid}/${collectionName}/${showDeleteConfirm.id}`;
       await deleteDoc(doc(db, `users/${user.uid}/${collectionName}`, showDeleteConfirm.id));
-      setShowDeleteConfirm(null);
     } catch (error) {
       const collectionName = showDeleteConfirm.type === 'file' ? 'documents' : 'folders';
       handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/${collectionName}/${showDeleteConfirm.id}`);
+    } finally {
+      setShowDeleteConfirm(null);
     }
   };
 
@@ -613,8 +614,8 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                   </button>
                   
                   <div className={cn(
-                    "flex flex-col gap-1 transition-all",
-                    activeMenuId === folder.id ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2 pointer-events-none absolute"
+                    "absolute right-0 top-full mt-2 w-44 bg-white rounded-2xl shadow-xl border border-slate-100 py-1.5 z-50 flex flex-col gap-0.5 transition-all origin-top-right",
+                    activeMenuId === folder.id ? "opacity-100 scale-100" : "opacity-0 scale-95 pointer-events-none"
                   )}>
                     <button 
                       onClick={(e) => {
@@ -622,10 +623,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                         setShowMoveModal({ id: folder.id, type: 'folder' });
                         setActiveMenuId(null);
                       }}
-                      className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
-                      title="Di chuyển"
+                      className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-indigo-600 flex items-center gap-2.5 transition-colors"
                     >
-                      <Move className="w-3.5 h-3.5" />
+                      <Move className="w-4 h-4 text-slate-400" />
+                      <span>Di chuyển</span>
                     </button>
                     <button 
                       onClick={(e) => {
@@ -634,10 +635,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                         setShowRenameModal({ id: folder.id, name: folder.name, type: 'folder' });
                         setActiveMenuId(null);
                       }}
-                      className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
-                      title="Đổi tên"
+                      className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-indigo-600 flex items-center gap-2.5 transition-colors"
                     >
-                      <Edit className="w-3.5 h-3.5" />
+                      <Edit className="w-4 h-4 text-slate-400" />
+                      <span>Đổi tên</span>
                     </button>
                     <button 
                       onClick={(e) => {
@@ -645,10 +646,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                         setShowDeleteConfirm({ id: folder.id, type: 'folder', name: folder.name });
                         setActiveMenuId(null);
                       }}
-                      className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-rose-500 shadow-lg border border-slate-100"
-                      title="Xóa"
+                      className="w-full px-3.5 py-2 text-left text-xs font-bold text-rose-600 hover:bg-rose-50 flex items-center gap-2.5 transition-colors"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="w-4 h-4 text-rose-500" />
+                      <span>Xóa</span>
                     </button>
                   </div>
                 </div>
@@ -704,22 +705,22 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                   </button>
 
                   <div className={cn(
-                    "flex flex-col gap-1 transition-all",
-                    activeMenuId === file.id ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2 pointer-events-none absolute"
+                    "absolute right-0 top-full mt-2 w-48 bg-white rounded-2xl shadow-xl border border-slate-100 py-1.5 z-50 flex flex-col gap-0.5 transition-all origin-top-right",
+                    activeMenuId === file.id ? "opacity-100 scale-100" : "opacity-0 scale-95 pointer-events-none"
                   )}>
-                    <button 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (file.downloadUrl) {
+                    {file.downloadUrl && (
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
                           window.open(file.downloadUrl, '_blank');
-                        }
-                        setActiveMenuId(null);
-                      }}
-                      className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-emerald-500 shadow-lg border border-slate-100"
-                      title="Tải về"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                    </button>
+                          setActiveMenuId(null);
+                        }}
+                        className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-emerald-600 flex items-center gap-2.5 transition-colors"
+                      >
+                        <Download className="w-4 h-4 text-slate-400" />
+                        <span>Tải về</span>
+                      </button>
+                    )}
                     {onBulkTranslate && viewMode === 'my' && (
                       <button 
                         onClick={(e) => {
@@ -727,10 +728,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                           onBulkTranslate(file);
                           setActiveMenuId(null);
                         }}
-                        className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
-                        title="Dịch toàn bộ tài liệu"
+                        className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-indigo-600 flex items-center gap-2.5 transition-colors"
                       >
-                        <Zap className="w-3.5 h-3.5" />
+                        <Zap className="w-4 h-4 text-amber-500" />
+                        <span>Dịch toàn bộ</span>
                       </button>
                     )}
                     {viewMode === 'my' && (
@@ -741,10 +742,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                             setShowShareModal({ id: file.id, type: 'file', name: file.name });
                             setActiveMenuId(null);
                           }}
-                          className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
-                          title="Chia sẻ"
+                          className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-indigo-600 flex items-center gap-2.5 transition-colors"
                         >
-                          <Share2 className="w-3.5 h-3.5" />
+                          <Share2 className="w-4 h-4 text-slate-400" />
+                          <span>Chia sẻ</span>
                         </button>
                         <button 
                           onClick={(e) => {
@@ -752,10 +753,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                             setShowMoveModal({ id: file.id, type: 'file' });
                             setActiveMenuId(null);
                           }}
-                          className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
-                          title="Di chuyển"
+                          className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-indigo-600 flex items-center gap-2.5 transition-colors"
                         >
-                          <Move className="w-3.5 h-3.5" />
+                          <Move className="w-4 h-4 text-slate-400" />
+                          <span>Di chuyển</span>
                         </button>
                         <button 
                           onClick={(e) => {
@@ -764,10 +765,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                             setShowRenameModal({ id: file.id, name: file.name, type: 'file' });
                             setActiveMenuId(null);
                           }}
-                          className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
-                          title="Đổi tên"
+                          className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-indigo-600 flex items-center gap-2.5 transition-colors"
                         >
-                          <Edit className="w-3.5 h-3.5" />
+                          <Edit className="w-4 h-4 text-slate-400" />
+                          <span>Đổi tên</span>
                         </button>
                         <button 
                           onClick={(e) => {
@@ -775,10 +776,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                             setShowDeleteConfirm({ id: file.id, type: 'file', name: file.name });
                             setActiveMenuId(null);
                           }}
-                          className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-rose-500 shadow-lg border border-slate-100"
-                          title="Xóa"
+                          className="w-full px-3.5 py-2 text-left text-xs font-bold text-rose-600 hover:bg-rose-50 flex items-center gap-2.5 transition-colors"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="w-4 h-4 text-rose-500" />
+                          <span>Xóa</span>
                         </button>
                       </>
                     )}
@@ -789,10 +790,10 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                           setShowMoveModal({ id: file.id, type: 'file' });
                           setActiveMenuId(null);
                         }}
-                        className="p-1.5 bg-white rounded-lg text-slate-500 hover:text-indigo-500 shadow-lg border border-slate-100"
-                        title="Di chuyển về thư mục của tôi"
+                        className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-indigo-600 flex items-center gap-2.5 transition-colors"
                       >
-                        <Move className="w-3.5 h-3.5" />
+                        <Move className="w-4 h-4 text-slate-400" />
+                        <span>Di chuyển về của tôi</span>
                       </button>
                     )}
                   </div>

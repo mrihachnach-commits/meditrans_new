@@ -210,17 +210,21 @@ export async function uploadFileToDrive(
 
   const fileBuffer = await file.arrayBuffer();
 
-  const multipartResponseBody = new Uint8Array([
-    ...new TextEncoder().encode(
-      delimiter +
-      'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-      JSON.stringify(metadata) +
-      delimiter +
-      'Content-Type: ' + (file.type || 'application/pdf') + '\r\n\r\n'
-    ),
-    ...new Uint8Array(fileBuffer),
-    ...new TextEncoder().encode(close_delim)
-  ]);
+  const headerBytes = new TextEncoder().encode(
+    delimiter +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(metadata) +
+    delimiter +
+    'Content-Type: ' + (file.type || 'application/pdf') + '\r\n\r\n'
+  );
+  const fileBytes = new Uint8Array(fileBuffer);
+  const footerBytes = new TextEncoder().encode(close_delim);
+
+  const totalLength = headerBytes.length + fileBytes.length + footerBytes.length;
+  const multipartResponseBody = new Uint8Array(totalLength);
+  multipartResponseBody.set(headerBytes, 0);
+  multipartResponseBody.set(fileBytes, headerBytes.length);
+  multipartResponseBody.set(footerBytes, headerBytes.length + fileBytes.length);
 
   const response = await fetch(
     'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,webViewLink',
