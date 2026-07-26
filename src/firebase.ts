@@ -3,11 +3,13 @@ import {
   getAuth, 
   signOut, 
   onAuthStateChanged, 
-  User,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
-  updateProfile
+  updateProfile,
+  GoogleAuthProvider,
+  signInWithPopup
 } from 'firebase/auth';
+import type { User } from 'firebase/auth';
 import { 
   getFirestore, 
   collection, 
@@ -34,8 +36,9 @@ import firebaseConfig from '../firebase-applet-config.json';
 
 // Initialize Firebase SDK
 const app = initializeApp(firebaseConfig);
-export const db = (firebaseConfig as any).firestoreDatabaseId 
-  ? getFirestore(app, (firebaseConfig as any).firestoreDatabaseId)
+const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId || 'ai-studio-274cca7a-128b-4f84-92a2-6b79856d515b';
+export const db = firestoreDbId && firestoreDbId !== '(default)'
+  ? getFirestore(app, firestoreDbId)
   : getFirestore(app);
 export const auth = getAuth();
 
@@ -97,6 +100,8 @@ export {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   updateProfile,
+  GoogleAuthProvider,
+  signInWithPopup,
   collection, 
   addDoc,
   doc, 

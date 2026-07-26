@@ -12,7 +12,7 @@ import { Logo, LogoWithText } from './components/Logo';
 import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
 import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
-import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, DriveFileMetadata } from './services/googleDriveService';
+import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
@@ -92,6 +92,8 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   updateProfile,
+  GoogleAuthProvider,
+  signInWithPopup,
   db, 
   collection, 
   addDoc,
@@ -314,7 +316,7 @@ export default function App() {
   const translatingPagesRef = useRef<Set<number>>(new Set());
   const abortControllerRef = useRef<AbortController | null>(null);
   const bulkAbortControllerRef = useRef<AbortController | null>(null);
-  const fileIdRef = useRef<number>(0);
+  const fileIdRef = useRef<number>(1);
   const preTranslateControllersRef = useRef<Map<number, AbortController>>(new Map());
   const activeFileDataRef = useRef<FileData | null>(null);
   const activeDriveFileRef = useRef<DriveFileMetadata | null>(null);
@@ -1051,8 +1053,10 @@ export default function App() {
           return;
         }
 
-        if (data?.role !== userRole && userRole !== null) {
-          setUserRole(data?.role || 'user');
+        const effectiveRole = (isAdminUser || data?.role === 'admin') ? 'admin' : (data?.role || 'user');
+        if (effectiveRole !== userRole) {
+          console.log(`[Auth Listener] Setting effective userRole: ${effectiveRole}`);
+          setUserRole(effectiveRole);
         }
       }
     }, (error) => {
@@ -1119,6 +1123,54 @@ export default function App() {
   }, [user, isLocalOnly]);
 
   // Keys are now handled by useMemo and direct effects
+
+  const handleGoogleAuth = async () => {
+    if (isLoggingIn) return;
+    setIsLoggingIn(true);
+    setAuthError(null);
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.addScope('https://www.googleapis.com/auth/drive.readonly');
+      provider.addScope('https://www.googleapis.com/auth/drive.file');
+      const result = await signInWithPopup(auth, provider);
+      const user = result.user;
+
+      const userRef = doc(db, 'users', user.uid);
+      const isAdminUser = user.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
+                          user.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
+                          user.email?.toLowerCase() === "mrihachnach@gmail.com";
+      try {
+        await setDoc(userRef, {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName || user.email?.split('@')[0],
+          photoURL: user.photoURL || null,
+          createdAt: serverTimestamp(),
+          role: isAdminUser ? 'admin' : 'user',
+          isBlocked: false
+        }, { merge: true });
+      } catch (fsErr) {
+        console.error("Firestore user creation error:", fsErr);
+      }
+
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      if (credential?.accessToken) {
+        setGoogleOAuthToken(credential.accessToken);
+      }
+
+      setShowAuthModal(false);
+      showToast("Đăng nhập bằng Gmail (Google) thành công!", "success");
+    } catch (error: any) {
+      console.error("Google auth failed:", error);
+      if (error.code === 'auth/unauthorized-domain') {
+        setAuthError("Tên miền này chưa được ủy quyền trên Firebase Console (thêm meditrans.vercel.app vào Authorized domains).");
+      } else {
+        setAuthError(`Đăng nhập Google thất bại: ${error.message || 'Lỗi không xác định'}`);
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
 
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2128,6 +2180,9 @@ export default function App() {
     activeDriveFileRef.current = driveFile;
     activeFileBufferRef.current = null;
 
+    // Immediately close Google Drive Picker Modal
+    setShowDrivePickerModal(false);
+
     const currentUser = auth.currentUser;
     if (!currentUser) {
       showToast("Vui lòng đăng nhập để mở tài liệu.", "info");
@@ -2174,18 +2229,40 @@ export default function App() {
       setTranslations({});
       setCurrentPage(1);
 
-      // Save reference in user's documents if not already saved
+      // Save reference in user's documents root if not already saved
       try {
-        await addDoc(collection(db, `users/${currentUser.uid}/documents`), {
-          name: driveFile.name,
-          folderId: null,
-          ownerId: currentUser.uid,
-          sharedWith: [],
-          driveFileId: driveFile.id,
-          downloadUrl: driveFile.webViewLink || '',
-          size: driveFile.size || 0,
-          type: driveFile.mimeType || 'application/pdf',
-          createdAt: serverTimestamp()
+        const existingDocsQuery = query(
+          collection(db, `users/${currentUser.uid}/documents`),
+          where('driveFileId', '==', driveFile.id)
+        );
+        const existingSnap = await getDocs(existingDocsQuery);
+
+        let docId: string;
+        if (!existingSnap.empty) {
+          docId = existingSnap.docs[0].id;
+        } else {
+          const docRef = await addDoc(collection(db, `users/${currentUser.uid}/documents`), {
+            name: driveFile.name,
+            folderId: null, // Root of document manager
+            ownerId: currentUser.uid,
+            sharedWith: [],
+            driveFileId: driveFile.id,
+            downloadUrl: driveFile.webViewLink || '',
+            size: driveFile.size || 0,
+            type: driveFile.mimeType || 'application/pdf',
+            createdAt: serverTimestamp()
+          });
+          docId = docRef.id;
+        }
+
+        setFileId(docId);
+        setFileOwnerId(currentUser.uid);
+
+        saveActiveDocSession({
+          fileId: docId,
+          fileName: driveFile.name,
+          currentPage: 1,
+          driveFile
         });
       } catch (e) {
         console.warn('Could not save Drive reference to Firestore:', e);
@@ -2610,19 +2687,22 @@ export default function App() {
     onProgress?: (content: string) => void
   ) => {
     const currentFileId = fileIdRef.current;
-    if (!translationService.current || !currentFileId || !pdfDoc) return null;
+    if (!translationService.current || !pdfDoc) return null;
 
     try {
       // 1. Image preparation
       let imageBuffer = "";
       const cached = pageCacheRef.current.get(targetPage);
       
-      // Use live canvas if it's the current page, otherwise use cache or render background
-      if (targetPage === currentPageRef.current && !isRenderingRef.current && canvasRef.current) {
+      // Use live canvas if it's the current page, otherwise use cache
+      if (targetPage === currentPageRef.current && canvasRef.current && canvasRef.current.width > 0) {
         imageBuffer = optimizeCanvasImage(canvasRef.current);
-      } else if (cached?.canvas) {
+      } else if (cached?.canvas && cached.canvas.width > 0) {
         imageBuffer = optimizeCanvasImage(cached.canvas);
-      } else {
+      }
+      
+      // Fallback: If no image buffer from live/cached canvas, render via pdfDoc
+      if (!imageBuffer) {
         const pdfPage = await pdfDoc.getPage(targetPage);
         const viewport = pdfPage.getViewport({ scale: 1.5 });
         const tempCanvas = document.createElement('canvas');
@@ -2675,7 +2755,7 @@ export default function App() {
     const targetPage = pageNumber ?? currentPage;
     const currentFileId = fileIdRef.current;
     
-    if (!translationService.current || !currentFileId) return;
+    if (!translationService.current) return;
 
     // Fast return if already done
     const currentStatus = translationsRef.current[targetPage]?.status;
@@ -3043,7 +3123,7 @@ export default function App() {
     // This allows fallback if vault hasn't loaded or user has no keys,
     // but prioritized vault keys if they exist.
     if (allKeys.length === 0) {
-      const manualKey = engineKeys[selectedEngine];
+      const manualKey = engineKeys[selectedEngine] || (import.meta as any).env?.VITE_GEMINI_API_KEY || (process as any).env?.GEMINI_API_KEY;
       if (manualKey) {
         allKeys.push(manualKey);
         primaryKey = manualKey;
@@ -3519,6 +3599,27 @@ export default function App() {
                     <button onClick={() => setShowAuthModal(false)} className="p-2 hover:bg-slate-50 rounded-full transition-colors">
                       <ChevronLeft className="w-6 h-6 text-slate-400 rotate-180" />
                     </button>
+                  </div>
+
+                  <div className="mb-6">
+                    <button
+                      type="button"
+                      onClick={handleGoogleAuth}
+                      disabled={isLoggingIn}
+                      className="w-full py-4 bg-white border-2 border-slate-200 hover:border-indigo-600 hover:bg-indigo-50/20 text-slate-700 rounded-2xl font-bold shadow-sm transition-all active:scale-95 flex items-center justify-center gap-3"
+                    >
+                      <svg className="w-5 h-5" viewBox="0 0 24 24">
+                        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                      </svg>
+                      <span>Đăng nhập nhanh với Google (Gmail)</span>
+                    </button>
+                    <div className="relative my-5 text-center">
+                      <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100"></div></div>
+                      <span className="relative px-3 bg-white text-[10px] font-black text-slate-400 uppercase tracking-widest">hoặc bằng Email</span>
+                    </div>
                   </div>
 
                   <form onSubmit={handleEmailAuth} className="space-y-5">
@@ -4194,16 +4295,16 @@ export default function App() {
                     <div className="flex items-center gap-1.5 md:gap-2">
                       <button 
                         onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
-                        disabled={isTranslating || isRendering}
+                        disabled={isTranslating}
                         className={cn(
                           "p-2 rounded-xl transition-all flex items-center justify-center border shadow-sm",
-                          (isTranslating || isRendering)
+                          isTranslating
                             ? "bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed" 
                             : "bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100 hover:shadow hover:scale-105 active:scale-95"
                         )}
-                        title={isTranslating ? (isRendering ? 'Đang vẽ trang...' : 'Đang dịch thường...') : (translations[currentPage] ? 'Dịch lại (Thường)' : 'Dịch thường')}
+                        title={isTranslating ? 'Đang dịch thường...' : (translations[currentPage] ? 'Dịch lại (Thường)' : 'Dịch thường')}
                       >
-                        {isTranslating || isRendering ? (
+                        {isTranslating ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
                         ) : (
                           <Zap className="w-4 h-4" />
@@ -4212,16 +4313,16 @@ export default function App() {
 
                       <button 
                         onClick={() => translateCurrentPage(currentPage, true, 'gemini-3.6-flash')}
-                        disabled={isTranslating || isRendering}
+                        disabled={isTranslating}
                         className={cn(
                           "p-2 rounded-xl transition-all flex items-center justify-center shadow-lg",
-                          (isTranslating || isRendering)
+                          isTranslating
                             ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
                             : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 hover:scale-105 active:scale-95"
                         )}
-                        title={isTranslating ? (isRendering ? 'Đang vẽ trang...' : 'Đang dịch chuyên sâu...') : (translations[currentPage] ? 'Dịch lại (Chuyên sâu 3.6 Flash)' : 'Dịch chuyên sâu (3.6 Flash)')}
+                        title={isTranslating ? 'Đang dịch chuyên sâu...' : (translations[currentPage] ? 'Dịch lại (Chuyên sâu 3.6 Flash)' : 'Dịch chuyên sâu (3.6 Flash)')}
                       >
-                        {isTranslating || isRendering ? (
+                        {isTranslating ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
                         ) : (
                           <Sparkles className="w-4 h-4" />
@@ -4685,6 +4786,27 @@ export default function App() {
                   </p>
                 </div>
 
+                <div className="mb-6">
+                  <button
+                    type="button"
+                    onClick={handleGoogleAuth}
+                    disabled={isLoggingIn}
+                    className="w-full py-3.5 bg-white border-2 border-slate-200 hover:border-indigo-600 hover:bg-indigo-50/20 text-slate-700 rounded-xl font-bold shadow-sm transition-all active:scale-95 flex items-center justify-center gap-3 text-sm"
+                  >
+                    <svg className="w-5 h-5" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                    </svg>
+                    <span>Đăng nhập nhanh với Google (Gmail)</span>
+                  </button>
+                  <div className="relative my-4 text-center">
+                    <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100"></div></div>
+                    <span className="relative px-3 bg-white text-[10px] font-black text-slate-400 uppercase tracking-widest">hoặc bằng Email</span>
+                  </div>
+                </div>
+
                 <form onSubmit={handleEmailAuth} className="space-y-4">
                   <div>
                     <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Email</label>
@@ -4896,15 +5018,15 @@ export default function App() {
             <div className="flex items-center gap-0.5 pr-1 shrink-0">
               <button 
                 onClick={() => translateCurrentPage(currentPage, true)}
-                disabled={isTranslating || isRendering}
+                disabled={isTranslating}
                 className={cn(
                   "p-2 rounded-full transition-all",
-                  (isTranslating || isRendering)
+                  isTranslating
                     ? "text-slate-300"
                     : "text-indigo-600 active:bg-indigo-50"
                 )}
               >
-                <RefreshCcw className={cn("w-4 h-4", (isTranslating || isRendering) && "animate-spin")} />
+                <RefreshCcw className={cn("w-4 h-4", isTranslating && "animate-spin")} />
               </button>
 
               <button 
@@ -6168,11 +6290,11 @@ export default function App() {
                                         "w-9 h-9 bg-gradient-to-br rounded-xl flex items-center justify-center text-xs font-black text-slate-500 shadow-inner",
                                         u.isBlocked ? "from-rose-100 to-rose-200" : "from-slate-100 to-slate-200"
                                       )}>
-                                        {u.displayName ? u.displayName.charAt(0).toUpperCase() : u.email.charAt(0).toUpperCase()}
+                                        {(u.displayName || u.email || u.uid || 'U').charAt(0).toUpperCase()}
                                       </div>
                                       <div>
                                         <div className="flex items-center gap-2">
-                                          <p className="font-bold text-slate-800 text-sm">{u.displayName || u.email.split('@')[0]}</p>
+                                          <p className="font-bold text-slate-800 text-sm">{u.displayName || (u.email ? u.email.split('@')[0] : u.uid || 'Người dùng')}</p>
                                           {u.isBlocked && (
                                             <span className="bg-rose-100 text-rose-600 text-[8px] font-black px-1.5 py-0.5 rounded-full uppercase tracking-tighter">Bị chặn</span>
                                           )}

@@ -4,7 +4,7 @@
  * listing Drive files (Picker API/custom browser), and fetching file content for PDF rendering.
  */
 
-import { GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
+import { GoogleAuthProvider, signInWithPopup, linkWithPopup, reauthenticateWithPopup } from 'firebase/auth';
 import { auth } from '../firebase';
 
 // Cache token in memory
@@ -12,20 +12,60 @@ let cachedToken: string | null = null;
 let tokenExpiresAt: number = 0;
 
 /**
- * Connect to Google Drive via Firebase GoogleAuthProvider popup
+ * Connect to Google Drive via Firebase GoogleAuthProvider popup.
+ * Preserves the existing authenticated user session (UID) when obtaining Drive scope.
  */
 export async function connectGoogleDrive(): Promise<string> {
   const provider = new GoogleAuthProvider();
   provider.addScope('https://www.googleapis.com/auth/drive.file');
   provider.addScope('https://www.googleapis.com/auth/drive.readonly');
 
+  const activeUser = auth.currentUser;
+
   try {
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    const token = credential?.accessToken;
-    if (!token) {
-      throw new Error("Không thể lấy mã truy cập Google.");
+    let token: string | undefined;
+
+    if (activeUser) {
+      console.log(`[GoogleDriveService] Obtaining Drive access token for active user: ${activeUser.email} (UID: ${activeUser.uid})`);
+      
+      // Try linking Google Provider to current user
+      try {
+        const result = await linkWithPopup(activeUser, provider);
+        const credential = GoogleAuthProvider.credentialFromResult(result);
+        token = credential?.accessToken;
+      } catch (linkError: any) {
+        console.warn('[GoogleDriveService] linkWithPopup note:', linkError?.code || linkError?.message);
+        
+        // Extract OAuth token if credential was already linked or in use
+        const credential = GoogleAuthProvider.credentialFromError(linkError);
+        if (credential?.accessToken) {
+          token = credential.accessToken;
+        } else {
+          // Try reauthenticating current user
+          try {
+            const reauthResult = await reauthenticateWithPopup(activeUser, provider);
+            const reauthCred = GoogleAuthProvider.credentialFromResult(reauthResult);
+            token = reauthCred?.accessToken;
+          } catch (reauthErr: any) {
+            console.warn('[GoogleDriveService] reauthenticateWithPopup note:', reauthErr?.code || reauthErr?.message);
+            const fallbackCred = GoogleAuthProvider.credentialFromError(reauthErr);
+            token = fallbackCred?.accessToken;
+          }
+        }
+      }
     }
+
+    // Only if no active user session exists, fall back to signInWithPopup
+    if (!token && !activeUser) {
+      const result = await signInWithPopup(auth, provider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      token = credential?.accessToken;
+    }
+
+    if (!token) {
+      throw new Error("Không thể lấy mã truy cập Google Drive.");
+    }
+
     setGoogleOAuthToken(token);
     return token;
   } catch (error: any) {
@@ -95,13 +135,66 @@ export interface DriveFileMetadata {
 }
 
 /**
- * Upload a file to Google Drive using multipart upload
+ * Get or create the "MediTrans AI" folder on Google Drive
+ */
+export async function getOrCreateMediTransFolder(token?: string): Promise<string> {
+  const authToken = token || await getGoogleOAuthToken();
+  const folderName = 'MediTrans AI';
+
+  // 1. Search for existing folder named "MediTrans AI"
+  const q = `mimeType='application/vnd.google-apps.folder' and name='${folderName.replace(/'/g, "\\'")}' and trashed=false`;
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1`;
+
+  try {
+    const searchRes = await fetch(searchUrl, {
+      headers: { 'Authorization': `Bearer ${authToken}` }
+    });
+
+    if (searchRes.ok) {
+      const data = await searchRes.json();
+      if (data.files && data.files.length > 0) {
+        return data.files[0].id;
+      }
+    }
+  } catch (err) {
+    console.warn('[GoogleDriveService] Error searching folder:', err);
+  }
+
+  // 2. Folder does not exist, create it
+  const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      name: folderName,
+      mimeType: 'application/vnd.google-apps.folder',
+      description: 'Thư mục chứa tài liệu dịch thuật của MediTrans AI'
+    })
+  });
+
+  if (!createRes.ok) {
+    const errText = await createRes.text().catch(() => '');
+    console.error('[GoogleDriveService] Failed to create folder:', createRes.status, errText);
+    throw new Error('Không thể tạo thư mục "MediTrans AI" trên Google Drive');
+  }
+
+  const folderData = await createRes.json();
+  return folderData.id;
+}
+
+/**
+ * Upload a file to Google Drive using multipart upload into "MediTrans AI" folder
  */
 export async function uploadFileToDrive(
   file: File,
-  folderName = 'MediTrans AI Documents'
+  folderName = 'MediTrans AI'
 ): Promise<DriveFileMetadata> {
   const token = await getGoogleOAuthToken();
+
+  // Get or create MediTrans AI folder ID on Drive
+  const folderId = await getOrCreateMediTransFolder(token);
 
   // Create boundary for multipart upload
   const boundary = 'foo_bar_baz_' + Math.random().toString(36).substring(2);
@@ -111,7 +204,8 @@ export async function uploadFileToDrive(
   const metadata = {
     name: file.name,
     mimeType: file.type || 'application/pdf',
-    description: 'Uploaded via MediTrans AI Medical Translator'
+    description: 'Uploaded via MediTrans AI Medical Translator',
+    parents: [folderId]
   };
 
   const fileBuffer = await file.arrayBuffer();
@@ -184,12 +278,16 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
 }
 
 /**
- * List PDF files in user's Google Drive
+ * List PDF files strictly inside the user's "MediTrans AI" Google Drive folder
  */
 export async function listUserDriveFiles(searchQuery = ''): Promise<DriveFileMetadata[]> {
   const token = await getGoogleOAuthToken();
 
-  let q = "mimeType='application/pdf' and trashed=false";
+  // 1. Get or create the MediTrans AI folder
+  const folderId = await getOrCreateMediTransFolder(token);
+
+  // 2. Query files strictly inside this parent folder
+  let q = `'${folderId}' in parents and mimeType='application/pdf' and trashed=false`;
   if (searchQuery.trim()) {
     q += ` and name contains '${searchQuery.replace(/'/g, "\\'")}'`;
   }

@@ -114,8 +114,8 @@ export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
               <HardDrive className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-bold text-slate-800 text-base">Google Drive của bạn</h3>
-              <p className="text-xs text-slate-500">Chọn hoặc tải tệp PDF lên Google Drive để dịch thuật</p>
+              <h3 className="font-bold text-slate-800 text-base">Google Drive (Thư mục "MediTrans AI")</h3>
+              <p className="text-xs text-slate-500">Quản lý và chọn tệp PDF trong thư mục MediTrans AI trên Google Drive</p>
             </div>
           </div>
           <button 
@@ -132,7 +132,7 @@ export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input 
               type="text"
-              placeholder="Tìm kiếm tài liệu PDF trên Google Drive..."
+              placeholder="Tìm kiếm tài liệu PDF trong thư mục MediTrans AI..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
@@ -231,9 +231,9 @@ export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
               <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mb-3">
                 <FileText className="w-6 h-6" />
               </div>
-              <h4 className="font-bold text-slate-700 text-sm mb-1">Không tìm thấy tài liệu PDF nào</h4>
+              <h4 className="font-bold text-slate-700 text-sm mb-1">Chưa có tài liệu PDF trong thư mục "MediTrans AI"</h4>
               <p className="text-xs text-slate-400 max-w-sm mb-4">
-                Hãy dùng nút "Tải tệp mới lên Drive" ở trên để đưa tài liệu y khoa của bạn lên Google Drive.
+                Hãy dùng nút "Tải tệp mới lên Drive" ở trên để đưa tài liệu y khoa vào thư mục "MediTrans AI" trên Google Drive.
               </p>
             </div>
           ) : (
