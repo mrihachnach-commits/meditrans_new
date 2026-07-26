@@ -1714,20 +1714,7 @@ export default function App() {
   };
 
 
-  const changeOwnPassword = async (newPassword: string) => {
-    if (!user) return;
-    try {
-      const { updatePassword } = await import('firebase/auth');
-      await updatePassword(user, newPassword);
-      return true;
-    } catch (e: any) {
-      console.error("Change password failed:", e);
-      if (e.code === 'auth/requires-recent-login') {
-        throw new Error("Hành động này yêu cầu bạn phải đăng nhập lại gần đây để xác thực.");
-      }
-      throw e;
-    }
-  };
+
 
   const handleDownload = async (pagesToDownload?: number[]) => {
     const pages = pagesToDownload || [currentPage];
@@ -5055,74 +5042,7 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Change Password Section */}
-                {user && (
-                  <div className="pt-4 border-t border-slate-100">
-                    <button 
-                      onClick={() => setShowChangePassword(!showChangePassword)}
-                      className="flex items-center justify-between w-full text-left"
-                    >
-                      <div className="flex items-center gap-2">
-                        <ShieldCheck className="w-4 h-4 text-indigo-500" />
-                        <label className="text-xs font-bold text-slate-700 uppercase tracking-widest">
-                          Đổi mật khẩu
-                        </label>
-                      </div>
-                      <ChevronRight className={cn("w-4 h-4 text-slate-400 transition-transform", showChangePassword && "rotate-90")} />
-                    </button>
-                    
-                    <AnimatePresence>
-                      {showChangePassword && (
-                        <motion.div 
-                          initial={{ height: 0, opacity: 0 }}
-                          animate={{ height: 'auto', opacity: 1 }}
-                          exit={{ height: 0, opacity: 0 }}
-                          className="overflow-hidden"
-                        >
-                          <div className="pt-4 space-y-3">
-                            <div className="relative">
-                              <input 
-                                type={showNewPassword ? "text" : "password"}
-                                placeholder="Mật khẩu mới (tối thiểu 6 ký tự)"
-                                value={newPasswordValue}
-                                onChange={(e) => setNewPasswordValue(e.target.value)}
-                                className="w-full pl-3 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => setShowNewPassword(!showNewPassword)}
-                                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-indigo-600 transition-colors"
-                              >
-                                {showNewPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                              </button>
-                            </div>
-                            <button 
-                              onClick={async () => {
-                                if (newPasswordValue.length < 6) {
-                                  showToast("Mật khẩu phải có ít nhất 6 ký tự", 'error');
-                                  return;
-                                }
-                                try {
-                                  const success = await changeOwnPassword(newPasswordValue);
-                                  if (success) {
-                                    showToast("Đã đổi mật khẩu thành công", 'success');
-                                    setNewPasswordValue('');
-                                    setShowChangePassword(false);
-                                  }
-                                } catch (e: any) {
-                                  showToast(e.message, 'error');
-                                }
-                              }}
-                              className="w-full py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all"
-                            >
-                              Xác nhận đổi mật khẩu
-                            </button>
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                )}
+
 
 
                 <div className="space-y-4 pt-4 border-t border-slate-100">
