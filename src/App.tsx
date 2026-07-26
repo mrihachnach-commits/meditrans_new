@@ -12,7 +12,7 @@ import { Logo, LogoWithText } from './components/Logo';
 import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
 import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
-import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, DriveFileMetadata } from './services/googleDriveService';
+import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
@@ -1156,6 +1156,12 @@ export default function App() {
       const credential = GoogleAuthProvider.credentialFromResult(result);
       if (credential?.accessToken) {
         setGoogleOAuthToken(credential.accessToken);
+        try {
+          await getOrCreateMediTransFolder(credential.accessToken);
+          console.log('[MediTrans] MediTrans AI folder verified/created on Google Drive.');
+        } catch (folderErr) {
+          console.warn('[MediTrans] Could not verify/create MediTrans AI folder on Drive during login:', folderErr);
+        }
       }
 
       setShowAuthModal(false);
