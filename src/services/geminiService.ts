@@ -143,11 +143,18 @@ export class GeminiService implements TranslationService {
       throw new Error("Translation aborted");
     }
 
-    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA. Dịch nội dung trang ${pageNumber} sang tiếng Việt. Giữ nguyên định dạng Markdown. Dịch chính xác tuyệt đối từng từ, từng câu so với bản gốc y khoa. Không tự ý thêm bớt, không thay đổi ý nghĩa, không giải thích thêm. Bám sát thuật ngữ chuyên ngành y khoa nhất có thể. KHÔNG lời dẫn.
+    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT).
+Nhiệm vụ duy nhất: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH TRỰC TIẾP TOÀN BỘ NỘI DUNG SANG TIẾNG VIỆT.
 
-Đặc biệt đối với trang mục lục (Table of Contents / Index) hoặc danh sách có nhiều dấu chấm nối dòng (dot leaders): Hãy dọn dẹp các dấu chấm dư thừa (chỉ giữ lại tối đa 3-5 dấu chấm phân tách) hoặc trình bày lại dưới dạng danh sách phân cấp (bullet list/hierarchy) sạch sẽ, đồng nhất, dễ đọc và chuyên nghiệp. Tuyệt đối không lặp lại dấu chấm liên tục để tránh lỗi sinh chuỗi lặp vô hạn.`;
+QUY TẮC BẮT BUỘC:
+1. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH: Không trích xuất/OCR tiếng Anh. Không gõ lại tiếng Anh rồi mới dịch. Kết quả trả về PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%.
+2. DỊCH ĐẦY ĐỦ TỪ TRÊN XUẤT XUỐNG DƯỚI: Dịch chính xác từng đoạn văn, tiêu đề, chú thích hình ảnh, bảng biểu. KHÔNG bỏ sót đoạn nào.
+3. CHUẨN THUẬT NGỮ Y KHOA: Bám sát thuật ngữ y học tiếng Việt (ví dụ: "benign" -> "lành tính", "malignancy" -> "ác tính", "lesion" -> "tổn thương", "mammography" -> "X-quang tuyến vú",...).
+4. ĐỊNH DẠNG MARKDOWN CỦA BẢN DỊCH: Giữ nguyên cấu trúc Markdown (tiêu đề, in đậm, danh sách) tương ứng với bố cục ảnh.
+5. KHÔNG LỜI DẪN / KHÔNG BẢN GỐC TIẾNG ANH: Tuyệt đối không viết lời dẫn kiểu "Dưới đây là bản dịch...", "Bản dịch tiếng Việt:",...
+6. XỬ LÝ DẤU CHẤM LẶP LẠI (MỤC LỤC): Dọn dẹp các chuỗi dấu chấm nối dài (dot leaders) thành 3-5 dấu chấm hoặc danh sách sạch sẽ.`;
 
-    const prompt = `Dịch trang y khoa này sang tiếng Việt.`;
+    const prompt = `Dịch trực tiếp toàn bộ văn bản trong ảnh trang y khoa này sang tiếng Việt. Xuất duy nhất bản dịch tiếng Việt, tuyệt đối KHÔNG in lại văn bản gốc tiếng Anh.`;
 
     const MAX_RETRIES = 5;
     let retryCount = 0;
@@ -277,10 +284,17 @@ export class GeminiService implements TranslationService {
         throw new Error("Không tìm thấy API Key khả dụng.");
       }
 
-      const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA. Dịch nội dung trang ${pageNumber} sang tiếng Việt. Giữ nguyên định dạng Markdown. Dịch chính xác tuyệt đối từng từ, từng câu so với bản gốc y khoa. Không tự ý thêm bớt, không thay đổi ý nghĩa, không giải thích thêm. Bám sát thuật ngữ chuyên ngành y khoa nhất có thể. KHÔNG lời dẫn.
+      const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT).
+Nhiệm vụ duy nhất: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH TRỰC TIẾP TOÀN BỘ NỘI DUNG SANG TIẾNG VIỆT.
 
-Đặc biệt đối với trang mục lục (Table of Contents / Index) hoặc danh sách có nhiều dấu chấm nối dòng (dot leaders): Hãy dọn dẹp các dấu chấm dư thừa (chỉ giữ lại tối đa 3-5 dấu chấm phân tách) hoặc trình bày lại dưới dạng danh sách phân cấp (bullet list/hierarchy) sạch sẽ, đồng nhất, dễ đọc và chuyên nghiệp. Tuyệt đối không lặp lại dấu chấm liên tục để tránh lỗi sinh chuỗi lặp vô hạn.`;
-      const prompt = `Dịch văn bản trong ảnh sang tiếng Việt.`;
+QUY TẮC BẮT BUỘC:
+1. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH: Không trích xuất/OCR tiếng Anh. Không gõ lại tiếng Anh rồi mới dịch. Kết quả trả về PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%.
+2. DỊCH ĐẦY ĐỦ TỪ TRÊN XUẤT XUỐNG DƯỚI: Dịch chính xác từng đoạn văn, tiêu đề, chú thích hình ảnh, bảng biểu. KHÔNG bỏ sót đoạn nào.
+3. CHUẨN THUẬT NGỮ Y KHOA: Bám sát thuật ngữ y học tiếng Việt (ví dụ: "benign" -> "lành tính", "malignancy" -> "ác tính", "lesion" -> "tổn thương", "mammography" -> "X-quang tuyến vú",...).
+4. ĐỊNH DẠNG MARKDOWN CỦA BẢN DỊCH: Giữ nguyên cấu trúc Markdown (tiêu đề, in đậm, danh sách) tương ứng với bố cục ảnh.
+5. KHÔNG LỜI DẪN / KHÔNG BẢN GỐC TIẾNG ANH: Tuyệt đối không viết lời dẫn kiểu "Dưới đây là bản dịch...", "Bản dịch tiếng Việt:",...
+6. XỬ LÝ DẤU CHẤM LẶP LẠI (MỤC LỤC): Dọn dẹp các chuỗi dấu chấm nối dài (dot leaders) thành 3-5 dấu chấm hoặc danh sách sạch sẽ.`;
+      const prompt = `Dịch trực tiếp toàn bộ văn bản trong ảnh trang y khoa này sang tiếng Việt. Xuất duy nhất bản dịch tiếng Việt, tuyệt đối KHÔNG in lại văn bản gốc tiếng Anh.`;
 
       try {
         const genModel = ai.getGenerativeModel({ 
