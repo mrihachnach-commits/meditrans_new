@@ -335,7 +335,9 @@ export default function App() {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
   const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
-    return (localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine) || 'gemini-flash-lite-latest';
+    const saved = localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine;
+    if (saved === 'gemini-3-flash-preview') return 'gemini-3.6-flash';
+    return saved || 'gemini-flash-lite-latest';
   });
 
   useEffect(() => {
@@ -348,6 +350,7 @@ export default function App() {
       try {
         const parsed = JSON.parse(saved);
         return { 
+          'gemini-3.6-flash': parsed['gemini-3.6-flash'] || parsed['gemini-3-flash-preview'] || '',
           'gemini-3-flash-preview': parsed['gemini-3-flash-preview'] || '',
           'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
         };
@@ -357,6 +360,7 @@ export default function App() {
     }
     
     return {
+      'gemini-3.6-flash': '',
       'gemini-3-flash-preview': '',
       'gemini-flash-lite-latest': '',
     };
@@ -4040,7 +4044,7 @@ export default function App() {
                       </button>
 
                       <button 
-                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-3-flash-preview')}
+                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-3.6-flash')}
                         disabled={isTranslating || isRendering}
                         className={cn(
                           "p-2 rounded-xl transition-all flex items-center justify-center shadow-lg",
@@ -4048,7 +4052,7 @@ export default function App() {
                             ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
                             : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 hover:scale-105 active:scale-95"
                         )}
-                        title={isTranslating ? (isRendering ? 'Đang vẽ trang...' : 'Đang dịch chuyên sâu...') : (translations[currentPage] ? 'Dịch lại (Chuyên sâu)' : 'Dịch chuyên sâu')}
+                        title={isTranslating ? (isRendering ? 'Đang vẽ trang...' : 'Đang dịch chuyên sâu...') : (translations[currentPage] ? 'Dịch lại (Chuyên sâu 3.6 Flash)' : 'Dịch chuyên sâu (3.6 Flash)')}
                       >
                         {isTranslating || isRendering ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
@@ -5033,7 +5037,7 @@ export default function App() {
                       className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
                     >
                       <option value="gemini-flash-lite-latest">Cơ bản (Flash Lite)</option>
-                      <option value="gemini-3-flash-preview">Chuyên sâu (Flash 3)</option>
+                      <option value="gemini-3.6-flash">Chuyên sâu (3.6 Flash)</option>
                     </select>
                   </div>
                 </div>
@@ -5111,12 +5115,12 @@ export default function App() {
                           <button
                             onClick={() => {
                               setShowBulkConfirm(false);
-                              startBulkTranslation('gemini-3-flash-preview');
+                              startBulkTranslation('gemini-3.6-flash');
                             }}
                             className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2"
                           >
                             <Sparkles className="w-4 h-4" />
-                            Dịch chuyên sâu (Gemini 3)
+                            Dịch chuyên sâu (Gemini 3.6 Flash)
                           </button>
                           <button
                             onClick={() => setShowBulkConfirm(false)}
