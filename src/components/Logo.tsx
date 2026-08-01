@@ -53,9 +53,13 @@ export const Logo: React.FC<LogoProps> = ({ className = "", size = 32 }) => {
   );
 };
 
-export const LogoWithText: React.FC<{ className?: string }> = ({ className = "" }) => {
+export const LogoWithText: React.FC<{ className?: string; onClick?: () => void }> = ({ className = "", onClick }) => {
   return (
-    <div className={`flex items-center gap-2.5 ${className}`}>
+    <div 
+      onClick={onClick}
+      className={`flex items-center gap-2.5 ${onClick ? 'cursor-pointer hover:opacity-85 transition-opacity' : ''} ${className}`}
+      title={onClick ? "Về trang chủ" : undefined}
+    >
       <Logo size={34} />
       <div className="flex flex-col">
         <span className="font-display font-bold text-xl text-slate-800 tracking-tight leading-none">

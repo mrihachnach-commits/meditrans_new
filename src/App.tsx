@@ -985,13 +985,13 @@ export default function App() {
 
         if (activeSession.fileData) {
           activeFileDataRef.current = activeSession.fileData;
-          await handleFileSelectFromExplorer(activeSession.fileData);
+          await handleFileSelectFromExplorer(activeSession.fileData, true);
           if (activeSession.currentPage > 1 && isSubscribed) {
             setCurrentPage(activeSession.currentPage);
           }
         } else if (activeSession.driveFile) {
           activeDriveFileRef.current = activeSession.driveFile;
-          await handleOpenDriveFile(activeSession.driveFile);
+          await handleOpenDriveFile(activeSession.driveFile, true);
           if (activeSession.currentPage > 1 && isSubscribed) {
             setCurrentPage(activeSession.currentPage);
           }
@@ -1269,6 +1269,9 @@ export default function App() {
       await signOut(auth);
       localStorage.removeItem('mediTrans_selectedKeyId');
       setSelectedKeyId(null);
+      clearActiveDocSession();
+      clearFile();
+      setPdfError(null);
     } catch (error) {
       console.error("Logout failed:", error);
     }
@@ -1467,6 +1470,9 @@ export default function App() {
     }
   };
 
+  const adminChangeUserPassword = (uid: string, email: string) => {};
+  const sendAdminPasswordResetEmail = (email: string) => {};
+
   const createNewUser = async (userData: any) => {
     if (userRole !== 'admin' || !user) {
       throw new Error("Bạn không có quyền thực hiện hành động này");
@@ -1552,47 +1558,7 @@ export default function App() {
     }
   };
 
-  const resetUserPassword = async (uid: string, newPassword: string) => {
-    if (userRole !== 'admin' || !user) return;
-    try {
-      const token = await user.getIdToken();
-      const response = await fetch('/api/admin/change-password', {
-        method: 'POST',
-        headers: { 
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ uid, newPassword })
-      });
-      const data = await response.json();
-      if (data.success) {
-        showToast("Đã đổi mật khẩu thành công", 'success');
-        return true;
-      } else {
-        showToast(data.error || "Không thể đổi mật khẩu", 'error');
-        return false;
-      }
-    } catch (error: any) {
-      console.error("Error resetting password:", error);
-      showToast("Lỗi khi đổi mật khẩu trực tiếp: " + error.message, 'error');
-      return false;
-    }
-  };
 
-  const sendAdminPasswordResetEmail = async (email: string) => {
-    if (userRole !== 'admin') return;
-    try {
-      const { sendPasswordResetEmail, getAuth } = await import('firebase/auth');
-      const authInstance = getAuth();
-      await sendPasswordResetEmail(authInstance, email);
-      showToast(`Đã gửi email đặt lại mật khẩu tới ${email}`, 'success');
-      return true;
-    } catch (error: any) {
-      console.error("Error sending reset email:", error);
-      showToast("Lỗi gửi email: " + error.message, 'error');
-      return false;
-    }
-  };
 
   const updateUserRole = async (uid: string, email: string, newRole: 'user' | 'admin') => {
     if (userRole !== 'admin' || !user) return;
@@ -1611,39 +1577,7 @@ export default function App() {
     }
   };
 
-  const adminChangeUserPassword = async (uid: string, email: string) => {
-    if (userRole !== 'admin' || !user || !newPasswordInput) return;
-    if (newPasswordInput.length < 6) {
-      showToast("Mật khẩu phải có ít nhất 6 ký tự", 'error');
-      return;
-    }
 
-    showToast(`Đang đổi mật khẩu cho ${email}...`, 'info');
-    
-    try {
-      const token = await user.getIdToken();
-      const response = await fetch('/api/admin/change-password', {
-        method: 'POST',
-        headers: { 
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json' 
-        },
-        body: JSON.stringify({ uid, email, newPassword: newPasswordInput })
-      });
-      
-      const data = await response.json();
-      if (data.success) {
-        showToast(`Đã đổi mật khẩu cho ${email} thành công.`, 'success');
-        setPendingPasswordUid(null);
-        setNewPasswordInput('');
-      } else {
-        showToast(data.error || "Không thể đổi mật khẩu", 'error');
-      }
-    } catch (error: any) {
-      console.error("Error changing password:", error);
-      showToast("Lỗi khi đổi mật khẩu: " + error.message, 'error');
-    }
-  };
 
   const deleteUserAccount = async (uid: string, email: string) => {
     if (userRole !== 'admin' || !user) {
@@ -1864,6 +1798,12 @@ export default function App() {
     setShowExplorer(true);
   };
 
+  const handleGoHome = () => {
+    setPdfError(null);
+    setShowAdminPanel(false);
+    clearFile();
+  };
+
   const handleDeleteCurrentFile = async () => {
     if (!fileId || isLocalOnly) {
       clearFile();
@@ -2082,7 +2022,7 @@ export default function App() {
     console.log(`[MediTrans AI] Pre-loading PDF worker v${pdfjs.version}...`);
   }, []);
 
-  const handleFileSelectFromExplorer = async (fileData: FileData) => {
+  const handleFileSelectFromExplorer = async (fileData: FileData, isAutoRestore = false) => {
     activeFileDataRef.current = fileData;
     activeDriveFileRef.current = null;
     activeFileBufferRef.current = null;
@@ -2160,17 +2100,28 @@ export default function App() {
       setNumPages(pdf.numPages);
     } catch (error: any) {
       console.error("Error loading PDF from Google Drive:", error);
-      if (error.message === 'CHUA_KET_NOI_DRIVE') {
-        setPdfError('Chưa kết nối tài khoản Google Drive. Vui lòng bấm "Google Drive" trên thanh công cụ để kết nối và cấp quyền.');
+      clearActiveDocSession();
+      if (isAutoRestore) {
+        setPdfDoc(null);
+        setFile(null);
+        setShowExplorer(true);
+        setPdfError(null);
+        showToast("Tài liệu phiên trước không thể tải từ Google Drive (Mã lỗi 404). Đã về trang chủ.", "info");
       } else {
-        setPdfError(`Không thể tải tệp PDF từ Google Drive: ${error.message || "Lỗi không xác định"}`);
+        if (error.message === 'CHUA_KET_NOI_DRIVE') {
+          setPdfError('Chưa kết nối tài khoản Google Drive. Vui lòng bấm "Google Drive" trên thanh công cụ để kết nối và cấp quyền.');
+        } else if (error.message?.includes('404')) {
+          setPdfError('Tệp PDF này không còn tồn tại trên Google Drive (Mã lỗi 404). Vui lòng chọn tài liệu khác.');
+        } else {
+          setPdfError(`Không thể tải tệp PDF từ Google Drive: ${error.message || "Lỗi không xác định"}`);
+        }
       }
     } finally {
       setIsPdfLoading(false);
     }
   };
 
-  const handleOpenDriveFile = async (driveFile: DriveFileMetadata) => {
+  const handleOpenDriveFile = async (driveFile: DriveFileMetadata, isAutoRestore = false) => {
     activeFileDataRef.current = null;
     activeDriveFileRef.current = driveFile;
     activeFileBufferRef.current = null;
@@ -2231,10 +2182,21 @@ export default function App() {
       });
     } catch (error: any) {
       console.error("Error opening PDF from Google Drive:", error);
-      if (error.message === 'CHUA_KET_NOI_DRIVE') {
-        setPdfError('Chưa kết nối tài khoản Google Drive. Vui lòng bấm "Google Drive" trên thanh công cụ để kết nối và cấp quyền.');
+      clearActiveDocSession();
+      if (isAutoRestore) {
+        setPdfDoc(null);
+        setFile(null);
+        setShowExplorer(true);
+        setPdfError(null);
+        showToast("Tài liệu phiên trước không thể tải từ Google Drive (Mã lỗi 404). Đã về trang chủ.", "info");
       } else {
-        setPdfError(`Không thể tải tệp PDF từ Google Drive: ${error.message || "Lỗi không xác định"}`);
+        if (error.message === 'CHUA_KET_NOI_DRIVE') {
+          setPdfError('Chưa kết nối tài khoản Google Drive. Vui lòng bấm "Google Drive" trên thanh công cụ để kết nối và cấp quyền.');
+        } else if (error.message?.includes('404')) {
+          setPdfError('Tệp PDF này không còn tồn tại trên Google Drive (Mã lỗi 404). Vui lòng chọn tài liệu khác.');
+        } else {
+          setPdfError(`Không thể tải tệp PDF từ Google Drive: ${error.message || "Lỗi không xác định"}`);
+        }
       }
     } finally {
       setIsPdfLoading(false);
@@ -3661,7 +3623,7 @@ export default function App() {
               <ArrowLeft className="w-5 h-5" />
             </button>
           ) : null}
-          <LogoWithText />
+          <LogoWithText onClick={handleGoHome} />
 
         <div className="flex items-center gap-2">
           {pdfDoc && (
@@ -4021,10 +3983,17 @@ export default function App() {
                         </div>
                       )}
                       {pdfError && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-white/80 z-20 p-4 text-center">
-                          <div className="max-w-xs">
-                            <AlertCircle className="w-10 h-10 text-rose-500 mx-auto mb-2" />
-                            <p className="text-sm font-bold text-slate-800">{pdfError}</p>
+                        <div className="absolute inset-0 flex items-center justify-center bg-white/95 z-30 p-4 text-center">
+                          <div className="max-w-md bg-white p-6 rounded-2xl border border-rose-100 shadow-2xl flex flex-col items-center">
+                            <AlertCircle className="w-12 h-12 text-rose-500 mb-3" />
+                            <p className="text-sm font-bold text-slate-800 mb-5 leading-relaxed">{pdfError}</p>
+                            <button 
+                              onClick={handleGoHome}
+                              className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-md active:scale-95 flex items-center gap-2 cursor-pointer"
+                            >
+                              <Home className="w-4 h-4" />
+                              <span>Quay về trang chủ</span>
+                            </button>
                           </div>
                         </div>
                       )}
