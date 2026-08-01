@@ -155,16 +155,18 @@ export class GeminiService implements TranslationService {
       messages.push({ role: "system", content: systemInstruction });
     }
 
-    const userContent: any[] = [{ type: "text", text: prompt }];
+    const userContent: any[] = [];
     if (imageBase64) {
       const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
       userContent.push({
         type: "image_url",
         image_url: { 
-          url: formattedImage
+          url: formattedImage,
+          detail: "high"
         }
       });
     }
+    userContent.push({ type: "text", text: prompt });
 
     messages.push({ role: "user", content: userContent });
 
@@ -263,16 +265,18 @@ export class GeminiService implements TranslationService {
       messages.push({ role: "system", content: systemInstruction });
     }
 
-    const userContent: any[] = [{ type: "text", text: prompt }];
+    const userContent: any[] = [];
     if (imageBase64) {
       const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
       userContent.push({
         type: "image_url",
         image_url: { 
-          url: formattedImage
+          url: formattedImage,
+          detail: "high"
         }
       });
     }
+    userContent.push({ type: "text", text: prompt });
 
     messages.push({ role: "user", content: userContent });
 
@@ -410,35 +414,36 @@ export class GeminiService implements TranslationService {
 
     const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT). 
 QUY TẮC SỐ 1: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. TUYỆT ĐỐI KHÔNG GIỮ NGUYÊN BẤT KỲ CÂU, ĐOẠN VĂN HAY TIÊU ĐỀ NÀO BẰNG TIẾNG ANH GỐC.
-Nhiệm vụ tối quan trọng: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH ĐẦY ĐỦ 100% TỪNG CÂU, TỪNG ĐOẠN, TỪNG CHÚ THÍCH HÌNH ẢNH (Figure 1, Figure 2...) TỪ ĐẦU ĐẾN CUỐI TRANG SANG TIẾNG VIỆT CHUẨN XÁC. TUYỆT ĐỐI KHÔNG TÓM TẮT, KHÔNG CẮT BỚT BẤT KỲ NỘI DUNG HAY CHI TIẾT NÀO.
 
-QUY TẮC "OCR TINH MẮT" (CỰC KỲ QUAN TRỌNG):
-- Quét toàn bộ 100% bề mặt ảnh từ trên xuống dưới, từ trái sang phải.
-- KHÔNG ĐƯỢC BỎ QUA bất kỳ văn bản nào dù là nhỏ nhất: số trang, tiêu đề cột, và ĐẶC BIỆT LÀ CÁC CHÚ THÍCH DƯỚI HÌNH (Figure 1, Figure 2, Table 1...).
-- DỊCH CHÚ THÍCH HÌNH: Các cụm từ "Figure X", "Table X" PHẢI được dịch thành "Hình X", "Bảng X" và dịch toàn bộ nội dung mô tả đi kèm sang tiếng Việt.
+QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH NÀO (CRITICAL - FIGURE CAPTIONS & IMAGE LABELS):
+1. QUÉT KỸ 100% BỀ MẶT TRANG, ĐẶC BIỆT LÀ CÁC DÒNG CHỮ CHÚ THÍCH DƯỚI HOẶC BÊN CẠNH CÁC HÌNH ẢNH (Figure 1, Figure 2, Figure 3, A, B, v.v.):
+   - DỊCH CHÚ THÍCH HÌNH: Dịch "Figure 1 – ..." -> "**Hình 1 – ...**", "Figure 2 – ..." -> "**Hình 2 – ...**"
+   - DỊCH TẤT CẢ TỪ VIẾT TẮT VÀ THUẬT NGỮ TRONG HÌNH: (A), (B), "Pathology:..." -> "**Bệnh học:...**", DM, DBT, Simple cyst, carcinoma, DCIS, arrows, obscured, circumscribed, equal density mass...
+   - BẮT BUỘC CHÈN ĐOẠN DỊCH CHÚ THÍCH HÌNH VÀO ĐÚNG VỊ TRÍ DƯỚI MỖI BỨC ẢNH. TUYỆT ĐỐI KHÔNG BỎ QUA BẤT KỲ CHÚ THÍCH HÌNH NÀO.
 
-QUY TẮC BẮT BUỘC VỀ ĐỊNH DẠNG VÀ CẤU TRÚC MARKDOWN (CỰC KỲ QUAN TRỌNG):
-1. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
+2. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
    - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
    - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\n\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
-   - Các chú thích hình ảnh (Hình 1 - ..., Hình 2 - ...) phải được dịch đầy đủ sang tiếng Việt và đặt thành mục riêng hoặc ngay dưới mô tả hình.
    - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\n\n) rõ ràng.
-2. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU (CỰC KỲ QUAN TRỌNG - KHÔNG ĐƯỢC MẤT CỘT BẢNG):
-   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH. Bảng gốc có bao nhiêu cột PHẢI TẠO BẢNG MARKDOWN CÓ ĐỦ BẤY NHIÊU CỘT (| Cột 1 | Cột 2 | Cột 3 | ... |).
-   - TUYỆT ĐỐI KHÔNG DỒN HOẶC GỘP NHIỀU CỘT CỦA BẢNG THÀNH 1 CỘT. MỖI CỘT TRONG BẢNG GỐC PHẢI LÀ MỘT CỘT RIÊNG TRONG BẢNG MARKDOWN.
+
+3. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
+   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
-3. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH HOẶC OCR TIẾNG ANH:
-   - Kết quả PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%. Dịch tất cả thuật ngữ y khoa sang tiếng Việt chuyên ngành chuẩn xác.
+
 4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.`;
 
-    const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. TUYỆT ĐỐI KHÔNG GIỮ NGUYÊN BẤT KỲ CÂU NÀO BẰNG TIẾNG ANH. MỌI TIÊU ĐỀ, NỘI DUNG, CHÚ THÍCH HÌNH ẢNH (FIGURE CAPTIONS) ĐỀU PHẢI ĐƯỢC DỊCH SANG TIẾNG VIỆT CHUẨN Y KHOA. QUÉT KỸ TOÀN BỘ ẢNH ĐỂ KHÔNG BỎ SÓT CHỮ NÀO].
+    const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
 YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
-- Dịch hoàn toàn toàn bộ văn bản, đoạn văn, CHÚ THÍCH HÌNH ẢNH (DỊCH "FIGURE" THÀNH "HÌNH") và nội dung trong ảnh trang y khoa này sang tiếng Việt. KHÔNG ĐƯỢC BỎ SÓT BẤT KỲ CÂU NÀO.
+- Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
+- DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
+  + "Figure 1 – ..." -> "**Hình 1 – ...**"
+  + "Figure 2 – ..." -> "**Hình 2 – ...**"
+  + Dịch đầy đủ nội dung mô tả hình (A, B, DM, DBT, Pathology, v.v.).
 - YÊU CẦU ĐỊNH DẠNG MARKDOWN CỰC KỲ NGUYÊN TẮC:
   + Dùng tiêu đề Markdown (###) cho các tiêu đề chính/phần.
   + Các mục đánh số (1., 2., 3...) và chữ cái (a., b., c., d...) PHẢI nằm trên dòng riêng, in đậm rõ ràng, phân tách bằng xuống dòng kép (\\n\\n).
-  + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |). TUYỆT ĐỐI KHÔNG làm mất hay gộp các cột.
+  + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |).
   + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
 
 
@@ -497,13 +502,13 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         });
 
         const response = await genModel.generateContentStream([
-          prompt,
           {
             inlineData: {
               mimeType: "image/jpeg",
               data: imageBuffer.split(",")[1] || imageBuffer,
             },
           },
+          prompt,
         ]);
 
         console.log(`[MediTrans] API request sent. Model: ${requestModel}. Wait time for stream start...`);
@@ -597,35 +602,36 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
 
       const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT). 
 QUY TẮC SỐ 1: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. TUYỆT ĐỐI KHÔNG GIỮ NGUYÊN BẤT KỲ CÂU, ĐOẠN VĂN HAY TIÊU ĐỀ NÀO BẰNG TIẾNG ANH GỐC.
-Nhiệm vụ tối quan trọng: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH ĐẦY ĐỦ 100% TỪNG CÂU, TỪNG ĐOẠN, TỪNG CHÚ THÍCH HÌNH ẢNH (Figure 1, Figure 2...) TỪ ĐẦU ĐẾN CUỐI TRANG SANG TIẾNG VIỆT CHUẨN XÁC. TUYỆT ĐỐI KHÔNG TÓM TẮT, KHÔNG CẮT BỚT BẤT KỲ NỘI DUNG HAY CHI TIẾT NÀO.
 
-QUY TẮC "OCR TINH MẮT" (CỰC KỲ QUAN TRỌNG):
-- Quét toàn bộ 100% bề mặt ảnh từ trên xuống dưới, từ trái sang phải.
-- KHÔNG ĐƯỢC BỎ QUA bất kỳ văn bản nào dù là nhỏ nhất: số trang, tiêu đề cột, và ĐẶC BIỆT LÀ CÁC CHÚ THÍCH DƯỚI HÌNH (Figure 1, Figure 2, Table 1...).
-- DỊCH CHÚ THÍCH HÌNH: Các cụm từ "Figure X", "Table X" PHẢI được dịch thành "Hình X", "Bảng X" và dịch toàn bộ nội dung mô tả đi kèm sang tiếng Việt.
+QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH NÀO (CRITICAL - FIGURE CAPTIONS & IMAGE LABELS):
+1. QUÉT KỸ 100% BỀ MẶT TRANG, ĐẶC BIỆT LÀ CÁC DÒNG CHỮ CHÚ THÍCH DƯỚI HOẶC BÊN CẠNH CÁC HÌNH ẢNH (Figure 1, Figure 2, Figure 3, A, B, v.v.):
+   - DỊCH CHÚ THÍCH HÌNH: Dịch "Figure 1 – ..." -> "**Hình 1 – ...**", "Figure 2 – ..." -> "**Hình 2 – ...**"
+   - DỊCH TẤT CẢ TỪ VIẾT TẮT VÀ THUẬT NGỮ TRONG HÌNH: (A), (B), "Pathology:..." -> "**Bệnh học:...**", DM, DBT, Simple cyst, carcinoma, DCIS, arrows, obscured, circumscribed, equal density mass...
+   - BẮT BUỘC CHÈN ĐOẠN DỊCH CHÚ THÍCH HÌNH VÀO ĐÚNG VỊ TRÍ DƯỚI MỖI BỨC ẢNH. TUYỆT ĐỐI KHÔNG BỎ QUA BẤT KỲ CHÚ THÍCH HÌNH NÀO.
 
-QUY TẮC BẮT BUỘC VỀ ĐỊNH DẠNG VÀ CẤU TRÚC MARKDOWN (CỰC KỲ QUAN TRỌNG):
-1. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
+2. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
    - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
    - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\n\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
-   - Các chú thích hình ảnh (Hình 1 - ..., Hình 2 - ...) phải được dịch đầy đủ sang tiếng Việt và đặt thành mục riêng hoặc ngay dưới mô tả hình.
    - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\n\n) rõ ràng.
-2. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU (CỰC KỲ QUAN TRỌNG - KHÔNG ĐƯỢC MẤT CỘT BẢNG):
-   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH. Bảng gốc có bao nhiêu cột PHẢI TẠO BẢNG MARKDOWN CÓ ĐỦ BẤY NHIÊU CỘT (| Cột 1 | Cột 2 | Cột 3 | ... |).
-   - TUYỆT ĐỐI KHÔNG DỒN HOẶC GỘP NHIỀU CỘT CỦA BẢNG THÀNH 1 CỘT. MỖI CỘT TRONG BẢNG GỐC PHẢI LÀ MỘT CỘT RIÊNG TRONG BẢNG MARKDOWN.
+
+3. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
+   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
-3. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH HOẶC OCR TIẾNG ANH:
-   - Kết quả PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%. Dịch tất cả thuật ngữ y khoa sang tiếng Việt chuyên ngành chuẩn xác.
+
 4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.`;
 
-      const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. TUYỆT ĐỐI KHÔNG GIỮ NGUYÊN BẤT KỲ CÂU NÀO BẰNG TIẾNG ANH. MỌI TIÊU ĐỀ, NỘI DUNG, CHÚ THÍCH HÌNH ẢNH (FIGURE CAPTIONS) ĐỀU PHẢI ĐƯỢC DỊCH SANG TIẾNG VIỆT CHUẨN Y KHOA. QUÉT KỸ TOÀN BỘ ẢNH ĐỂ KHÔNG BỎ SÓT CHỮ NÀO].
+      const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
 YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
-- Dịch hoàn toàn toàn bộ văn bản, đoạn văn, CHÚ THÍCH HÌNH ẢNH (DỊCH "FIGURE" THÀNH "HÌNH") và nội dung trong ảnh trang y khoa này sang tiếng Việt. KHÔNG ĐƯỢC BỎ SÓT BẤT KỲ CÂU NÀO.
+- Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
+- DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
+  + "Figure 1 – ..." -> "**Hình 1 – ...**"
+  + "Figure 2 – ..." -> "**Hình 2 – ...**"
+  + Dịch đầy đủ nội dung mô tả hình (A, B, DM, DBT, Pathology, v.v.).
 - YÊU CẦU ĐỊNH DẠNG MARKDOWN CỰC KỲ NGUYÊN TẮC:
   + Dùng tiêu đề Markdown (###) cho các tiêu đề chính/phần.
   + Các mục đánh số (1., 2., 3...) và chữ cái (a., b., c., d...) PHẢI nằm trên dòng riêng, in đậm rõ ràng, phân tách bằng xuống dòng kép (\\n\\n).
-  + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |). TUYỆT ĐỐI KHÔNG làm mất hay gộp các cột.
+  + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |).
   + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
 
       if (key.startsWith('sk-')) {
@@ -654,8 +660,8 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         });
 
         const result = await genModel.generateContent([
-          prompt, 
-          { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] || imageBuffer } }
+          { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] || imageBuffer } },
+          prompt
         ]);
 
         const response = await result.response;
