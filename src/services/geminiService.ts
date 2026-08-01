@@ -171,7 +171,7 @@ export class GeminiService implements TranslationService {
     const body: any = {
       model: mappedModel,
       temperature: 0,
-      max_tokens: 4096,
+      max_tokens: 8192,
       stream: true,
       messages
     };
@@ -279,7 +279,7 @@ export class GeminiService implements TranslationService {
     const body: any = {
       model: mappedModel,
       temperature: 0,
-      max_tokens: 4096,
+      max_tokens: 8192,
       stream: false,
       messages
     };
@@ -409,30 +409,29 @@ export class GeminiService implements TranslationService {
     }
 
     const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT).
-Nhiệm vụ duy nhất: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH TRỰC TIẾP TOÀN BỘ NỘI DUNG SANG TIẾNG VIỆT, TRÌNH BÀY MARKDOWN ĐẸP CHUẨN XÁC VÀ RÕ RÀNG NHƯ TÀI LIỆU Y KHOA CHUYÊN NGHIỆP.
+Nhiệm vụ tối quan trọng: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH ĐẦY ĐỦ 100% TỪNG CÂU, TỪNG ĐOẠN, TỪNG CHÚ THÍCH HÌNH ẢNH (Figure 1, Figure 2...) TỪ ĐẦU ĐẾN CUỐI TRANG SANG TIẾNG VIỆT. TUYỆT ĐỐI KHÔNG TÓM TẮT, KHÔNG CẮT BỚT BẤT KỲ NỘI DUNG HAY CHI TIẾT NÀO.
 
 QUY TẮC BẮT BUỘC VỀ ĐỊNH DẠNG VÀ CẤU TRÚC MARKDOWN (CỰC KỲ QUAN TRỌNG):
 1. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
-   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### I. Các loại nghiên cứu...).
-   - ĐẶC BIỆT KHI DỊCH MỤC LỤC HOẶC DANH SÁCH CÁC MỤC/PHẦN: BẮT BUỘC trình bày theo dạng danh sách gạch đầu dòng Markdown (- **PHẦN I**: Nội dung..., - **PHẦN II**: Nội dung...). TUYỆT ĐỐI KHÔNG gộp các mục danh sách thành một đoạn văn duy nhất liền nhau.
-   - In đậm (**tên phần/số La Mã/từ khóa y khoa**) để làm nổi bật cấu trúc.
+   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
+   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\n\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng (như "1. HÌNH DẠNG d. Không đều").
+   - Các chú thích hình ảnh (Figure 1 - ..., Figure 2 - ...) phải được dịch đầy đủ và đặt thành mục riêng hoặc ngay dưới mô tả hình.
    - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\n\n) rõ ràng.
 2. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU (CỰC KỲ QUAN TRỌNG - KHÔNG ĐƯỢC MẤT CỘT BẢNG):
    - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH. Bảng gốc có bao nhiêu cột (2, 3, 4, 5 hay nhiều cột hơn) PHẢI TẠO BẢNG MARKDOWN CÓ ĐỦ BẤY NHIÊU CỘT (| Cột 1 | Cột 2 | Cột 3 | ... |).
-   - TUYỆT ĐỐI KHÔNG DỒN HOẶC GỘP NHIỀU CỘT CỦA BẢNG THÀNH 1 CỘT (Ví dụ: Không gộp cột "Hạng mục/Đặc tính" và cột "Thuật ngữ" làm một). MỖI CỘT TRONG BẢNG GỐC PHẢI LÀ MỘT CỘT RIÊNG TRONG BẢNG MARKDOWN.
+   - TUYỆT ĐỐI KHÔNG DỒN HOẶC GỘP NHIỀU CỘT CỦA BẢNG THÀNH 1 CỘT. MỖI CỘT TRONG BẢNG GỐC PHẢI LÀ MỘT CỘT RIÊNG TRONG BẢNG MARKDOWN.
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 3. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH HOẶC OCR TIẾNG ANH:
-   - Kết quả PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%. Dịch tất cả tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng (COMPOSITION -> Cấu trúc, ECHOGENICITY -> Độ hồi âm, Anechoic -> Trống âm, Smooth -> Bờ đều,...).
-4. CHUẨN THUẬT NGỮ Y KHOA TIẾNG VIỆT: Bám sát thuật ngữ y học chuyên ngành.
-5. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.`;
+   - Kết quả PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%. Dịch tất cả thuật ngữ y khoa sang tiếng Việt chuyên ngành chuẩn xác.
+4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.`;
 
     const prompt = `YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
-- Dịch toàn bộ văn bản và nội dung trong ảnh trang y khoa này sang tiếng Việt.
+- Dịch hoàn toàn toàn bộ văn bản, đoạn văn, chú thích hình ảnh và nội dung trong ảnh trang y khoa này sang tiếng Việt. KHÔNG ĐƯỢC BỎ SÓT BẤT KỲ CÂU NÀO.
 - YÊU CẦU ĐỊNH DẠNG MARKDOWN CỰC KỲ NGUYÊN TẮC:
   + Dùng tiêu đề Markdown (###) cho các tiêu đề chính/phần.
-  + Dùng danh sách gạch đầu dòng (- **Mục**: Nội dung...) cho tất cả các phần mục lục, danh sách hoặc dàn ý. Tuyệt đối không viết liền các phần thành một đoạn văn duy nhất.
+  + Các mục đánh số (1., 2., 3...) và chữ cái (a., b., c., d...) PHẢI nằm trên dòng riêng, in đậm rõ ràng, phân tách bằng xuống dòng kép (\\n\\n).
   + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |). TUYỆT ĐỐI KHÔNG làm mất hay gộp các cột.
-  + Phân tách rõ ràng giữa các mục bằng xuống dòng kép (\\n\\n).`;
+  + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
 
     const MAX_RETRIES = 5;
     let retryCount = 0;
@@ -588,30 +587,29 @@ QUY TẮC BẮT BUỘC VỀ ĐỊNH DẠNG VÀ CẤU TRÚC MARKDOWN (CỰC KỲ 
       }
 
       const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT).
-Nhiệm vụ duy nhất: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH TRỰC TIẾP TOÀN BỘ NỘI DUNG SANG TIẾNG VIỆT, TRÌNH BÀY MARKDOWN ĐẸP CHUẨN XÁC VÀ RÕ RÀNG NHƯ TÀI LIỆU Y KHOA CHUYÊN NGHIỆP.
+Nhiệm vụ tối quan trọng: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH ĐẦY ĐỦ 100% TỪNG CÂU, TỪNG ĐOẠN, TỪNG CHÚ THÍCH HÌNH ẢNH (Figure 1, Figure 2...) TỪ ĐẦU ĐẾN CUỐI TRANG SANG TIẾNG VIỆT. TUYỆT ĐỐI KHÔNG TÓM TẮT, KHÔNG CẮT BỚT BẤT KỲ NỘI DUNG HAY CHI TIẾT NÀO.
 
 QUY TẮC BẮT BUỘC VỀ ĐỊNH DẠNG VÀ CẤU TRÚC MARKDOWN (CỰC KỲ QUAN TRỌNG):
 1. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
-   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### I. Các loại nghiên cứu...).
-   - ĐẶC BIỆT KHI DỊCH MỤC LỤC HOẶC DANH SÁCH CÁC MỤC/PHẦN: BẮT BUỘC trình bày theo dạng danh sách gạch đầu dòng Markdown (- **PHẦN I**: Nội dung..., - **PHẦN II**: Nội dung...). TUYỆT ĐỐI KHÔNG gộp các mục danh sách thành một đoạn văn duy nhất liền nhau.
-   - In đậm (**tên phần/số La Mã/từ khóa y khoa**) để làm nổi bật cấu trúc.
+   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
+   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\n\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng (như "1. HÌNH DẠNG d. Không đều").
+   - Các chú thích hình ảnh (Figure 1 - ..., Figure 2 - ...) phải được dịch đầy đủ và đặt thành mục riêng hoặc ngay dưới mô tả hình.
    - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\n\n) rõ ràng.
 2. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU (CỰC KỲ QUAN TRỌNG - KHÔNG ĐƯỢC MẤT CỘT BẢNG):
    - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH. Bảng gốc có bao nhiêu cột (2, 3, 4, 5 hay nhiều cột hơn) PHẢI TẠO BẢNG MARKDOWN CÓ ĐỦ BẤY NHIÊU CỘT (| Cột 1 | Cột 2 | Cột 3 | ... |).
-   - TUYỆT ĐỐI KHÔNG DỒN HOẶC GỘP NHIỀU CỘT CỦA BẢNG THÀNH 1 CỘT (Ví dụ: Không gộp cột "Hạng mục/Đặc tính" và cột "Thuật ngữ" làm một). MỖI CỘT TRONG BẢNG GỐC PHẢI LÀ MỘT CỘT RIÊNG TRONG BẢNG MARKDOWN.
+   - TUYỆT ĐỐI KHÔNG DỒN HOẶC GỘP NHIỀU CỘT CỦA BẢNG THÀNH 1 CỘT. MỖI CỘT TRONG BẢNG GỐC PHẢI LÀ MỘT CỘT RIÊNG TRONG BẢNG MARKDOWN.
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 3. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH HOẶC OCR TIẾNG ANH:
-   - Kết quả PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%. Dịch tất cả tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng (COMPOSITION -> Cấu trúc, ECHOGENICITY -> Độ hồi âm, Anechoic -> Trống âm, Smooth -> Bờ đều,...).
-4. CHUẨN THUẬT NGỮ Y KHOA TIẾNG VIỆT: Bám sát thuật ngữ y học chuyên ngành.
-5. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.`;
+   - Kết quả PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%. Dịch tất cả thuật ngữ y khoa sang tiếng Việt chuyên ngành chuẩn xác.
+4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.`;
 
       const prompt = `YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
-- Dịch toàn bộ văn bản và nội dung trong ảnh trang y khoa này sang tiếng Việt.
+- Dịch hoàn toàn toàn bộ văn bản, đoạn văn, chú thích hình ảnh và nội dung trong ảnh trang y khoa này sang tiếng Việt. KHÔNG ĐƯỢC BỎ SÓT BẤT KỲ CÂU NÀO.
 - YÊU CẦU ĐỊNH DẠNG MARKDOWN CỰC KỲ NGUYÊN TẮC:
   + Dùng tiêu đề Markdown (###) cho các tiêu đề chính/phần.
-  + Dùng danh sách gạch đầu dòng (- **Mục**: Nội dung...) cho tất cả các phần mục lục, danh sách hoặc dàn ý. Tuyệt đối không viết liền các phần thành một đoạn văn duy nhất.
+  + Các mục đánh số (1., 2., 3...) và chữ cái (a., b., c., d...) PHẢI nằm trên dòng riêng, in đậm rõ ràng, phân tách bằng xuống dòng kép (\\n\\n).
   + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |). TUYỆT ĐỐI KHÔNG làm mất hay gộp các cột.
-  + Phân tách rõ ràng giữa các mục bằng xuống dòng kép (\\n\\n).`;
+  + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
 
       if (key.startsWith('sk-')) {
         try {

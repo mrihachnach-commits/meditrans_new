@@ -936,7 +936,7 @@ export default function App() {
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
-          const vService = new GeminiService(vKey.value, "gemini-flash-lite-latest");
+          const vService = new GeminiService(vKey.value, vKey.engine || selectedEngine);
           const vRes = await vService.checkAvailableKeys();
           const isActive = vRes.manualKey;
           
@@ -3051,10 +3051,15 @@ export default function App() {
     const totalToTranslate = pagesToTranslate.length;
     let newlyCompletedCount = 0;
     
-    // Concurrency depends on keys
-    const concurrentLimit = Math.min(10, userKeys.length > 5 ? Math.floor(userKeys.length * 0.8) : 5);
+    // Concurrency depends on keys and engine
+    let concurrentLimit = 5;
+    if (activeKeyFolder === 'shopaikey') {
+      concurrentLimit = 1; // Process sequentially for ShopAIKey/Proxy
+    } else {
+      concurrentLimit = Math.min(10, userKeys.length > 5 ? Math.floor(userKeys.length * 0.8) : 5);
+    }
     
-    console.log(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages...`);
+    console.log(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages with concurrency ${concurrentLimit}...`);
 
     // Process in batches
     for (let i = 0; i < pagesToTranslate.length; i += concurrentLimit) {
@@ -3253,7 +3258,7 @@ export default function App() {
     // Use selected vault key as primary if available
     const serviceKey = primaryKey || (allKeys.length > 0 ? allKeys[0] : "");
 
-    translationService.current = new GeminiService(allKeys, "gemini-flash-lite-latest");
+    translationService.current = new GeminiService(allKeys, selectedEngine);
 
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
