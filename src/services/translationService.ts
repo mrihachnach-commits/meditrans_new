@@ -12,6 +12,7 @@ export interface TranslationService {
   translateMedicalPage(options: TranslationOptions): Promise<string>;
   hasApiKey(): Promise<boolean>;
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
+  testSingleKeyTranslation(apiKey: string, sampleText: string): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }>;
 }
 
 export type TranslationEngine = 'gemini-3.6-flash' | 'gemini-3-flash-preview' | 'gemini-flash-lite-latest';

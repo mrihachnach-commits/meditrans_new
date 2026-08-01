@@ -27,9 +27,6 @@ export class GeminiService implements TranslationService {
   }
 
   private getMIN_REQUEST_INTERVAL(): number {
-    // If we have many keys, we can be more aggressive with each key's individual interval
-    // Default is usually 4s/RPM for free tier, but 1s is safe for most paid/high-tier keys.
-    // We'll set a lower individual interval if we have many keys.
     return this.apiKeys.length > 5 ? 500 : 800;
   }
 
@@ -40,7 +37,6 @@ export class GeminiService implements TranslationService {
     const validKeys = this.apiKeys.filter(k => !this.exhaustedKeys.has(k));
     if (validKeys.length === 0) return null;
 
-    // Prefer last successful key if it fulfills rate limit
     if (GeminiService.lastSuccessfulKey && validKeys.includes(GeminiService.lastSuccessfulKey)) {
       const lastUsed = GeminiService.globalKeyLastUsed.get(GeminiService.lastSuccessfulKey) || 0;
       if (now - lastUsed >= this.getMIN_REQUEST_INTERVAL()) {
@@ -48,7 +44,6 @@ export class GeminiService implements TranslationService {
       }
     }
 
-    // Least recently used selection
     validKeys.sort((a, b) => (GeminiService.globalKeyLastUsed.get(a) || 0) - (GeminiService.globalKeyLastUsed.get(b) || 0));
 
     return validKeys[0];
@@ -64,7 +59,10 @@ export class GeminiService implements TranslationService {
     await this.waitForKeyRateLimit(key);
     
     try {
-      console.log(`[MediTrans] Using key: ...${key.substring(key.length - 4)} (Vault) for ${this.modelName}`);
+      console.log(`[MediTrans] Using key: ...${key.substring(key.length - 4)} for ${this.modelName}`);
+      if (key.startsWith('sk-')) {
+        return { ai: null, key };
+      }
       const ai = new GoogleGenerativeAI(key);
       return { ai, key };
     } catch (e) {
@@ -90,7 +88,7 @@ export class GeminiService implements TranslationService {
 
   private rotateKey(exhaustedKey: string, isQuotaError: boolean = true): boolean {
     if (exhaustedKey) {
-      const waitTime = isQuotaError ? 30000 : 5000; // 30s for quota, 5s for other errors
+      const waitTime = isQuotaError ? 30000 : 5000;
       console.warn(`[MediTrans] Key ...${exhaustedKey.slice(-4)} ${isQuotaError ? 'QUOTA EXHAUSTED' : 'ERROR'}. Backoff: ${waitTime}ms`);
       this.exhaustedKeys.add(exhaustedKey);
       
@@ -101,6 +99,249 @@ export class GeminiService implements TranslationService {
     }
     
     return this.getBestAvailableKey() !== null;
+  }
+
+  private mapModelForOpenAI(modelName: string): string {
+    const customModel = typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customOpenAIModel') : null;
+    if (customModel && customModel.trim()) {
+      return customModel.trim();
+    }
+    if (modelName === 'gemini-flash-lite-latest' || modelName === 'gemini-flash') {
+      return 'gemini-1.5-flash';
+    }
+    if (modelName === 'gemini-3.6-flash' || modelName === 'gemini-3-flash-preview') {
+      return 'gemini-1.5-pro';
+    }
+    return modelName;
+  }
+
+  private async *callOpenAIStream(
+    key: string,
+    model: string,
+    systemInstruction: string,
+    prompt: string,
+    imageBase64: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<string> {
+    const baseUrl = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customBaseUrl') : null) || 'https://api.shopaikey.com/v1';
+    let cleanBaseUrl = baseUrl.trim().replace(/\/+$/, '');
+    if (!cleanBaseUrl.endsWith('/chat/completions')) {
+      cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
+    }
+
+    const mappedModel = this.mapModelForOpenAI(model);
+
+    const messages: any[] = [];
+    if (systemInstruction) {
+      messages.push({ role: "system", content: systemInstruction });
+    }
+
+    const userContent: any[] = [{ type: "text", text: prompt }];
+    if (imageBase64) {
+      const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
+      userContent.push({
+        type: "image_url",
+        image_url: { url: formattedImage }
+      });
+    }
+
+    messages.push({ role: "user", content: userContent });
+
+    const body = {
+      model: mappedModel,
+      temperature: 0,
+      stream: true,
+      messages
+    };
+
+    console.log(`[MediTrans] Calling ShopAIKey/Proxy Stream (${cleanBaseUrl}) using model: ${mappedModel}`);
+
+    const response = await fetch(cleanBaseUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${key}`
+      },
+      body: JSON.stringify(body),
+      signal
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`ShopAIKey/Proxy Error (${response.status}): ${errText}`);
+    }
+
+    if (!response.body) {
+      throw new Error("Response body is empty");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(":")) continue;
+        if (trimmed === "data: [DONE]" || trimmed === "data:[DONE]") {
+          return;
+        }
+        if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.slice(5).trim();
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) {
+              yield content;
+            }
+          } catch (e) {
+            // silent parse ignore
+          }
+        }
+      }
+    }
+
+    if (buffer.trim().startsWith("data:")) {
+      const jsonStr = buffer.trim().slice(5).trim();
+      if (jsonStr && jsonStr !== "[DONE]") {
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) yield content;
+        } catch (e) {}
+      }
+    }
+  }
+
+  private async callOpenAINonStream(
+    key: string,
+    model: string,
+    systemInstruction: string,
+    prompt: string,
+    imageBase64: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const baseUrl = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customBaseUrl') : null) || 'https://api.shopaikey.com/v1';
+    let cleanBaseUrl = baseUrl.trim().replace(/\/+$/, '');
+    if (!cleanBaseUrl.endsWith('/chat/completions')) {
+      cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
+    }
+
+    const mappedModel = this.mapModelForOpenAI(model);
+
+    const messages: any[] = [];
+    if (systemInstruction) {
+      messages.push({ role: "system", content: systemInstruction });
+    }
+
+    const userContent: any[] = [{ type: "text", text: prompt }];
+    if (imageBase64) {
+      const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
+      userContent.push({
+        type: "image_url",
+        image_url: { url: formattedImage }
+      });
+    }
+
+    messages.push({ role: "user", content: userContent });
+
+    const body = {
+      model: mappedModel,
+      temperature: 0,
+      stream: false,
+      messages
+    };
+
+    console.log(`[MediTrans] Calling ShopAIKey/Proxy Non-Stream (${cleanBaseUrl}) using model: ${mappedModel}`);
+
+    const response = await fetch(cleanBaseUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${key}`
+      },
+      body: JSON.stringify(body),
+      signal
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`ShopAIKey/Proxy Error (${response.status}): ${errText}`);
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || "";
+  }
+
+  public async testSingleKeyTranslation(key: string, sampleText: string = "Hello world! Testing translation AI."): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }> {
+    if (!key || !key.trim()) return { success: false, error: "API Key trống" };
+    const cleanKey = key.trim();
+    const startTime = Date.now();
+    const prompt = `Dịch câu sau sang tiếng Việt ngắn gọn: "${sampleText}"`;
+    const systemInstruction = "Bạn là dịch giả y khoa. Dịch chính xác và ngắn gọn.";
+
+    try {
+      if (cleanKey.startsWith('sk-')) {
+        const text = await this.callOpenAINonStream(cleanKey, this.modelName, systemInstruction, prompt, "", undefined);
+        const latencyMs = Date.now() - startTime;
+        return { success: true, resultText: text || "Thành công", latencyMs };
+      } else {
+        const ai = new GoogleGenerativeAI(cleanKey);
+        const genModel = ai.getGenerativeModel({ model: this.modelName });
+        const res = await genModel.generateContent(`${systemInstruction}\n${prompt}`);
+        const response = await res.response;
+        const text = response.text()?.trim();
+        const latencyMs = Date.now() - startTime;
+        return { success: true, resultText: text || "Thành công", latencyMs };
+      }
+    } catch (err: any) {
+      return { success: false, error: err.message || "Lỗi không xác định" };
+    }
+  }
+
+  public async testSingleKey(key: string): Promise<boolean> {
+    if (!key || !key.trim()) return false;
+    const cleanKey = key.trim();
+    if (cleanKey.startsWith('sk-')) {
+      try {
+        const baseUrl = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customBaseUrl') : null) || 'https://api.shopaikey.com/v1';
+        let cleanBaseUrl = baseUrl.trim().replace(/\/+$/, '');
+        if (!cleanBaseUrl.endsWith('/chat/completions')) {
+          cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
+        }
+        const response = await fetch(cleanBaseUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${cleanKey}`
+          },
+          body: JSON.stringify({
+            model: this.mapModelForOpenAI(this.modelName),
+            messages: [{ role: 'user', content: 'hi' }],
+            max_tokens: 5
+          })
+        });
+        return response.ok;
+      } catch (e) {
+        return false;
+      }
+    } else {
+      try {
+        const ai = new GoogleGenerativeAI(cleanKey);
+        const genModel = ai.getGenerativeModel({ model: this.modelName });
+        const res = await genModel.generateContent('Hi');
+        return !!res;
+      } catch (e) {
+        return false;
+      }
+    }
   }
 
   public getStatusInfo() {
@@ -119,11 +360,10 @@ export class GeminiService implements TranslationService {
   }
 
   async checkAvailableKeys(): Promise<{ manualKey: boolean }> {
-    const manualKey = this.apiKeys[0]; 
-    
-    return {
-      manualKey: !!manualKey
-    };
+    const manualKey = this.apiKeys[0];
+    if (!manualKey) return { manualKey: false };
+    const isActive = await this.testSingleKey(manualKey);
+    return { manualKey: isActive };
   }
 
   async openKeySelection(): Promise<void> {
@@ -171,6 +411,36 @@ QUY TẮC BẮT BUỘC:
         throw new Error("Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.");
       }
 
+      // Handle ShopAIKey / OpenAI Proxy Key (sk-...)
+      if (key.startsWith('sk-')) {
+        try {
+          let fullText = "";
+          for await (const chunkText of this.callOpenAIStream(key, requestModel, systemInstruction, prompt, imageBuffer, signal)) {
+            if (signal?.aborted) break;
+            const cleaned = chunkText.replace(/(\s*\.\s*){4,}/g, ' ... ');
+            fullText += cleaned;
+            yield cleaned;
+          }
+          GeminiService.lastSuccessfulKey = key;
+          if (!fullText) {
+            throw new Error("Proxy API returned no text.");
+          }
+          console.log(`[MediTrans] Translation for page: ${pageNumber} finished via ShopAIKey/Proxy in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
+          break;
+        } catch (error: any) {
+          if (signal?.aborted || error.message === "Translation aborted") {
+            throw new Error("Translation aborted");
+          }
+          const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
+          if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
+            retryCount++;
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      // Handle Standard Google Gemini Key (AIzaSy...)
       try {
         const fetchStartTime = Date.now();
         const genModel = ai.getGenerativeModel({ 
@@ -186,7 +456,7 @@ QUY TẮC BẮT BUỘC:
           {
             inlineData: {
               mimeType: "image/jpeg",
-              data: imageBuffer.split(",")[1],
+              data: imageBuffer.split(",")[1] || imageBuffer,
             },
           },
         ]);
@@ -213,7 +483,6 @@ QUY TẮC BẮT BUỘC:
           }
 
           if (chunkText) {
-            // Basic deduplication or cleaning of long period sequences
             chunkText = chunkText.replace(/(\s*\.\s*){4,}/g, ' ... ');
             fullText += chunkText;
             yield chunkText;
@@ -249,11 +518,9 @@ QUY TẮC BẮT BUỘC:
           const canRotate = this.rotateKey(key, isQuotaError || isPermissionDeniedError);
           retryCount++;
           if (canRotate) {
-            // Immediate retry with different key
             await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
             continue;
           }
-          // Backoff if no keys left or fallback
           const delay = Math.pow(1.5, retryCount) * 1000 + Math.random() * 500;
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
@@ -296,6 +563,23 @@ QUY TẮC BẮT BUỘC:
 6. XỬ LÝ DẤU CHẤM LẶP LẠI (MỤC LỤC): Dọn dẹp các chuỗi dấu chấm nối dài (dot leaders) thành 3-5 dấu chấm hoặc danh sách sạch sẽ.`;
       const prompt = `Dịch trực tiếp toàn bộ văn bản trong ảnh trang y khoa này sang tiếng Việt. Xuất duy nhất bản dịch tiếng Việt, tuyệt đối KHÔNG in lại văn bản gốc tiếng Anh.`;
 
+      if (key.startsWith('sk-')) {
+        try {
+          const text = await this.callOpenAINonStream(key, requestModel, systemInstruction, prompt, imageBuffer, signal);
+          const resultText = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
+          GeminiService.lastSuccessfulKey = key;
+          return resultText;
+        } catch (error: any) {
+          if (signal?.aborted) throw new Error("Translation aborted");
+          const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
+          if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
+            retryCount++;
+            continue;
+          }
+          throw error;
+        }
+      }
+
       try {
         const genModel = ai.getGenerativeModel({ 
           model: requestModel,
@@ -305,7 +589,7 @@ QUY TẮC BẮT BUỘC:
 
         const result = await genModel.generateContent([
           prompt, 
-          { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] } }
+          { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] || imageBuffer } }
         ]);
 
         const response = await result.response;
@@ -344,6 +628,11 @@ QUY TẮC BẮT BUỘC:
       ({ ai, key } = await this.acquireKeyAndInstance());
     } catch (e) {
       throw new Error("Không tìm thấy API Key.");
+    }
+
+    if (key.startsWith('sk-')) {
+      const text = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, "", undefined);
+      return JSON.parse(text.replace(/```json\n?|```/g, '').trim());
     }
 
     try {
@@ -386,6 +675,10 @@ QUY TẮC BẮT BUỘC:
     const systemInstruction = `OCR Y KHOA: Trích xuất văn bản chính xác.`;
     const prompt = "Hãy trích xuất văn bản từ hình ảnh này.";
 
+    if (key.startsWith('sk-')) {
+      return await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, imageBuffer, undefined);
+    }
+
     try {
       const genModel = ai.getGenerativeModel({ 
         model: this.modelName,
@@ -394,7 +687,7 @@ QUY TẮC BẮT BUỘC:
       });
       const result = await genModel.generateContent([
         prompt, 
-        { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] } }
+        { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] || imageBuffer } }
       ]);
       const response = await result.response;
       return response.text()?.trim() || "";
@@ -410,6 +703,14 @@ QUY TẮC BẮT BUỘC:
     let ai, key;
     try { ({ ai, key } = await this.acquireKeyAndInstance()); } catch (e) { throw new Error("API Key error."); }
 
+    if (key.startsWith('sk-')) {
+      for await (const chunkText of this.callOpenAIStream(key, this.modelName, systemInstruction, prompt, "", signal)) {
+        if (signal?.aborted) break;
+        yield chunkText;
+      }
+      return;
+    }
+
     try {
       const genModel = ai.getGenerativeModel({ 
         model: this.modelName,
@@ -424,3 +725,4 @@ QUY TẮC BẮT BUỘC:
     } catch (error: any) { throw error; }
   }
 }
+

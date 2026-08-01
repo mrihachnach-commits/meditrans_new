@@ -58,6 +58,7 @@ import {
   User as UserIcon,
   UserPlus,
   Users,
+  Globe,
   Share2,
   Pencil,
   X,
@@ -74,7 +75,8 @@ import {
   ScrollText,
   FileSearch,
   BookOpen,
-  Sparkles
+  Sparkles,
+  Play
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -370,9 +372,25 @@ export default function App() {
     return saved || 'gemini-flash-lite-latest';
   });
 
+  const [customBaseUrl, setCustomBaseUrl] = useState<string>(() => {
+    return localStorage.getItem('mediTrans_customBaseUrl') || 'https://api.shopaikey.com/v1';
+  });
+
+  const [customOpenAIModel, setCustomOpenAIModel] = useState<string>(() => {
+    return localStorage.getItem('mediTrans_customOpenAIModel') || '';
+  });
+
   useEffect(() => {
     localStorage.setItem('mediTrans_selectedEngine', selectedEngine);
   }, [selectedEngine]);
+  
+  useEffect(() => {
+    localStorage.setItem('mediTrans_customBaseUrl', customBaseUrl);
+  }, [customBaseUrl]);
+
+  useEffect(() => {
+    localStorage.setItem('mediTrans_customOpenAIModel', customOpenAIModel);
+  }, [customOpenAIModel]);
   
   const [engineKeys, setEngineKeys] = useState<Record<TranslationEngine, string>>(() => {
     const saved = localStorage.getItem('mediTrans_engineKeys');
@@ -397,6 +415,62 @@ export default function App() {
   });
   const [showSettings, setShowSettings] = useState(false);
   const [showApiSettings, setShowApiSettings] = useState(false);
+  const [showProxyModal, setShowProxyModal] = useState(false);
+  const [activeKeyFolder, setActiveKeyFolder] = useState<'all' | 'gemini' | 'shopaikey'>(() => {
+    return (localStorage.getItem('mediTrans_activeKeyFolder') as any) || 'all';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('mediTrans_activeKeyFolder', activeKeyFolder);
+  }, [activeKeyFolder]);
+
+  const isKeyShopAIKey = (k: { value?: string; engine?: string }) => {
+    const val = (k.value || '').trim();
+    const eng = (k.engine || '').toLowerCase();
+    return val.startsWith('sk-') || eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy');
+  };
+
+  const matchesKeyFolder = (k: { value?: string; engine?: string }, folder: 'all' | 'gemini' | 'shopaikey') => {
+    if (folder === 'all') return true;
+    const isShop = isKeyShopAIKey(k);
+    if (folder === 'shopaikey') return isShop;
+    if (folder === 'gemini') return !isShop;
+    return true;
+  };
+
+  const [testingKeyId, setTestingKeyId] = useState<string | null>(null);
+  const [keyTestResults, setKeyTestResults] = useState<Record<string, { success: boolean; resultText?: string; error?: string; latencyMs?: number }>>({});
+  const [newKeyTestResult, setNewKeyTestResult] = useState<{ success?: boolean; resultText?: string; error?: string; latencyMs?: number; loading?: boolean } | null>(null);
+
+  const handleTestKey = async (keyId: string, keyValue: string) => {
+    setTestingKeyId(keyId);
+    try {
+      const res = await translationService.current.testSingleKeyTranslation(keyValue, "Hello world! Testing translation AI.");
+      setKeyTestResults(prev => ({
+        ...prev,
+        [keyId]: res
+      }));
+    } catch (err: any) {
+      setKeyTestResults(prev => ({
+        ...prev,
+        [keyId]: { success: false, error: err.message || "Lỗi khi chạy thử" }
+      }));
+    } finally {
+      setTestingKeyId(null);
+    }
+  };
+
+  const handleTestNewKey = async () => {
+    if (!newKey.value.trim()) return;
+    setNewKeyTestResult({ loading: true });
+    try {
+      const res = await translationService.current.testSingleKeyTranslation(newKey.value, "Hello world! Testing translation AI.");
+      setNewKeyTestResult({ ...res, loading: false });
+    } catch (err: any) {
+      setNewKeyTestResult({ success: false, error: err.message || "Lỗi khi chạy thử", loading: false });
+    }
+  };
+
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [selectedPagesToDownload, setSelectedPagesToDownload] = useState<number[]>([]);
   const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
@@ -809,7 +883,7 @@ export default function App() {
       if (user && userKeys.length > 0) {
         const vaultKeysToCheck = userKeys.filter(k => {
           const vEng = (k.engine || 'gemini').toLowerCase();
-          return vEng === 'gemini' || vEng.includes('gemini');
+          return vEng === 'gemini' || vEng.includes('gemini') || vEng.includes('shopaikey') || vEng.includes('openai') || k.value?.startsWith('sk-') || k.value?.startsWith('AIzaSy');
         });
         
         // Run checks in parallel
@@ -3029,19 +3103,22 @@ export default function App() {
       console.log(`[MediTrans AI] Processing Vault Keys:`, userKeys.map(k => ({ id: k.id, name: k.name, engine: k.engine })));
     }
     
-    // 1. Build list of keys from vault
+    // 1. Build list of keys from vault filtered by activeKeyFolder
     let allKeys: string[] = [];
     let selectedVaultKeyName = "";
     let primaryKey = "";
 
     const isGeminiEngine = (engine: string) => {
       const e = (engine || 'gemini').toLowerCase();
-      return e === 'gemini' || e.includes('gemini') || e.includes('flash') || e.includes('pro');
+      return e === 'gemini' || e.includes('gemini') || e.includes('flash') || e.includes('pro') || e.includes('shopaikey') || e.includes('openai') || e.includes('sk');
     };
 
-    // Prioritize selected key from vault
+    // Filter userKeys by active folder (gemini vs shopaikey vs all)
+    const folderKeys = userKeys.filter(k => matchesKeyFolder(k, activeKeyFolder));
+
+    // Prioritize selected key from vault (if it belongs to active folder)
     if (user && selectedKeyId) {
-      const vaultKey = userKeys.find(k => k.id === selectedKeyId);
+      const vaultKey = folderKeys.find(k => k.id === selectedKeyId);
       if (vaultKey) {
         const engineMatches = vaultKey.engine === currentEngineType || 
                              (currentEngineType === 'gemini' && isGeminiEngine(vaultKey.engine));
@@ -3050,16 +3127,16 @@ export default function App() {
           primaryKey = vaultKey.value;
           selectedVaultKeyName = vaultKey.name;
           if (primaryKey) allKeys.push(primaryKey);
-          console.log(`[MediTrans AI] Selected primary key from vault: ${vaultKey.name}`);
+          console.log(`[MediTrans AI] Selected primary key from vault (${activeKeyFolder}): ${vaultKey.name}`);
         } else {
           console.warn(`[MediTrans AI] Selected key ${vaultKey.name} (engine: ${vaultKey.engine}) does not match current engine ${selectedEngine}`);
         }
       }
     }
 
-    // Add other compatible keys from vault for rotation
-    if (user && userKeys.length > 0) {
-      const otherVaultKeys = userKeys
+    // Add other compatible keys from active folder in vault for rotation
+    if (user && folderKeys.length > 0) {
+      const otherVaultKeys = folderKeys
         .filter(k => {
           const engineMatches = k.engine === currentEngineType || 
                                (currentEngineType === 'gemini' && isGeminiEngine(k.engine));
@@ -3069,7 +3146,7 @@ export default function App() {
         .map(k => k.value);
       
       if (otherVaultKeys.length > 0) {
-        console.log(`[MediTrans AI] Found ${otherVaultKeys.length} additional compatible keys in vault`);
+        console.log(`[MediTrans AI] Found ${otherVaultKeys.length} additional compatible keys in folder '${activeKeyFolder}'`);
       }
       allKeys = [...allKeys, ...otherVaultKeys];
     }
@@ -3109,7 +3186,7 @@ export default function App() {
     } else {
       console.warn(`[MediTrans AI] Engine: Gemini Flash - NO API KEYS AVAILABLE`);
     }
-  }, [selectedEngine, engineKeys, user, selectedKeyId, userKeys, isKeysLoading]);
+  }, [selectedEngine, engineKeys, user, selectedKeyId, userKeys, isKeysLoading, activeKeyFolder]);
 
   // Handle Focus Mode (FullScreen) transitions
   useEffect(() => {
@@ -5272,10 +5349,30 @@ export default function App() {
               </div>
               
               <div className="flex-1 overflow-y-auto p-6 space-y-6 no-scrollbar">
+                {/* Button to open dedicated Proxy Engine Modal */}
+                <div className="bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-100 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-sky-500 text-white p-2.5 rounded-xl shadow-md shadow-sky-200 shrink-0">
+                      <Globe className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-800">Cấu hình Proxy Engine (ShopAIKey)</h4>
+                      <p className="text-[11px] text-slate-500 leading-tight">Tuỳ chỉnh Base URL & Model cho API Key `sk-...`</p>
+                    </div>
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => setShowProxyModal(true)}
+                    className="px-3 py-2 bg-white hover:bg-sky-50 text-sky-700 border border-sky-200 rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all shrink-0 active:scale-95 cursor-pointer"
+                  >
+                    <Settings className="w-3.5 h-3.5" /> Mở cửa sổ cấu hình
+                  </button>
+                </div>
+
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">
-                      API Keys cho Gemini AI
+                      API Keys cho Gemini AI / ShopAIKey
                     </label>
                     {currentKeyRef.current?.split(',').length! > 1 && (
                       <div className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-50 text-emerald-600 rounded-full border border-emerald-100 animate-pulse">
@@ -5287,7 +5384,7 @@ export default function App() {
                 </div>
                 
                 {/* Key Vault Section */}
-                <div className="pt-4">
+                <div className="pt-2">
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
                       <ShieldCheck className="w-4 h-4 text-indigo-500" />
@@ -5328,6 +5425,77 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="space-y-3">
+                      {/* Folder Tabs for Key Vault */}
+                      <div className="bg-slate-100/90 p-1 rounded-2xl flex items-center gap-1 border border-slate-200/60">
+                        <button
+                          type="button"
+                          onClick={() => setActiveKeyFolder('all')}
+                          className={cn(
+                            "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                            activeKeyFolder === 'all'
+                              ? "bg-white text-indigo-700 shadow-sm border border-slate-200"
+                              : "text-slate-500 hover:text-slate-800"
+                          )}
+                        >
+                          <Folder className="w-3.5 h-3.5 text-slate-600" />
+                          <span>Tất cả</span>
+                          <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.2 rounded-full font-extrabold">
+                            {userKeys.length}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setActiveKeyFolder('gemini')}
+                          className={cn(
+                            "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                            activeKeyFolder === 'gemini'
+                              ? "bg-white text-indigo-700 shadow-sm border border-indigo-200"
+                              : "text-slate-500 hover:text-slate-800"
+                          )}
+                        >
+                          <Cpu className="w-3.5 h-3.5 text-indigo-500" />
+                          <span>Thư mục Gemini</span>
+                          <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full font-extrabold">
+                            {userKeys.filter(k => !isKeyShopAIKey(k)).length}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setActiveKeyFolder('shopaikey')}
+                          className={cn(
+                            "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                            activeKeyFolder === 'shopaikey'
+                              ? "bg-white text-sky-700 shadow-sm border border-sky-200"
+                              : "text-slate-500 hover:text-slate-800"
+                          )}
+                        >
+                          <Globe className="w-3.5 h-3.5 text-sky-500" />
+                          <span>Thư mục ShopAIKey</span>
+                          <span className="text-[9px] bg-sky-100 text-sky-700 px-1.5 py-0.2 rounded-full font-extrabold">
+                            {userKeys.filter(k => isKeyShopAIKey(k)).length}
+                          </span>
+                        </button>
+                      </div>
+
+                      {/* Folder Scope Indicator Banner */}
+                      <div className="bg-sky-50/80 border border-sky-200/80 rounded-xl p-2.5 flex items-center justify-between text-[11px] text-sky-900 shadow-sm">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4 text-sky-600 shrink-0" />
+                          <span>
+                            <strong>Phạm vi chạy key:</strong> Chỉ kích hoạt key trong{" "}
+                            <span className="underline font-bold">
+                              {activeKeyFolder === 'gemini' 
+                                ? 'Thư mục Google Gemini (chỉ APIKey AIzaSy...)' 
+                                : activeKeyFolder === 'shopaikey' 
+                                ? 'Thư mục ShopAIKey / Proxy (chỉ APIKey sk-...)' 
+                                : 'Tất cả các thư mục'}
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+
                       {isAddingKey && (
                         <motion.div 
                           initial={{ opacity: 0, y: -10 }}
@@ -5337,131 +5505,235 @@ export default function App() {
                           <div className="grid grid-cols-2 gap-3 mb-3">
                             <input 
                               type="text"
-                              placeholder="Tên gợi nhớ (VD: Key 1)"
+                              placeholder="Tên gợi nhớ (VD: Key ShopAIKey 1)"
                               value={newKey.name}
                               onChange={(e) => setNewKey(prev => ({ ...prev, name: e.target.value }))}
                               className="px-3 py-2 bg-white border border-indigo-100 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
                             />
                             <select
-                               value={newKey.engine}
-                               onChange={(e) => setNewKey(prev => ({ ...prev, engine: e.target.value as any }))}
-                               className="px-3 py-2 bg-white border border-indigo-100 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
-                             >
-                               <option value="gemini">Gemini AI</option>
-                               <option value="openai" disabled>OpenAI (Coming soon)</option>
-                             </select>
+                              value={newKey.engine}
+                              onChange={(e) => setNewKey(prev => ({ ...prev, engine: e.target.value as any }))}
+                              className="px-3 py-2 bg-white border border-indigo-100 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
+                            >
+                              <option value="gemini">Google Gemini (AIzaSy...)</option>
+                              <option value="shopaikey">ShopAIKey / OpenAI Proxy (sk-...)</option>
+                            </select>
                           </div>
                           <div className="relative">
                             <input 
                               type={showApiKeys ? "text" : "password"}
-                              placeholder="Dán API Key vào đây..."
+                              placeholder="Dán mã API Key (sk-9rskQZJbZv... hoặc AIzaSy...)"
                               value={newKey.value}
-                              onChange={(e) => setNewKey(prev => ({ ...prev, value: e.target.value }))}
-                              className="w-full pl-3 pr-10 py-2 bg-white border border-indigo-100 rounded-xl text-xs mb-3 focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setNewKey(prev => ({
+                                  ...prev,
+                                  value: val,
+                                  engine: val.trim().startsWith('sk-') ? 'shopaikey' : prev.engine
+                                }));
+                              }}
+                              className="w-full pl-3 pr-10 py-2 bg-white border border-indigo-100 rounded-xl text-xs mb-2 focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
                             />
                             <button
                               type="button"
                               onClick={() => setShowApiKeys(!showApiKeys)}
-                              className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-indigo-600 transition-colors mb-3"
+                              className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-indigo-600 transition-colors mb-2"
                             >
                               {showApiKeys ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                             </button>
                           </div>
-                          <div className="flex justify-end gap-2">
-                            <button 
-                              onClick={() => setIsAddingKey(false)}
-                              className="px-3 py-1.5 text-[10px] font-bold text-slate-500 hover:bg-slate-100 rounded-lg transition-colors"
+                          {newKey.value.trim().startsWith('sk-') && (
+                            <p className="text-[10px] text-sky-600 font-bold mb-3 flex items-center gap-1">
+                              ✨ Đã tự động nhận diện API Key định dạng ShopAIKey / OpenAI (sk-...)
+                            </p>
+                          )}
+                          <div className="flex justify-between items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleTestNewKey}
+                              disabled={!newKey.value.trim() || newKeyTestResult?.loading}
+                              className="px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 rounded-lg text-[10px] font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
                             >
-                              Hủy
+                              {newKeyTestResult?.loading ? (
+                                <>
+                                  <Loader2 className="w-3 h-3 animate-spin" /> Đang dịch thử...
+                                </>
+                              ) : (
+                                <>
+                                  <Play className="w-3 h-3 text-sky-600" /> Dịch thử 1 đoạn
+                                </>
+                              )}
                             </button>
-                            <button 
-                              onClick={handleAddKey}
-                              className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-[10px] font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100"
-                            >
-                              Lưu vào Vault
-                            </button>
+                            <div className="flex gap-2">
+                              <button 
+                                onClick={() => {
+                                  setIsAddingKey(false);
+                                  setNewKeyTestResult(null);
+                                }}
+                                className="px-3 py-1.5 text-[10px] font-bold text-slate-500 hover:bg-slate-100 rounded-lg transition-colors"
+                              >
+                                Hủy
+                              </button>
+                              <button 
+                                onClick={handleAddKey}
+                                className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-[10px] font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100"
+                              >
+                                Lưu vào Vault
+                              </button>
+                            </div>
                           </div>
+                          {newKeyTestResult && !newKeyTestResult.loading && (
+                            <div className={cn(
+                              "mt-3 p-2.5 rounded-xl text-[11px] leading-relaxed border font-sans",
+                              newKeyTestResult.success ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-rose-50 border-rose-200 text-rose-800"
+                            )}>
+                              {newKeyTestResult.success ? (
+                                <p className="flex items-start gap-1.5">
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                                  <span>
+                                    <strong>Dịch thử thành công ({((newKeyTestResult.latencyMs || 0)/1000).toFixed(2)}s):</strong> "{newKeyTestResult.resultText}"
+                                  </span>
+                                </p>
+                              ) : (
+                                <p className="flex items-start gap-1.5">
+                                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                                  <span>
+                                    <strong>Lỗi:</strong> {newKeyTestResult.error}
+                                  </span>
+                                </p>
+                              )}
+                            </div>
+                          )}
                         </motion.div>
                       )}
 
                       <div className="max-h-[300px] overflow-y-auto pr-2 space-y-2 no-scrollbar">
-                        {userKeys.length === 0 ? (
-                          <p className="text-[10px] text-slate-400 text-center py-4 italic">Chưa có Key nào trong kho lưu trữ.</p>
+                        {userKeys.filter(k => matchesKeyFolder(k, activeKeyFolder)).length === 0 ? (
+                          <p className="text-[11px] text-slate-400 text-center py-6 italic border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
+                            Không có Key nào trong {activeKeyFolder === 'gemini' ? 'Thư mục Google Gemini' : activeKeyFolder === 'shopaikey' ? 'Thư mục ShopAIKey / Proxy' : 'kho lưu trữ'}.
+                          </p>
                         ) : (
-                          userKeys.map((key) => (
+                          userKeys.filter(k => matchesKeyFolder(k, activeKeyFolder)).map((key) => (
                             <div 
                               key={key.id}
                               className={cn(
-                                "flex items-center justify-between p-3 rounded-xl border transition-all group",
+                                "p-3 rounded-xl border transition-all group space-y-2",
                                 selectedKeyId === key.id 
-                                  ? "bg-indigo-50 border-indigo-200 ring-1 ring-indigo-200" 
+                                  ? "bg-indigo-50/70 border-indigo-200 ring-1 ring-indigo-200" 
                                   : "bg-white border-slate-100 hover:border-slate-200"
                               )}
                             >
-                              <div 
-                                className="flex-1 cursor-pointer"
-                                onClick={() => setSelectedKeyId(key.id)}
-                              >
-                                <div className="flex items-center gap-2 mb-0.5">
-                                  <span className="text-xs font-bold text-slate-700">{key.name}</span>
-                                  {key.status && (
-                                    <span className={cn(
-                                      "text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter",
-                                      key.status === 'active' ? "bg-emerald-100 text-emerald-600" : "bg-rose-100 text-rose-600"
-                                    )}>
-                                      {key.status === 'active' ? 'Hoạt động' : 'Lỗi'}
-                                    </span>
-                                  )}
-                                  {key.ownerId !== user.uid && (
-                                    <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter bg-indigo-100 text-indigo-600 flex items-center gap-1">
-                                      <Users className="w-2 h-2" />
-                                      Được chia sẻ
-                                    </span>
+                              <div className="flex items-center justify-between">
+                                <div 
+                                  className="flex-1 cursor-pointer"
+                                  onClick={() => setSelectedKeyId(key.id)}
+                                >
+                                  <div className="flex items-center gap-2 mb-0.5 flex-wrap">
+                                    <span className="text-xs font-bold text-slate-700">{key.name}</span>
+                                    {isKeyShopAIKey(key) ? (
+                                      <span className="text-[8px] bg-sky-100 text-sky-700 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1">
+                                        <Globe className="w-2.5 h-2.5" /> ShopAIKey
+                                      </span>
+                                    ) : (
+                                      <span className="text-[8px] bg-indigo-100 text-indigo-700 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1">
+                                        <Cpu className="w-2.5 h-2.5" /> Gemini
+                                      </span>
+                                    )}
+                                    {key.status && (
+                                      <span className={cn(
+                                        "text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter",
+                                        key.status === 'active' ? "bg-emerald-100 text-emerald-600" : "bg-rose-100 text-rose-600"
+                                      )}>
+                                        {key.status === 'active' ? 'Hoạt động' : 'Lỗi'}
+                                      </span>
+                                    )}
+                                    {key.ownerId !== user.uid && (
+                                      <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter bg-indigo-100 text-indigo-600 flex items-center gap-1">
+                                        <Users className="w-2 h-2" />
+                                        Được chia sẻ
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[10px] text-slate-400 font-mono truncate max-w-[200px]">
+                                    {key.value.substring(0, 8)}••••••••{key.value.substring(key.value.length - 4)}
+                                  </p>
+                                </div>
+
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleTestKey(key.id, key.value)}
+                                    disabled={testingKeyId === key.id}
+                                    className="px-2 py-1 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 rounded-lg text-[9px] font-bold flex items-center gap-1 transition-all disabled:opacity-50"
+                                    title="Chạy thử dịch 1 đoạn văn mẫu"
+                                  >
+                                    {testingKeyId === key.id ? (
+                                      <Loader2 className="w-3 h-3 animate-spin text-sky-600" />
+                                    ) : (
+                                      <Play className="w-3 h-3 text-sky-600" />
+                                    )}
+                                    <span>Dịch thử</span>
+                                  </button>
+
+                                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    {key.ownerId === user.uid && (
+                                      <>
+                                        <button 
+                                          onClick={() => {
+                                            setShowRenameKeyModal(key);
+                                            setRenameKeyName(key.name);
+                                          }}
+                                          className="p-1.5 hover:bg-slate-50 text-slate-400 hover:text-slate-600 rounded-lg transition-colors"
+                                          title="Đổi tên Key"
+                                        >
+                                          <Pencil className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button 
+                                          onClick={() => setShowShareKeyModal(key)}
+                                          className="p-1.5 hover:bg-indigo-50 text-indigo-400 hover:text-indigo-500 rounded-lg transition-colors"
+                                          title="Chia sẻ Key"
+                                        >
+                                          <Share2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </>
+                                    )}
+                                    <button 
+                                      onClick={() => setKeyToDelete(key)}
+                                      className="p-1.5 hover:bg-rose-50 text-rose-400 hover:text-rose-500 rounded-lg transition-colors"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                    {selectedKeyId === key.id && (
+                                      <div className="bg-emerald-500 p-1 rounded-full">
+                                        <CheckCircle2 className="w-3 h-3 text-white" />
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {keyTestResults[key.id] && (
+                                <div className={cn(
+                                  "p-2 rounded-lg text-[10px] leading-relaxed border font-sans",
+                                  keyTestResults[key.id].success ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-rose-50 border-rose-200 text-rose-800"
+                                )}>
+                                  {keyTestResults[key.id].success ? (
+                                    <p className="flex items-start gap-1">
+                                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                                      <span>
+                                        <strong>OK ({((keyTestResults[key.id].latencyMs || 0)/1000).toFixed(2)}s):</strong> "{keyTestResults[key.id].resultText}"
+                                      </span>
+                                    </p>
+                                  ) : (
+                                    <p className="flex items-start gap-1">
+                                      <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />
+                                      <span>
+                                        <strong>Lỗi:</strong> {keyTestResults[key.id].error}
+                                      </span>
+                                    </p>
                                   )}
                                 </div>
-                                <p className="text-[10px] text-slate-400 font-mono truncate max-w-[200px]">
-                                  {key.value.substring(0, 8)}••••••••{key.value.substring(key.value.length - 4)}
-                                </p>
-                                {key.lastUsed && (
-                                  <p className="text-[8px] text-slate-300 italic mt-0.5">
-                                    Dùng lần cuối: {new Date(key.lastUsed.toDate()).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}
-                                  </p>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                {key.ownerId === user.uid && (
-                                  <>
-                                    <button 
-                                      onClick={() => {
-                                        setShowRenameKeyModal(key);
-                                        setRenameKeyName(key.name);
-                                      }}
-                                      className="p-1.5 hover:bg-slate-50 text-slate-400 hover:text-slate-600 rounded-lg transition-colors"
-                                      title="Đổi tên Key"
-                                    >
-                                      <Pencil className="w-3.5 h-3.5" />
-                                    </button>
-                                    <button 
-                                      onClick={() => setShowShareKeyModal(key)}
-                                      className="p-1.5 hover:bg-indigo-50 text-indigo-400 hover:text-indigo-500 rounded-lg transition-colors"
-                                      title="Chia sẻ Key"
-                                    >
-                                      <Share2 className="w-3.5 h-3.5" />
-                                    </button>
-                                  </>
-                                )}
-                                <button 
-                                  onClick={() => setKeyToDelete(key)}
-                                  className="p-1.5 hover:bg-rose-50 text-rose-400 hover:text-rose-500 rounded-lg transition-colors"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                                {selectedKeyId === key.id && (
-                                  <div className="bg-emerald-500 p-1 rounded-full">
-                                    <CheckCircle2 className="w-3 h-3 text-white" />
-                                  </div>
-                                )}
-                              </div>
+                              )}
                             </div>
                           ))
                         )}
@@ -5477,6 +5749,131 @@ export default function App() {
                   className="flex-1 px-6 py-3 rounded-xl text-sm font-bold bg-indigo-600 text-white hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200"
                 >
                   Hoàn tất
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Proxy Engine Dedicated Modal */}
+      <AnimatePresence>
+        {showProxyModal && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowProxyModal(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="relative bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden flex flex-col z-10"
+            >
+              <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="bg-sky-500 text-white p-2.5 rounded-2xl shadow-md shadow-sky-200">
+                    <Globe className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-800">Cấu hình Proxy Engine (ShopAIKey)</h3>
+                    <p className="text-[10px] text-slate-400">Thiết lập dành cho các API Key dạng `sk-...`</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowProxyModal(false)}
+                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
+                >
+                  <X className="w-4 h-4 text-slate-400" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-5">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-700 block">
+                    1. API Base URL (Máy chủ API Proxy):
+                  </label>
+                  <input 
+                    type="text"
+                    value={customBaseUrl}
+                    onChange={(e) => {
+                      setCustomBaseUrl(e.target.value);
+                      localStorage.setItem('mediTrans_customBaseUrl', e.target.value);
+                    }}
+                    placeholder="https://api.shopaikey.com/v1"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:ring-2 focus:ring-sky-500 outline-none text-slate-800"
+                  />
+                  <div className="flex gap-2 pt-0.5">
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setCustomBaseUrl('https://api.shopaikey.com/v1');
+                        localStorage.setItem('mediTrans_customBaseUrl', 'https://api.shopaikey.com/v1');
+                      }}
+                      className="px-3 py-1 bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 rounded-lg text-[10px] font-bold transition-colors"
+                    >
+                      Mặc định ShopAIKey
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setCustomBaseUrl('https://api.openai.com/v1');
+                        localStorage.setItem('mediTrans_customBaseUrl', 'https://api.openai.com/v1');
+                      }}
+                      className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[10px] font-bold transition-colors"
+                    >
+                      OpenAI Official
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2 pt-3 border-t border-slate-100">
+                  <label className="text-xs font-bold text-slate-700 block">
+                    2. Model Dịch Thuật Proxy:
+                  </label>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text"
+                      value={customOpenAIModel}
+                      onChange={(e) => {
+                        setCustomOpenAIModel(e.target.value);
+                        localStorage.setItem('mediTrans_customOpenAIModel', e.target.value);
+                      }}
+                      placeholder="Mặc định theo hệ thống..."
+                      className="flex-1 px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:ring-2 focus:ring-sky-500 outline-none text-slate-800"
+                    />
+                    <select
+                      value={customOpenAIModel}
+                      onChange={(e) => {
+                        setCustomOpenAIModel(e.target.value);
+                        localStorage.setItem('mediTrans_customOpenAIModel', e.target.value);
+                      }}
+                      className="px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-bold outline-none cursor-pointer"
+                    >
+                      <option value="">⚙️ Mặc định hệ thống</option>
+                      <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+                      <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+                      <option value="gpt-4o-mini">gpt-4o-mini</option>
+                      <option value="gpt-4o">gpt-4o</option>
+                      <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
+                    </select>
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-tight">
+                    Để trống sẽ dùng model Gemini tương ứng mặc định của hệ thống.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+                <button 
+                  type="button"
+                  onClick={() => setShowProxyModal(false)}
+                  className="px-6 py-2.5 bg-sky-600 text-white font-bold text-xs rounded-xl hover:bg-sky-700 transition-all shadow-md shadow-sky-200"
+                >
+                  Lưu & Đóng cửa sổ
                 </button>
               </div>
             </motion.div>
