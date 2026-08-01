@@ -102,10 +102,29 @@ export class GeminiService implements TranslationService {
   }
 
   private mapModelForOpenAI(modelName: string): string {
-    const customModel = typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customOpenAIModel') : null;
-    if (customModel && customModel.trim()) {
-      return customModel.trim();
+    const customNormal = typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customOpenAIModelNormal') : null;
+    const customDeep = typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customOpenAIModelDeep') : null;
+    const legacyCustom = typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customOpenAIModel') : null;
+
+    const isDeepMode = modelName === 'gemini-3.6-flash' || modelName === 'gemini-3-flash-preview' || modelName.toLowerCase().includes('deep') || modelName.toLowerCase().includes('pro');
+
+    if (isDeepMode) {
+      if (customDeep && customDeep.trim()) {
+        return customDeep.trim();
+      }
+      if (customNormal && customNormal.trim()) {
+        return customNormal.trim();
+      }
+    } else {
+      if (customNormal && customNormal.trim()) {
+        return customNormal.trim();
+      }
     }
+
+    if (legacyCustom && legacyCustom.trim()) {
+      return legacyCustom.trim();
+    }
+
     if (modelName === 'gemini-flash-lite-latest' || modelName === 'gemini-flash') {
       return 'gemini-1.5-flash';
     }
