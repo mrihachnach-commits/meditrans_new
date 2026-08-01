@@ -38,6 +38,26 @@
   @apply mt-8 mb-4 first:mt-0;
 }
 
+.markdown-body table {
+  @apply w-full border-collapse border border-slate-200 my-4 text-sm rounded-xl overflow-hidden shadow-sm block sm:table overflow-x-auto;
+}
+
+.markdown-body th {
+  @apply bg-slate-100/90 text-slate-800 font-bold p-3 border border-slate-200 text-left text-xs uppercase tracking-wider whitespace-nowrap;
+}
+
+.markdown-body td {
+  @apply p-3 border border-slate-200 text-slate-700 align-top leading-relaxed min-w-[120px];
+}
+
+.markdown-body tr:nth-child(even) td {
+  @apply bg-slate-50/50;
+}
+
+.markdown-body tr:hover td {
+  @apply bg-indigo-50/30 transition-colors;
+}
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
