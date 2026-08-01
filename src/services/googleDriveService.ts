@@ -265,7 +265,10 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
   const token = await getGoogleOAuthToken();
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+  const timeoutId = setTimeout(() => {
+    console.warn(`[MediTrans AI] Timeout for downloadDriveFileAsArrayBuffer (60s) for file: ${fileId}`);
+    controller.abort();
+  }, 60000); // 60 second timeout
 
   try {
     const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
@@ -288,6 +291,7 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
     return await response.arrayBuffer();
   } catch (error: any) {
     clearTimeout(timeoutId);
+    console.error(`[MediTrans AI] Error in downloadDriveFileAsArrayBuffer for file ${fileId}:`, error);
     if (error.name === 'AbortError') {
       throw new Error("Quá thời gian tải tài liệu từ Google Drive. Vui lòng kiểm tra kết nối mạng.");
     }
