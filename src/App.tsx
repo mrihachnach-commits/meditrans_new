@@ -845,6 +845,40 @@ export default function App() {
     return combined;
   }, [ownedKeys, sharedKeys]);
 
+  const hasValidKeysForFolder = useCallback((folder: 'all' | 'gemini' | 'shopaikey') => {
+    const validVaultKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && k.status !== 'error' && k.value?.trim());
+    if (validVaultKeys.length > 0) return true;
+
+    if (folder === 'gemini' || folder === 'all') {
+      const geminiManual = engineKeys['gemini-flash-lite-latest'] || (import.meta as any).env?.VITE_GEMINI_API_KEY || (process as any).env?.GEMINI_API_KEY;
+      if (geminiManual && geminiManual.trim()) return true;
+    }
+    if (folder === 'shopaikey' || folder === 'all') {
+      const proxyManual = engineKeys['shopaikey'];
+      if (proxyManual && proxyManual.trim()) return true;
+    }
+
+    return false;
+  }, [userKeys, engineKeys]);
+
+  const toggleAutoTranslate = useCallback(() => {
+    if (!autoTranslate) {
+      const folderLabel = activeKeyFolder === 'gemini' 
+        ? 'Google Gemini' 
+        : activeKeyFolder === 'shopaikey' 
+        ? 'ShopAIKey / Proxy' 
+        : 'Tất cả';
+
+      if (!hasValidKeysForFolder(activeKeyFolder)) {
+        showToast(`Nhóm Key hiện tại ('${folderLabel}') chưa có API Key khả dụng. Vui lòng chọn nhóm key khác hoặc thêm Key trước khi bật tự động dịch.`, 'error');
+        setShowApiSettings(true);
+        return;
+      }
+      showToast(`Đã bật Tự Động Dịch với nhóm Key: ${folderLabel}`, 'success');
+    }
+    setAutoTranslate(prev => !prev);
+  }, [autoTranslate, activeKeyFolder, hasValidKeysForFolder]);
+
   const [selectedKeyId, setSelectedKeyId] = useState<string | null>(() => {
     return localStorage.getItem('selected_key_id');
   });
@@ -2816,6 +2850,20 @@ export default function App() {
     setActiveTranslation({ page: targetPage, content: '', status: 'loading' });
 
     try {
+      if (!hasValidKeysForFolder(activeKeyFolder)) {
+        const folderLabel = activeKeyFolder === 'gemini' 
+          ? 'Google Gemini' 
+          : activeKeyFolder === 'shopaikey' 
+          ? 'ShopAIKey / Proxy' 
+          : 'Tất cả';
+        showToast(`Nhóm Key hiện tại ('${folderLabel}') chưa có API Key. Vui lòng chọn đúng nhóm key có sẵn trong Cài đặt.`, "error");
+        setShowApiSettings(true);
+        setIsTranslating(false);
+        setActiveTranslation(null);
+        translatingPagesRef.current.delete(targetPage);
+        return;
+      }
+
       const hasKey = await translationService.current.hasApiKey();
       if (!hasKey) {
         showToast("Vui lòng cấu hình API Key trong Cài đặt.", "error");
@@ -2867,6 +2915,7 @@ export default function App() {
 
   const preTranslatePage = useCallback(async (pageNum: number, signal: AbortSignal, engine?: TranslationEngine) => {
     if (!pdfDoc || pageNum > numPages || translatingPagesRef.current.has(pageNum)) return;
+    if (!hasValidKeysForFolder(activeKeyFolder)) return;
     
     try {
       translatingPagesRef.current.add(pageNum);
@@ -2910,6 +2959,8 @@ export default function App() {
 
   useEffect(() => {
     if (pdfDoc && autoTranslate) {
+      if (!hasValidKeysForFolder(activeKeyFolder)) return;
+
       // Find all pages in the look-ahead window that need translation
       // We only look at a strict window of 'autoTranslateLookAhead' pages from the current page.
       const pagesToBuffer: number[] = [];
@@ -2950,10 +3001,21 @@ export default function App() {
         }, index * 200);
       });
     }
-  }, [currentPage, pdfDoc, autoTranslate, numPages, preTranslatePage, autoTranslateLookAhead]);
+  }, [currentPage, pdfDoc, autoTranslate, numPages, preTranslatePage, autoTranslateLookAhead, activeKeyFolder, hasValidKeysForFolder]);
 
   const startBulkTranslation = async (engine?: TranslationEngine) => {
     if (!pdfDoc || numPages <= 0) return;
+
+    if (!hasValidKeysForFolder(activeKeyFolder)) {
+      const folderLabel = activeKeyFolder === 'gemini' 
+        ? 'Google Gemini' 
+        : activeKeyFolder === 'shopaikey' 
+        ? 'ShopAIKey / Proxy' 
+        : 'Tất cả';
+      showToast(`Nhóm Key hiện tại ('${folderLabel}') chưa có API Key. Vui lòng chọn nhóm key khác hoặc thêm Key trước khi dịch toàn bộ.`, 'error');
+      setShowApiSettings(true);
+      return;
+    }
     
     // If already translating, clicking toggles cancellation
     if (isBulkTranslating) {
@@ -3239,6 +3301,18 @@ export default function App() {
   useEffect(() => {
     if (!pdfDoc || !autoTranslate) return;
 
+    if (!hasValidKeysForFolder(activeKeyFolder)) {
+      setAutoTranslate(false);
+      const folderLabel = activeKeyFolder === 'gemini' 
+        ? 'Google Gemini' 
+        : activeKeyFolder === 'shopaikey' 
+        ? 'ShopAIKey / Proxy' 
+        : 'Tất cả';
+      showToast(`Tự động dịch đã tạm dừng: Nhóm key '${folderLabel}' chưa có API Key khả dụng.`, 'info');
+      setShowApiSettings(true);
+      return;
+    }
+
     // Debounce auto-translation slightly to prevent hammering the API when scrolling super fast
     const timer = setTimeout(() => {
       const translation = translationsRef.current[currentPage];
@@ -3251,7 +3325,7 @@ export default function App() {
     }, 150); // Faster initiation (150ms)
 
     return () => clearTimeout(timer);
-  }, [currentPage, pdfDoc, autoTranslate, isRendering, isTranslating, translateCurrentPage, activeTranslation?.page, translations]);
+  }, [currentPage, pdfDoc, autoTranslate, isRendering, isTranslating, translateCurrentPage, activeTranslation?.page, translations, activeKeyFolder, hasValidKeysForFolder]);
 
   useEffect(() => {
     if (pdfDoc) {
@@ -4181,7 +4255,7 @@ export default function App() {
                   {isTranslating && <div className="h-4 w-px bg-slate-200" />}
 
                   <button 
-                    onClick={() => setAutoTranslate(!autoTranslate)}
+                    onClick={toggleAutoTranslate}
                     className={cn(
                       "flex items-center gap-1.5 px-2 py-0.5 rounded-full transition-all border",
                       autoTranslate 
@@ -4913,7 +4987,7 @@ export default function App() {
               </button>
 
               <button 
-                onClick={() => setAutoTranslate(!autoTranslate)}
+                onClick={toggleAutoTranslate}
                 className={cn(
                   "p-2 rounded-full transition-all relative",
                   autoTranslate ? "text-emerald-600" : "text-slate-400"
@@ -5156,9 +5230,10 @@ export default function App() {
                       </label>
                     </div>
                     <button 
-                      onClick={() => setAutoTranslate(!autoTranslate)}
+                      type="button"
+                      onClick={toggleAutoTranslate}
                       className={cn(
-                        "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none",
+                        "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none cursor-pointer",
                         autoTranslate ? "bg-emerald-500" : "bg-slate-200"
                       )}
                     >
@@ -5167,6 +5242,85 @@ export default function App() {
                         autoTranslate ? "translate-x-6" : "translate-x-1"
                       )} />
                     </button>
+                  </div>
+
+                  {/* Key Group Selector for Auto-Translate */}
+                  <div className="space-y-2 bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                        <Folder className="w-3.5 h-3.5 text-indigo-500" />
+                        Nhóm Key áp dụng dịch thuật:
+                      </span>
+                      {hasValidKeysForFolder(activeKeyFolder) ? (
+                        <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200/60 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                          Key sẵn sàng
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-200/60 px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" />
+                          Chưa có Key
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setActiveKeyFolder('all')}
+                        className={cn(
+                          "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
+                          activeKeyFolder === 'all'
+                            ? "bg-white text-indigo-700 border-indigo-300 shadow-sm"
+                            : "bg-white/60 text-slate-500 border-slate-200 hover:text-slate-800"
+                        )}
+                      >
+                        <span>Tất cả</span>
+                        <span className="text-[9px] bg-slate-200/80 text-slate-700 px-1.5 py-0.2 rounded-full font-extrabold">
+                          {userKeys.length}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setActiveKeyFolder('gemini')}
+                        className={cn(
+                          "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
+                          activeKeyFolder === 'gemini'
+                            ? "bg-white text-indigo-700 border-indigo-300 shadow-sm"
+                            : "bg-white/60 text-slate-500 border-slate-200 hover:text-slate-800"
+                        )}
+                      >
+                        <Cpu className="w-3 h-3 text-indigo-500 shrink-0" />
+                        <span className="truncate">Gemini</span>
+                        <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full font-extrabold">
+                          {userKeys.filter(k => !isKeyShopAIKey(k)).length}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setActiveKeyFolder('shopaikey')}
+                        className={cn(
+                          "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
+                          activeKeyFolder === 'shopaikey'
+                            ? "bg-white text-sky-700 border-sky-300 shadow-sm"
+                            : "bg-white/60 text-slate-500 border-slate-200 hover:text-slate-800"
+                        )}
+                      >
+                        <Globe className="w-3 h-3 text-sky-500 shrink-0" />
+                        <span className="truncate">ShopAIKey</span>
+                        <span className="text-[9px] bg-sky-100 text-sky-700 px-1.5 py-0.2 rounded-full font-extrabold">
+                          {userKeys.filter(k => isKeyShopAIKey(k)).length}
+                        </span>
+                      </button>
+                    </div>
+
+                    {!hasValidKeysForFolder(activeKeyFolder) && (
+                      <p className="text-[10px] text-amber-600 font-medium pt-1 flex items-center gap-1">
+                        ⚠ Vui lòng chọn nhóm key khác hoặc cuộn xuống kho key để thêm Key.
+                      </p>
+                    )}
                   </div>
 
                   {autoTranslate && (
@@ -5189,7 +5343,7 @@ export default function App() {
                         className="w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-indigo-600"
                       />
                       <p className="text-[9px] text-slate-400 italic">
-                        * Tự động dịch trước các trang tiếp theo để trải nghiệm đọc mượt mà hơn.
+                        * Tự động dịch trước các trang tiếp theo theo nhóm Key đã chọn để trải nghiệm đọc mượt mà hơn.
                       </p>
                     </div>
                   )}
