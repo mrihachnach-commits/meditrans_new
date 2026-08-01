@@ -990,18 +990,6 @@ export default function App() {
     }
   };
 
-  // Safety timeout to reset loading states if they get stuck
-  useEffect(() => {
-    if (isRendering || isPdfLoading) {
-      const timer = setTimeout(() => {
-        console.warn("[MediTrans] Loading state stuck, resetting...");
-        if (isRendering) setIsRendering(false);
-        if (isPdfLoading) setIsPdfLoading(false);
-      }, 10000); // 10 seconds timeout
-      return () => clearTimeout(timer);
-    }
-  }, [isRendering, isPdfLoading]);
-
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
