@@ -264,21 +264,35 @@ export async function uploadFileToDrive(
 export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<ArrayBuffer> {
   const token = await getGoogleOAuthToken();
 
-  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-    headers: {
-      'Authorization': `Bearer ${token}`
-    }
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
-  if (!response.ok) {
-    if (response.status === 401) {
-      cachedToken = null;
-      throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
+  try {
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        cachedToken = null;
+        throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
+      }
+      throw new Error(`Không thể tải tệp từ Google Drive (Mã lỗi ${response.status})`);
     }
-    throw new Error(`Không thể tải tệp từ Google Drive (Mã lỗi ${response.status})`);
+
+    return await response.arrayBuffer();
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error("Quá thời gian tải tài liệu từ Google Drive. Vui lòng kiểm tra kết nối mạng.");
+    }
+    throw error;
   }
-
-  return await response.arrayBuffer();
 }
 
 /**
