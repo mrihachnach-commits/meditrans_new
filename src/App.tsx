@@ -2876,7 +2876,7 @@ export default function App() {
       const content = await performTranslation(
         targetPage, 
         controller.signal, 
-        engine,
+        engine || selectedEngine,
         (text) => {
           if (currentPageRef.current === targetPage) {
             setActiveTranslation({ page: targetPage, content: text, status: 'loading' });
@@ -3052,11 +3052,11 @@ export default function App() {
     let newlyCompletedCount = 0;
     
     // Concurrency depends on keys and engine
-    let concurrentLimit = 5;
+    let concurrentLimit = 8;
     if (activeKeyFolder === 'shopaikey') {
-      concurrentLimit = 1; // Process sequentially for ShopAIKey/Proxy
+      concurrentLimit = 6; // Allow parallel for ShopAIKey/Proxy
     } else {
-      concurrentLimit = Math.min(10, userKeys.length > 5 ? Math.floor(userKeys.length * 0.8) : 5);
+      concurrentLimit = Math.min(12, userKeys.length > 0 ? Math.max(6, userKeys.length * 2) : 8);
     }
     
     console.log(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages with concurrency ${concurrentLimit}...`);
@@ -3074,7 +3074,7 @@ export default function App() {
           const content = await performTranslation(
             pageNum, 
             signal, 
-            engine,
+            engine || selectedEngine,
             (text) => {
               if (currentPageRef.current === pageNum) {
                 setActiveTranslation({ page: pageNum, content: text, status: 'loading' });
@@ -4300,7 +4300,7 @@ export default function App() {
                   {translationPanelMode === 'translation' ? (
                     <div className="flex items-center gap-1.5 md:gap-2">
                       <button 
-                        onClick={() => translateCurrentPage(currentPage, true, 'gemini-flash-lite-latest')}
+                        onClick={() => translateCurrentPage(currentPage, true, selectedEngine)}
                         disabled={isTranslating}
                         className={cn(
                           "p-2 rounded-xl transition-all flex items-center justify-center border shadow-sm",
@@ -5369,7 +5369,7 @@ export default function App() {
                           <button
                             onClick={() => {
                               setShowBulkConfirm(false);
-                              startBulkTranslation('gemini-flash-lite-latest');
+                              startBulkTranslation(selectedEngine);
                             }}
                             className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
                           >
