@@ -110,7 +110,7 @@ export class GeminiService implements TranslationService {
       return 'gemini-1.5-flash';
     }
     if (modelName === 'gemini-3.6-flash' || modelName === 'gemini-3-flash-preview') {
-      return 'gemini-1.5-pro';
+      return 'gemini-1.5-flash';
     }
     return modelName;
   }
@@ -141,15 +141,18 @@ export class GeminiService implements TranslationService {
       const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
       userContent.push({
         type: "image_url",
-        image_url: { url: formattedImage }
+        image_url: { 
+          url: formattedImage
+        }
       });
     }
 
     messages.push({ role: "user", content: userContent });
 
-    const body = {
+    const body: any = {
       model: mappedModel,
-      temperature: 0,
+      temperature: 0.1,
+      max_tokens: 4096,
       stream: true,
       messages
     };
@@ -184,7 +187,7 @@ export class GeminiService implements TranslationService {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      const lines = buffer.split("\n");
+      const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || "";
 
       for (const line of lines) {
@@ -246,15 +249,18 @@ export class GeminiService implements TranslationService {
       const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
       userContent.push({
         type: "image_url",
-        image_url: { url: formattedImage }
+        image_url: { 
+          url: formattedImage
+        }
       });
     }
 
     messages.push({ role: "user", content: userContent });
 
-    const body = {
+    const body: any = {
       model: mappedModel,
-      temperature: 0,
+      temperature: 0.1,
+      max_tokens: 4096,
       stream: false,
       messages
     };
@@ -384,17 +390,17 @@ export class GeminiService implements TranslationService {
     }
 
     const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT).
-Nhiệm vụ duy nhất: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH TRỰC TIẾP TOÀN BỘ NỘI DUNG SANG TIẾNG VIỆT.
+Nhiệm vụ duy nhất: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH TRỰC TIẾP TOÀN BỘ NỘI DUNG SANG TIẾNG VIỆT, BAO GỒM CẢ CÁC BẢNG BỂU, SƠ ĐỒ VÀ Ô PHÂN LOẠI.
 
 QUY TẮC BẮT BUỘC:
-1. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH: Không trích xuất/OCR tiếng Anh. Không gõ lại tiếng Anh rồi mới dịch. Kết quả trả về PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%.
-2. DỊCH ĐẦY ĐỦ TỪ TRÊN XUẤT XUỐNG DƯỚI: Dịch chính xác từng đoạn văn, tiêu đề, chú thích hình ảnh, bảng biểu. KHÔNG bỏ sót đoạn nào.
+1. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH HOẶC OCR TIẾNG ANH: Kết quả PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%. Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng (COMPOSITION -> Cấu trúc, ECHOGENICITY -> Độ hồi âm, Anechoic -> Trống âm, Smooth -> Bờ đều,...). TUYỆT ĐỐI KHÔNG để lại bất kỳ ô hay từ tiếng Anh nào trong bảng hay sơ đồ.
+2. DỊCH ĐẦY ĐỦ 100% TẤT CẢ NỘI DUNG (BAO GỒM BẢNG BỂU, SƠ ĐỒ PHÂN LOẠI ACR TI-RADS, BETHESDA, TNM...): Dịch toàn bộ tiêu đề, đoạn văn, từng cột và ô trong bảng, chú thích. KHÔNG ĐƯỢC TẮT, KHÔNG ĐƯỢC BỎ SÓT, KHÔNG ĐƯỢC DỪNG GIỮA CHỪNG. Trình bày các bảng biểu bằng dạng Bảng Markdown (Markdown Table) chuẩn đã dịch sang tiếng Việt.
 3. CHUẨN THUẬT NGỮ Y KHOA: Bám sát thuật ngữ y học tiếng Việt (ví dụ: "benign" -> "lành tính", "malignancy" -> "ác tính", "lesion" -> "tổn thương", "mammography" -> "X-quang tuyến vú",...).
-4. ĐỊNH DẠNG MARKDOWN CỦA BẢN DỊCH: Giữ nguyên cấu trúc Markdown (tiêu đề, in đậm, danh sách) tương ứng với bố cục ảnh.
-5. KHÔNG LỜI DẪN / KHÔNG BẢN GỐC TIẾNG ANH: Tuyệt đối không viết lời dẫn kiểu "Dưới đây là bản dịch...", "Bản dịch tiếng Việt:",...
-6. XỬ LÝ DẤU CHẤM LẶP LẠI (MỤC LỤC): Dọn dẹp các chuỗi dấu chấm nối dài (dot leaders) thành 3-5 dấu chấm hoặc danh sách sạch sẽ.`;
+4. ĐỊNH DẠNG MARKDOWN CỦA BẢN DỊCH: Giữ nguyên cấu trúc Markdown tương ứng với bố cục ảnh.
+5. KHÔNG LỜI DẪN / KHÔNG DỪNG DỞ DANG: Dịch liên tục từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
+6. VỚI TRANG MỤC LỤC: Dịch đầy đủ TẤT CẢ các mục, tên chương, tên bài và số trang tương ứng. Rút gọn chuỗi dấu chấm dài thành 3 dấu chấm (...) hoặc danh sách sạch.`;
 
-    const prompt = `Dịch trực tiếp toàn bộ văn bản trong ảnh trang y khoa này sang tiếng Việt. Xuất duy nhất bản dịch tiếng Việt, tuyệt đối KHÔNG in lại văn bản gốc tiếng Anh.`;
+    const prompt = `YÊU CẦU DỊCH THUẬT HOÀN TOÀN SANG TIẾNG VIỆT (BẢN DỊCH TIẾNG VIỆT 100%): Dịch toàn bộ văn bản và nội dung trong ảnh trang y khoa này (trang ${pageNumber}) sang tiếng Việt. BẮT BUỘC dịch tất cả tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng hay sơ đồ phân loại (ACR TI-RADS, Bethesda...) sang tiếng Việt. TUYỆT ĐỐI KHÔNG xuất OCR tiếng Anh hay giữ lại bất kỳ từ tiếng Anh nào trong các ô của bảng hay hình ảnh.`;
 
     const MAX_RETRIES = 5;
     let retryCount = 0;
@@ -417,9 +423,8 @@ QUY TẮC BẮT BUỘC:
           let fullText = "";
           for await (const chunkText of this.callOpenAIStream(key, requestModel, systemInstruction, prompt, imageBuffer, signal)) {
             if (signal?.aborted) break;
-            const cleaned = chunkText.replace(/(\s*\.\s*){4,}/g, ' ... ');
-            fullText += cleaned;
-            yield cleaned;
+            fullText += chunkText;
+            yield chunkText;
           }
           GeminiService.lastSuccessfulKey = key;
           if (!fullText) {
@@ -483,7 +488,6 @@ QUY TẮC BẮT BUỘC:
           }
 
           if (chunkText) {
-            chunkText = chunkText.replace(/(\s*\.\s*){4,}/g, ' ... ');
             fullText += chunkText;
             yield chunkText;
           }
@@ -552,16 +556,27 @@ QUY TẮC BẮT BUỘC:
       }
 
       const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT).
-Nhiệm vụ duy nhất: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH TRỰC TIẾP TOÀN BỘ NỘI DUNG SANG TIẾNG VIỆT.
+Nhiệm vụ duy nhất: Đọc hình ảnh trang tài liệu y khoa (trang ${pageNumber}) và DỊCH TRỰC TIẾP TOÀN BỘ NỘI DUNG SANG TIẾNG VIỆT, BAO GỒM CẢ CÁC BẢNG BỂU, SƠ ĐỒ VÀ Ô PHÂN LOẠI.
 
-QUY TẮC BẮT BUỘC:
-1. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH: Không trích xuất/OCR tiếng Anh. Không gõ lại tiếng Anh rồi mới dịch. Kết quả trả về PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%.
-2. DỊCH ĐẦY ĐỦ TỪ TRÊN XUẤT XUỐNG DƯỚI: Dịch chính xác từng đoạn văn, tiêu đề, chú thích hình ảnh, bảng biểu. KHÔNG bỏ sót đoạn nào.
-3. CHUẨN THUẬT NGỮ Y KHOA: Bám sát thuật ngữ y học tiếng Việt (ví dụ: "benign" -> "lành tính", "malignancy" -> "ác tính", "lesion" -> "tổn thương", "mammography" -> "X-quang tuyến vú",...).
-4. ĐỊNH DẠNG MARKDOWN CỦA BẢN DỊCH: Giữ nguyên cấu trúc Markdown (tiêu đề, in đậm, danh sách) tương ứng với bố cục ảnh.
-5. KHÔNG LỜI DẪN / KHÔNG BẢN GỐC TIẾNG ANH: Tuyệt đối không viết lời dẫn kiểu "Dưới đây là bản dịch...", "Bản dịch tiếng Việt:",...
-6. XỬ LÝ DẤU CHẤM LẶP LẠI (MỤC LỤC): Dọn dẹp các chuỗi dấu chấm nối dài (dot leaders) thành 3-5 dấu chấm hoặc danh sách sạch sẽ.`;
-      const prompt = `Dịch trực tiếp toàn bộ văn bản trong ảnh trang y khoa này sang tiếng Việt. Xuất duy nhất bản dịch tiếng Việt, tuyệt đối KHÔNG in lại văn bản gốc tiếng Anh.`;
+QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC VI PHẠM:
+1. TUYỆT ĐỐI KHÔNG XUẤT VĂN BẢN GỐC TIẾNG ANH HOẶC OCR TIẾNG ANH:
+   - Kết quả trả về PHẢI LÀ BẢN DỊCH TIẾNG VIỆT 100%.
+   - TUYỆT ĐỐI KHÔNG ĐỂ LẠI BẤT KỲ CỤM TỪ TIẾNG ANH NÀO TRONG BẢNG HOẶC TRONG SƠ ĐỒ.
+   - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng (Ví dụ dịch: "COMPOSITION" -> "CẤU TRÚC/THÀNH PHẦN", "ECHOGENICITY" -> "ĐỘ HỒI ÂM", "SHAPE" -> "HÌNH DÁNG", "MARGIN" -> "BỜ", "ECHOGENIC FOCI" -> "TÂM HỒI ÂM", "Cystic" -> "Nang", "Anechoic" -> "Trống âm", "Hyperechoic" -> "Tăng âm", "Wider-than-tall" -> "Rộng hơn cao", "Smooth" -> "Bờ đều", "Microcalcifications" -> "Vi vôi hóa", "1 point" -> "1 điểm",...).
+
+2. DỊCH ĐẦY ĐỦ 100% TẤT CẢ NỘI DUNG TỪ TRÊN XUẤT XUỐNG DƯỚI:
+   - Dịch toàn bộ tiêu đề, đoạn văn, mục lục, bảng biểu, chú thích hình ảnh và sơ đồ phân loại y khoa (ACR TI-RADS, Bethesda, TNM...). KHÔNG ĐƯỢC TẮT, KHÔNG BỎ SÓT, KHÔNG DỪNG NỬA CHỪNG.
+
+3. TRÌNH BÀY BẢNG VÀ MARKDOWN:
+   - Trình bày tất cả các bảng biểu dưới dạng Bảng Markdown (Markdown Table) chuẩn với tiêu đề và dữ liệu bên trong ô đã được DỊCH SANG TIẾNG VIỆT 100%.
+
+4. CHUẨN THUẬT NGỮ Y KHOA TIẾNG VIỆT: Bám sát thuật ngữ y học chuyên ngành.
+
+5. KHÔNG LỜI DẪN, KHÔNG DỪNG DỞ DANG: Dịch liên tục từ dòng đầu tiên đến dòng cuối cùng của trang.`;
+
+      const prompt = `YÊU CẦU DỊCH THUẬT HOÀN TOÀN SANG TIẾNG VIỆT (BẢN DỊCH TIẾNG VIỆT 100%):
+Dịch toàn bộ văn bản và nội dung trong ảnh trang y khoa này (trang ${pageNumber}) sang tiếng Việt.
+LƯU Ý CỰC KỲ QUAN TRỌNG VỀ BẢNG BỂU & SƠ ĐỒ PHÂN LOẠI (ACR TI-RADS, BETHESDA,...): BẮT BUỘC dịch tất cả tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt. TUYỆT ĐỐI KHÔNG xuất OCR tiếng Anh hay giữ lại bất kỳ từ tiếng Anh nào trong các ô của bảng.`;
 
       if (key.startsWith('sk-')) {
         try {
