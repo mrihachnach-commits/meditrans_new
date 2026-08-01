@@ -5363,25 +5363,27 @@ export default function App() {
               </div>
               
               <div className="flex-1 overflow-y-auto p-6 space-y-6 no-scrollbar">
-                {/* Button to open dedicated Proxy Engine Modal */}
-                <div className="bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-100 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm">
-                  <div className="flex items-center gap-3">
-                    <div className="bg-sky-500 text-white p-2.5 rounded-xl shadow-md shadow-sky-200 shrink-0">
-                      <Globe className="w-5 h-5" />
+                {/* Button to open dedicated Proxy Engine Modal (Admin only) */}
+                {userRole === 'admin' && (
+                  <div className="bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-100 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm">
+                    <div className="flex items-center gap-3">
+                      <div className="bg-sky-500 text-white p-2.5 rounded-xl shadow-md shadow-sky-200 shrink-0">
+                        <Globe className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-800">Cấu hình Proxy Engine (ShopAIKey)</h4>
+                        <p className="text-[11px] text-slate-500 leading-tight">Tuỳ chỉnh Base URL & Model cho API Key `sk-...`</p>
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-800">Cấu hình Proxy Engine (ShopAIKey)</h4>
-                      <p className="text-[11px] text-slate-500 leading-tight">Tuỳ chỉnh Base URL & Model cho API Key `sk-...`</p>
-                    </div>
+                    <button 
+                      type="button"
+                      onClick={() => setShowProxyModal(true)}
+                      className="px-3 py-2 bg-white hover:bg-sky-50 text-sky-700 border border-sky-200 rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all shrink-0 active:scale-95 cursor-pointer"
+                    >
+                      <Settings className="w-3.5 h-3.5" /> Mở cửa sổ cấu hình
+                    </button>
                   </div>
-                  <button 
-                    type="button"
-                    onClick={() => setShowProxyModal(true)}
-                    className="px-3 py-2 bg-white hover:bg-sky-50 text-sky-700 border border-sky-200 rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all shrink-0 active:scale-95 cursor-pointer"
-                  >
-                    <Settings className="w-3.5 h-3.5" /> Mở cửa sổ cấu hình
-                  </button>
-                </div>
+                )}
 
                 <div>
                   <div className="flex items-center justify-between mb-2">
@@ -5770,9 +5772,9 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Proxy Engine Dedicated Modal */}
+      {/* Proxy Engine Dedicated Modal (Admin only) */}
       <AnimatePresence>
-        {showProxyModal && (
+        {showProxyModal && userRole === 'admin' && (
           <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
             <motion.div 
               initial={{ opacity: 0 }}
