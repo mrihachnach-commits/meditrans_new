@@ -14,6 +14,8 @@ import { UploadStatus, UploadTask } from './components/UploadStatus';
 import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
 import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
+import { AdminPanelModal } from './components/AdminPanelModal';
+import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
 
@@ -799,6 +801,14 @@ export default function App() {
   const [userRole, setUserRole] = useState<'admin' | 'user' | null>(null);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [allUsers, setAllUsers] = useState<any[]>([]);
+  const [currentUserProfile, setCurrentUserProfile] = useState<UserProfile | null>(null);
+  const [systemShopAiKeys, setSystemShopAiKeys] = useState<SystemShopAiKey[]>([]);
+  const [userKeysMap, setUserKeysMap] = useState<Record<string, { freeCount: number; shopAiCount: number }>>({});
+
+  const effectiveUserLevel = useMemo(() => {
+    if (userRole === 'admin') return 3;
+    return getEffectiveUserLevel(currentUserProfile);
+  }, [userRole, currentUserProfile]);
   const [authSyncError, setAuthSyncError] = useState<string | null>(null);
   const [apiActivationLink, setApiActivationLink] = useState<string | null>(null);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
@@ -870,8 +880,10 @@ export default function App() {
         : 'Tất cả';
 
       if (!hasValidKeysForFolder(activeKeyFolder)) {
-        showToast(`Nhóm Key hiện tại ('${folderLabel}') chưa có API Key khả dụng. Vui lòng chọn nhóm key khác hoặc thêm Key trước khi bật tự động dịch.`, 'error');
-        setShowApiSettings(true);
+        showToast(`Nhóm Key hiện tại ('${folderLabel}') chưa có API Key khả dụng. Vui lòng chọn nhóm key khác hoặc liên hệ Quản trị viên để thêm Key.`, 'error');
+        if (userRole === 'admin') {
+          setShowApiSettings(true);
+        }
         return;
       }
       showToast(`Đã bật Tự Động Dịch với nhóm Key: ${folderLabel}`, 'success');
@@ -1164,6 +1176,7 @@ export default function App() {
     const unsubscribeUser = onSnapshot(userDocRef, async (snap) => {
       if (snap.exists()) {
         const data = snap.data();
+        setCurrentUserProfile({ uid: snap.id, ...data } as UserProfile);
         
         // CRITICAL: Admins are immune to blocking to prevent accidental lockout
         const isAdminUser = user.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
@@ -1192,6 +1205,75 @@ export default function App() {
       unsubscribeUser();
     };
   }, [user, userRole]);
+
+  // Real-time listener for System ShopAIKeys
+  useEffect(() => {
+    if (!user) {
+      setSystemShopAiKeys([]);
+      return;
+    }
+    const q = query(collection(db, 'systemShopAiKeys'));
+    const unsub = onSnapshot(q, (snapshot) => {
+      setSystemShopAiKeys(snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as SystemShopAiKey)));
+    }, (err) => {
+      console.warn("System shopAiKeys listener failed:", err);
+    });
+    return () => unsub();
+  }, [user]);
+
+  // Real-time listener for userKeysMap (Admin view key counts)
+  useEffect(() => {
+    if (userRole === 'admin' && user) {
+      const unsub = onSnapshot(collection(db, 'apiKeys'), (snapshot) => {
+        const map: Record<string, { freeCount: number; shopAiCount: number }> = {};
+        snapshot.docs.forEach(docSnap => {
+          const d = docSnap.data();
+          const ownerId = d.ownerId;
+          if (!ownerId) return;
+          if (!map[ownerId]) map[ownerId] = { freeCount: 0, shopAiCount: 0 };
+          const val = (d.value || '').trim();
+          const eng = (d.engine || '').toLowerCase();
+          const isShop = val.startsWith('sk-') || eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy');
+          if (isShop) {
+            map[ownerId].shopAiCount++;
+          } else {
+            map[ownerId].freeCount++;
+          }
+        });
+        setUserKeysMap(map);
+      }, (err) => {
+        console.warn("User keys map listener error:", err);
+      });
+      return () => unsub();
+    }
+  }, [userRole, user]);
+
+  const updateUserLevelAndDuration = async (targetUid: string, level: number, durationDays?: number | null) => {
+    if (userRole !== 'admin' || !user) return;
+    try {
+      let levelExpiresAt: string | null = null;
+      if (durationDays && durationDays > 0) {
+        const expDate = new Date();
+        expDate.setDate(expDate.getDate() + durationDays);
+        levelExpiresAt = expDate.toISOString();
+      } else if (durationDays === null) {
+        levelExpiresAt = null; // Vĩnh viễn
+      }
+
+      const userRef = doc(db, 'users', targetUid);
+      await setDoc(userRef, {
+        level,
+        levelExpiresAt,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+
+      setAllUsers(prev => prev.map(u => u.uid === targetUid ? { ...u, level, levelExpiresAt } : u));
+      showToast(`Đã cập nhật Level ${level} cho tài khoản (${durationDays ? durationDays + ' ngày' : 'Vĩnh viễn'})`, 'success');
+    } catch (error: any) {
+      console.error("Error updating user level:", error);
+      handleFirestoreError(error, OperationType.UPDATE, `users/${targetUid}`);
+    }
+  };
 
   // Perform key check when user logs in and keys are loaded
   useEffect(() => {
@@ -1400,21 +1482,50 @@ export default function App() {
   };
 
   const handleAddKey = async () => {
-    if (!user || !newKey.name || !newKey.value) return;
-    const path = 'apiKeys';
+    if (!user) {
+      showToast("Vui lòng đăng nhập để lưu Key vào Vault", "error");
+      return;
+    }
+    if (!newKey.value.trim()) {
+      showToast("Vui lòng nhập API Key", "error");
+      return;
+    }
+
+    const isShopKey = newKey.engine === 'shopaikey' || newKey.value.trim().startsWith('sk-');
+
+    // Level 1 Enforcement:
+    if (effectiveUserLevel <= 1) {
+      if (isShopKey) {
+        showToast("Tài khoản Level 1 không được phép thêm hoặc sử dụng ShopAIkey. Vui lòng nâng cấp lên Level 2.", "error");
+        return;
+      }
+      const myFreeKeys = userKeys.filter(k => k.ownerId === user.uid && !isKeyShopAIKey(k));
+      if (myFreeKeys.length >= 1) {
+        showToast("Tài khoản Level 1 chỉ được lưu tối đa 1 Key Free AI Studio. Vui lòng chỉnh sửa Key hiện tại hoặc nâng cấp lên Level 2.", "error");
+        return;
+      }
+    }
+
     try {
-      await setDoc(doc(collection(db, 'apiKeys')), {
+      const keyData = {
         ownerId: user.uid,
-        name: newKey.name,
-        value: newKey.value,
-        engine: newKey.engine,
+        ownerEmail: user.email,
+        name: newKey.name.trim() || (isShopKey ? 'ShopAIKey' : 'Gemini Key'),
+        engine: isShopKey ? 'shopaikey' : 'gemini',
+        value: newKey.value.trim(),
+        status: 'active',
         createdAt: serverTimestamp(),
-        lastUsed: serverTimestamp()
-      });
-      setNewKey({ name: '', value: '', engine: 'gemini' });
+        updatedAt: serverTimestamp()
+      };
+
+      await addDoc(collection(db, 'apiKeys'), keyData);
+      showToast("Đã thêm API Key thành công!", "success");
       setIsAddingKey(false);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+      setNewKey({ name: '', value: '', engine: 'gemini' });
+      setNewKeyTestResult(null);
+    } catch (error: any) {
+      console.error("Failed to add key:", error);
+      handleFirestoreError(error, OperationType.CREATE, 'apiKeys');
     }
   };
 
@@ -2342,6 +2453,7 @@ export default function App() {
         ownerId: currentUser.uid,
         sharedWith: [],
         driveFileId: driveFileToSave.id,
+        token: driveFileToSave.id,
         downloadUrl: driveFileToSave.webViewLink || '',
         size: driveFileToSave.size || 0,
         type: driveFileToSave.mimeType || 'application/pdf',
@@ -3847,13 +3959,15 @@ export default function App() {
             <Settings className="w-4 h-4" />
           </button>
 
-          <button 
-            onClick={() => setShowApiSettings(true)}
-            className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
-            title="Quản lý API Keys"
-          >
-            <Key className="w-4 h-4" />
-          </button>
+          {userRole === 'admin' && (
+            <button 
+              onClick={() => setShowApiSettings(true)}
+              className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
+              title="Quản lý API Keys"
+            >
+              <Key className="w-4 h-4" />
+            </button>
+          )}
 
           <button 
             onClick={() => {
@@ -5491,7 +5605,7 @@ export default function App() {
 
       {/* API Keys Modal */}
       <AnimatePresence>
-        {showApiSettings && (
+        {showApiSettings && userRole === 'admin' && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <motion.div 
               initial={{ opacity: 0 }}
@@ -6372,424 +6486,29 @@ export default function App() {
       </AnimatePresence>
 
       {/* Admin Panel Modal */}
-      <AnimatePresence>
-        {showAdminPanel && (
-          <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowAdminPanel(false)}
-              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-white w-full max-w-4xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
-            >
-              <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-white sticky top-0 z-10">
-                <div className="flex items-center gap-3">
-                  <div className="bg-amber-100 p-2 rounded-xl">
-                    <ShieldCheck className="text-amber-600 w-5 h-5" />
-                  </div>
-                  <h3 className="text-xl font-display font-bold text-slate-800">Quản trị hệ thống</h3>
-                </div>
-                <button 
-                  onClick={() => setShowAdminPanel(false)}
-                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
-                >
-                  <X className="w-5 h-5 text-slate-400" />
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-6 space-y-8 no-scrollbar">
-                {/* Stats Section */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div className="bg-indigo-50 p-5 rounded-3xl border border-indigo-100 shadow-sm">
-                    <div className="flex items-center gap-3 mb-2">
-                      <div className="bg-indigo-100 p-2 rounded-xl">
-                        <Users className="w-4 h-4 text-indigo-600" />
-                      </div>
-                      <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Tổng người dùng</span>
-                    </div>
-                    <p className="text-3xl font-display font-black text-indigo-900">{allUsers.length}</p>
-                  </div>
-                  <div className="bg-amber-50 p-5 rounded-3xl border border-amber-100 shadow-sm">
-                    <div className="flex items-center gap-3 mb-2">
-                      <div className="bg-amber-100 p-2 rounded-xl">
-                        <ShieldCheck className="w-4 h-4 text-amber-600" />
-                      </div>
-                      <span className="text-[10px] font-black text-amber-400 uppercase tracking-widest">Quản trị viên</span>
-                    </div>
-                    <p className="text-3xl font-display font-black text-amber-900">{allUsers.filter(u => u.role === 'admin').length}</p>
-                  </div>
-                  <div className="bg-rose-50 p-5 rounded-3xl border border-rose-100 shadow-sm">
-                    <div className="flex items-center gap-3 mb-2">
-                        <div className="bg-rose-100 p-2 rounded-xl">
-                          <ShieldAlert className="w-4 h-4 text-rose-600" />
-                        </div>
-                        <span className="text-[10px] font-black text-rose-400 uppercase tracking-widest">Tài khoản bị chặn</span>
-                      </div>
-                      <p className="text-3xl font-display font-black text-rose-900">{allUsers.filter(u => u.isBlocked).length}</p>
-                    </div>
-                  </div>
-
-                  {/* Create User Section */}
-                  <section>
-                    <div className="flex items-center gap-2 mb-4">
-                      <div className="w-1.5 h-4 bg-indigo-500 rounded-full" />
-                      <h4 className="text-sm font-bold text-slate-800">Thêm người dùng mới</h4>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 bg-slate-50 p-5 rounded-2xl border border-slate-100">
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Tên hiển thị</label>
-                        <input 
-                          type="text"
-                          placeholder="VD: Nguyễn Văn A"
-                          value={adminNewUserDisplayName}
-                          onChange={(e) => setAdminNewUserDisplayName(e.target.value)}
-                          className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Email</label>
-                        <input 
-                          type="email"
-                          placeholder="email@example.com"
-                          value={adminNewUserEmail}
-                          onChange={(e) => setAdminNewUserEmail(e.target.value)}
-                          className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Mật khẩu</label>
-                        <div className="relative">
-                          <input 
-                            type={showAdminNewUserPassword ? "text" : "password"}
-                            placeholder="••••••••"
-                            value={adminNewUserPassword}
-                            onChange={(e) => setAdminNewUserPassword(e.target.value)}
-                            className="w-full pl-3 pr-10 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowAdminNewUserPassword(!showAdminNewUserPassword)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-indigo-600 transition-colors"
-                          >
-                            {showAdminNewUserPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                          </button>
-                        </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Vai trò</label>
-                        <select 
-                          value={adminNewUserRole}
-                          onChange={(e) => setAdminNewUserRole(e.target.value as 'user' | 'admin')}
-                          className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none transition-all appearance-none cursor-pointer"
-                        >
-                          <option value="user">Người dùng</option>
-                          <option value="admin">Quản trị viên</option>
-                        </select>
-                      </div>
-                      <div className="flex items-end">
-                        <button 
-                          onClick={async () => {
-                            if (!adminNewUserEmail || !adminNewUserPassword) {
-                              showToast("Vui lòng nhập email và mật khẩu", 'error');
-                              return;
-                            }
-                            setIsCreatingUser(true);
-                            try {
-                              await createNewUser({
-                                email: adminNewUserEmail,
-                                password: adminNewUserPassword,
-                                displayName: adminNewUserDisplayName,
-                                role: adminNewUserRole
-                              });
-                              showToast("Đã thêm người dùng thành công", 'success');
-                              setAdminNewUserEmail('');
-                              setAdminNewUserPassword('');
-                              setAdminNewUserDisplayName('');
-                            } catch (e: any) {
-                              if (e.message.includes("Identity Toolkit API")) {
-                                showToast("Lỗi: Identity Toolkit API chưa được kích hoạt. Vui lòng kiểm tra cấu hình dự án.", 'error');
-                              } else {
-                                showToast(e.message, 'error');
-                              }
-                            } finally {
-                              setIsCreatingUser(false);
-                            }
-                          }}
-                          disabled={isCreatingUser}
-                          className="w-full py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50 shadow-lg shadow-indigo-200"
-                        >
-                          {isCreatingUser ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserPlus className="w-3.5 h-3.5" />}
-                          Thêm ngay
-                        </button>
-                      </div>
-                    </div>
-                  </section>
-
-                  {/* User List Section */}
-                  <section>
-                    <div className="flex items-center justify-between mb-4">
-                      <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                        <Users className="w-3.5 h-3.5" />
-                        Danh sách người dùng ({allUsers.length})
-                      </h4>
-                      <div className="flex items-center gap-3">
-                        <div className="relative">
-                          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400" />
-                          <input 
-                            type="text"
-                            placeholder="Tìm kiếm email/tên..."
-                            value={adminUserSearch}
-                            onChange={(e) => setAdminUserSearch(e.target.value)}
-                            className="pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-[10px] focus:ring-2 focus:ring-indigo-500 outline-none w-40 transition-all"
-                          />
-                        </div>
-                        <select 
-                          value={adminRoleFilter}
-                          onChange={(e) => setAdminRoleFilter(e.target.value as any)}
-                          className="px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-[10px] focus:ring-2 focus:ring-indigo-500 outline-none transition-all appearance-none cursor-pointer pr-6"
-                        >
-                          <option value="all">Tất cả</option>
-                          <option value="user">Thành viên</option>
-                          <option value="admin">Quản trị viên</option>
-                          <option value="blocked">Đã chặn</option>
-                        </select>
-                        {(activeProjectId || activeDatabaseId) && (
-                          <div className="hidden md:flex flex-col items-end mr-2 border-r border-slate-100 pr-2">
-                            <div className="text-[7px] font-mono text-slate-400 uppercase tracking-tighter">Project: {activeProjectId}</div>
-                            <div className="text-[7px] font-mono text-slate-400 uppercase tracking-tighter">DB: {activeDatabaseId}</div>
-                          </div>
-                        )}
-                        <button 
-                          onClick={runDiagnostics}
-                          disabled={isRunningDiagnostics}
-                          className="p-1.5 hover:bg-slate-100 text-slate-500 rounded-lg transition-colors flex items-center gap-1.5"
-                          title="Chẩn đoán hệ thống"
-                        >
-                          <Activity className={cn("w-3.5 h-3.5", isRunningDiagnostics && "animate-pulse")} />
-                          <span className="text-[10px] font-medium">Chẩn đoán</span>
-                        </button>
-                        <button 
-                          onClick={fetchAllUsers}
-                          className="p-1.5 hover:bg-slate-100 text-slate-500 rounded-lg transition-colors"
-                          title="Làm mới"
-                        >
-                          <RefreshCcw className={cn("w-3.5 h-3.5", isFetchingUsers && "animate-spin")} />
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="bg-white border border-slate-100 rounded-2xl overflow-hidden shadow-sm">
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left text-xs">
-                          <thead className="bg-slate-50/50 text-slate-400 font-bold uppercase tracking-widest border-b border-slate-100">
-                            <tr>
-                              <th className="px-6 py-4">Thông tin người dùng</th>
-                              <th className="px-6 py-4">Vai trò</th>
-                              <th className="px-6 py-4">Ngày tham gia</th>
-                              <th className="px-6 py-4 text-right">Hành động</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-50">
-                            {allUsers
-                              .filter(u => {
-                                const searchMatch = (u.email || '').toLowerCase().includes(adminUserSearch.toLowerCase()) || 
-                                                   (u.displayName || '').toLowerCase().includes(adminUserSearch.toLowerCase());
-                                let roleMatch = true;
-                                if (adminRoleFilter === 'admin') roleMatch = u.role === 'admin';
-                                else if (adminRoleFilter === 'user') roleMatch = u.role === 'user';
-                                else if (adminRoleFilter === 'blocked') roleMatch = u.isBlocked === true;
-                                return searchMatch && roleMatch;
-                              })
-                              .length === 0 ? (
-                              <tr>
-                                <td colSpan={4} className="px-6 py-12 text-center text-slate-400 italic">
-                                  Không tìm thấy người dùng phù hợp
-                                </td>
-                              </tr>
-                            ) : (
-                              allUsers
-                                .filter(u => {
-                                  const searchMatch = (u.email || '').toLowerCase().includes(adminUserSearch.toLowerCase()) || 
-                                                     (u.displayName || '').toLowerCase().includes(adminUserSearch.toLowerCase());
-                                  let roleMatch = true;
-                                  if (adminRoleFilter === 'admin') roleMatch = u.role === 'admin';
-                                  else if (adminRoleFilter === 'user') roleMatch = u.role === 'user';
-                                  else if (adminRoleFilter === 'blocked') roleMatch = u.isBlocked === true;
-                                  return searchMatch && roleMatch;
-                                })
-                                .map((u) => (
-                                <tr key={u.uid} className={cn(
-                                  "hover:bg-slate-50/30 transition-colors group",
-                                  u.isBlocked && "bg-rose-50/20"
-                                )}>
-                                  <td className="px-6 py-4">
-                                    <div className="flex items-center gap-3">
-                                      <div className={cn(
-                                        "w-9 h-9 bg-gradient-to-br rounded-xl flex items-center justify-center text-xs font-black text-slate-500 shadow-inner",
-                                        u.isBlocked ? "from-rose-100 to-rose-200" : "from-slate-100 to-slate-200"
-                                      )}>
-                                        {(u.displayName || u.email || u.uid || 'U').charAt(0).toUpperCase()}
-                                      </div>
-                                      <div>
-                                        <div className="flex items-center gap-2">
-                                          <p className="font-bold text-slate-800 text-sm">{u.displayName || (u.email ? u.email.split('@')[0] : u.uid || 'Người dùng')}</p>
-                                          {u.isBlocked && (
-                                            <span className="bg-rose-100 text-rose-600 text-[8px] font-black px-1.5 py-0.5 rounded-full uppercase tracking-tighter">Bị chặn</span>
-                                          )}
-                                        </div>
-                                        <p className="text-[10px] text-slate-400 font-medium">{u.email}</p>
-                                      </div>
-                                    </div>
-                                  </td>
-                                  <td className="px-6 py-4">
-                                    <span className={cn(
-                                      "px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider shadow-sm",
-                                      u.role === 'admin' 
-                                        ? "bg-amber-50 text-amber-600 border border-amber-100" 
-                                        : "bg-indigo-50 text-indigo-600 border border-indigo-100"
-                                    )}>
-                                      {u.role === 'admin' ? 'Quản trị viên' : 'Thành viên'}
-                                    </span>
-                                  </td>
-                                  <td className="px-6 py-4">
-                                    <div className="flex flex-col">
-                                      <span className="text-slate-600 font-medium">
-                                        {u.createdAt ? (typeof u.createdAt === 'string' ? new Date(u.createdAt).toLocaleDateString('vi-VN') : (u.createdAt._seconds ? new Date(u.createdAt._seconds * 1000).toLocaleDateString('vi-VN') : 'N/A')) : 'N/A'}
-                                      </span>
-                                      <span className="text-[9px] text-slate-300">
-                                        {u.uid.substring(0, 8)}...
-                                      </span>
-                                    </div>
-                                  </td>
-                                  <td className="px-6 py-4 text-right">
-                                    <div className="flex items-center justify-end gap-2 transition-opacity">
-                                      <div className="flex items-center gap-1">
-                                        {pendingPasswordUid === u.uid ? (
-                                          <div className="flex items-center gap-1 animate-in fade-in slide-in-from-right-2 duration-300">
-                                            <input 
-                                              type="text"
-                                              value={newPasswordInput}
-                                              onChange={(e) => setNewPasswordInput(e.target.value)}
-                                              placeholder="Mật khẩu mới"
-                                              className="px-2 py-1 bg-white border border-slate-200 rounded-lg text-[10px] w-24 focus:ring-1 focus:ring-indigo-500 outline-none"
-                                              autoFocus
-                                            />
-                                            <button 
-                                              onClick={() => adminChangeUserPassword(u.uid, u.email)}
-                                              className="p-1 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors shadow-sm"
-                                              title="Xác nhận đổi mật khẩu"
-                                            >
-                                              <CheckCircle2 className="w-3.5 h-3.5" />
-                                            </button>
-                                            <button 
-                                              onClick={() => {
-                                                setPendingPasswordUid(null);
-                                                setNewPasswordInput('');
-                                              }}
-                                              className="p-1 bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 transition-colors"
-                                              title="Hủy"
-                                            >
-                                              <ChevronLeft className="w-3.5 h-3.5" />
-                                            </button>
-                                          </div>
-                                        ) : (
-                                          <>
-                                            <button 
-                                              onClick={() => sendAdminPasswordResetEmail(u.email)}
-                                              className="p-2 hover:bg-indigo-50 text-indigo-600 rounded-lg transition-colors"
-                                              title="Gửi email đặt lại mật khẩu"
-                                            >
-                                              <Mail className="w-4 h-4" />
-                                            </button>
-                                            <button 
-                                              onClick={() => {
-                                                setPendingPasswordUid(u.uid);
-                                                setNewPasswordInput('');
-                                              }}
-                                              className="p-2 hover:bg-amber-50 text-amber-600 rounded-lg transition-colors"
-                                              title="Đổi mật khẩu trực tiếp"
-                                            >
-                                              <KeyRound className="w-4 h-4" />
-                                            </button>
-                                          </>
-                                        )}
-                                      </div>
-                                      <button 
-                                        onClick={() => updateUserRole(u.uid, u.email, u.role === 'admin' ? 'user' : 'admin')}
-                                        className={cn(
-                                          "p-2 rounded-lg transition-colors",
-                                          u.role === 'admin' ? "hover:bg-indigo-50 text-indigo-600" : "hover:bg-amber-50 text-amber-600"
-                                        )}
-                                        title={u.role === 'admin' ? "Hạ cấp xuống Thành viên" : "Thăng cấp lên Quản trị viên"}
-                                      >
-                                        {u.role === 'admin' ? <UserIcon className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
-                                      </button>
-                                      <button 
-                                        onClick={() => toggleBlockUser(u.uid, u.email, u.isBlocked)}
-                                        className={cn(
-                                          "p-2 rounded-lg transition-colors",
-                                          u.isBlocked ? "hover:bg-emerald-50 text-emerald-500" : "hover:bg-rose-50 text-rose-500"
-                                        )}
-                                        title={u.isBlocked ? "Bỏ chặn người dùng" : "Chặn người dùng"}
-                                      >
-                                        {u.isBlocked ? <ShieldCheck className="w-4 h-4" /> : <ShieldAlert className="w-4 h-4" />}
-                                      </button>
-                                      <div className="flex items-center gap-1">
-                                        {pendingDeleteUid === u.uid ? (
-                                          <div className="flex items-center gap-1 animate-in fade-in slide-in-from-right-2 duration-300">
-                                            <button 
-                                              onClick={() => deleteUserAccount(u.uid, u.email)}
-                                              className="px-3 py-1 bg-rose-600 text-white text-xs font-bold rounded-lg hover:bg-rose-700 transition-colors shadow-sm"
-                                            >
-                                              Xác nhận xóa
-                                            </button>
-                                            <button 
-                                              onClick={() => setPendingDeleteUid(null)}
-                                              className="p-1 px-2 bg-slate-100 text-slate-600 text-xs font-medium rounded-lg hover:bg-slate-200 transition-colors"
-                                            >
-                                              Hủy
-                                            </button>
-                                          </div>
-                                        ) : (
-                                          <button 
-                                            onClick={() => setPendingDeleteUid(u.uid)}
-                                            className="p-2 hover:bg-rose-100 text-rose-600 rounded-lg transition-colors border border-transparent hover:border-rose-200"
-                                            title="Xóa tài khoản vĩnh viễn"
-                                          >
-                                            <Trash2 className="w-4 h-4" />
-                                          </button>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </section>
-                </div>
-
-              <div className="p-6 border-t border-slate-100 bg-slate-50 flex justify-end">
-                <button 
-                  onClick={() => setShowAdminPanel(false)}
-                  className="px-6 py-2 bg-white border border-slate-200 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all"
-                >
-                  Đóng
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {showAdminPanel && (
+        <AdminPanelModal
+          allUsers={allUsers}
+          userKeysMap={userKeysMap}
+          onClose={() => setShowAdminPanel(false)}
+          onUpdateLevel={updateUserLevelAndDuration}
+          onToggleBlock={toggleBlockUser}
+          onUpdateRole={updateUserRole}
+          onDeleteUser={deleteUserAccount}
+          onChangePasswordDirect={async (uid, email, newPass) => {
+            setNewPasswordInput(newPass);
+            await adminChangeUserPassword(uid, email);
+          }}
+          onSendResetEmail={async (email) => {
+            await sendAdminPasswordResetEmail(email);
+          }}
+          onCreateNewUser={async (data) => {
+            await createNewUser(data);
+          }}
+          onRefresh={fetchAllUsers}
+          showToast={showToast}
+        />
+      )}
 
       {/* Footer Info */}
       {!pdfDoc && (

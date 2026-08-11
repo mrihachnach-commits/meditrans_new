@@ -11,9 +11,24 @@
         "photoURL": { "type": "string", "format": "uri", "description": "The user's profile picture URL." },
         "createdAt": { "type": "string", "format": "date-time", "description": "When the user account was created." },
         "role": { "type": "string", "enum": ["admin", "user"], "description": "The user's role." },
+        "level": { "type": "number", "description": "The user's account level (1: Free, 2: VIP, 3: Pro/Admin)." },
+        "levelExpiresAt": { "type": "string", "format": "date-time", "description": "Expiration date for level subscription." },
         "isBlocked": { "type": "boolean", "description": "Whether the user is blocked." }
       },
       "required": ["uid", "email", "role"]
+    },
+    "SystemShopAiKey": {
+      "title": "System ShopAIKey",
+      "description": "System-wide ShopAIKey pool managed by admin.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "A friendly name for the key." },
+        "value": { "type": "string", "description": "The API key value sk-..." },
+        "engine": { "type": "string", "description": "Engine type e.g. shopaikey." },
+        "isActive": { "type": "boolean", "description": "Whether key is active." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp." }
+      },
+      "required": ["name", "value", "engine", "isActive", "createdAt"]
     },
     "ApiKey": {
       "title": "API Key",
@@ -98,6 +113,10 @@
     "/blacklist/{email}": {
       "schema": "Blacklist",
       "description": "Collection of blacklisted emails."
+    },
+    "/systemShopAiKeys/{keyId}": {
+      "schema": "SystemShopAiKey",
+      "description": "Collection of system ShopAIkeys managed by admin."
     },
     "/users/{userId}": {
       "schema": "User",

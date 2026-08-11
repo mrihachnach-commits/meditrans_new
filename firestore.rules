@@ -59,6 +59,8 @@ service cloud.firestore {
              (data.get('role', 'user') in ['user', 'admin']) &&
              (data.get('displayName', null) == null || (data.displayName is string && data.displayName.size() <= 100)) &&
              (data.get('photoURL', null) == null || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+             (data.get('level', 1) is number) &&
+             (data.get('levelExpiresAt', null) == null || data.levelExpiresAt is timestamp || data.levelExpiresAt is string) &&
              (data.get('isBlocked', false) is bool) &&
              (data.get('createdAt', null) == null || data.createdAt is timestamp || data.createdAt is string);
     }
@@ -68,15 +70,16 @@ service cloud.firestore {
     }
 
     function isValidDocument(data) {
-      return data.keys().hasAll(['name', 'ownerId', 'token', 'downloadUrl', 'createdAt']) &&
+      return data.keys().hasAll(['name', 'ownerId', 'downloadUrl', 'createdAt']) &&
              data.name is string && data.name.size() > 0 && data.name.size() <= 256 &&
              data.ownerId is string &&
-             data.token is string && data.token.size() <= 128 &&
              data.downloadUrl is string && data.downloadUrl.size() <= 2048 &&
              (data.createdAt is timestamp || data.createdAt is string) &&
              (data.get('sharedWith', []) is list) &&
              (data.get('size', 0) is number) &&
-             (data.get('type', '') is string);
+             (data.get('type', '') is string) &&
+             (data.get('token', null) == null || (data.token is string && data.token.size() <= 128)) &&
+             (data.get('driveFileId', null) == null || (data.driveFileId is string && data.driveFileId.size() <= 128));
     }
 
     function isValidFolder(data) {
@@ -167,6 +170,11 @@ service cloud.firestore {
       allow create: if isSignedIn() && isValidApiKey(incoming());
       allow update: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()) && isValidApiKey(incoming()));
       allow delete: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()));
+    }
+
+    match /systemShopAiKeys/{keyId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /blacklist/{email} {
