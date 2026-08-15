@@ -6,10 +6,14 @@
 
 import { GoogleAuthProvider, signInWithPopup, linkWithPopup, reauthenticateWithPopup } from 'firebase/auth';
 import { auth } from '../firebase';
+import { getPdfBufferCache, savePdfBufferCache } from './storageService';
 
 // Cache token in memory
 let cachedToken: string | null = null;
 let tokenExpiresAt: number = 0;
+
+// Memory cache for active session PDF ArrayBuffers
+const driveBufferMemoryCache = new Map<string, ArrayBuffer>();
 
 /**
  * Connect to Google Drive via Firebase GoogleAuthProvider popup.
@@ -266,51 +270,50 @@ export async function uploadFileToDrive(
  * 3. Server proxy (/api/drive/download)
  */
 export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<ArrayBuffer> {
+  // 1. Fast Memory Cache Check (Instant 0ms)
+  const memCached = driveBufferMemoryCache.get(fileId);
+  if (memCached) {
+    console.log(`[MediTrans AI] Memory Cache Hit for PDF buffer: ${fileId}`);
+    return memCached.slice(0);
+  }
+
+  // 2. Fast IndexedDB Cache Check (Instant <10ms)
+  try {
+    const idbCached = await getPdfBufferCache(fileId);
+    if (idbCached && idbCached.byteLength > 0) {
+      console.log(`[MediTrans AI] IndexedDB Cache Hit for PDF buffer: ${fileId}`);
+      driveBufferMemoryCache.set(fileId, idbCached);
+      return idbCached.slice(0);
+    }
+  } catch (err) {
+    console.warn('[MediTrans AI] Could not load PDF buffer from IndexedDB cache:', err);
+  }
+
   const token = await getGoogleOAuthToken();
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {
-    console.warn(`[MediTrans AI] Timeout for downloadDriveFileAsArrayBuffer (60s) for file: ${fileId}`);
+    console.warn(`[MediTrans AI] Timeout for downloadDriveFileAsArrayBuffer (30s) for file: ${fileId}`);
     controller.abort();
-  }, 60000); // 60 second timeout
+  }, 30000); // 30 second timeout
+
+  const storeAndReturn = (ab: ArrayBuffer): ArrayBuffer => {
+    clearTimeout(timeoutId);
+    driveBufferMemoryCache.set(fileId, ab);
+    savePdfBufferCache(fileId, ab).catch(e => console.warn('Failed to cache PDF in IndexedDB:', e));
+    return ab.slice(0);
+  };
 
   try {
-    // Attempt 1: Direct fetch with Authorization header
-    try {
-      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        },
-        signal: controller.signal
-      });
-
-      if (response.ok) {
-        clearTimeout(timeoutId);
-        return await response.arrayBuffer();
-      }
-
-      if (response.status === 401) {
-        cachedToken = null;
-        throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
-      }
-
-      console.warn(`[MediTrans AI] Direct Drive download status ${response.status}, trying access_token query parameter...`);
-    } catch (directErr: any) {
-      if (directErr.message?.includes('Xác thực Google Drive hết hạn')) {
-        throw directErr;
-      }
-      console.warn(`[MediTrans AI] Direct Drive header fetch failed (${directErr.message}), trying access_token query parameter fallback...`);
-    }
-
-    // Attempt 2: Direct fetch with access_token query param (Simple GET without custom headers to avoid CORS preflight)
+    // Stage 1: Fast direct GET using access_token parameter (Bypasses CORS preflight OPTIONS request)
     try {
       const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&access_token=${encodeURIComponent(token)}`, {
         signal: controller.signal
       });
 
       if (response.ok) {
-        clearTimeout(timeoutId);
-        return await response.arrayBuffer();
+        const ab = await response.arrayBuffer();
+        return storeAndReturn(ab);
       }
 
       if (response.status === 401) {
@@ -326,7 +329,7 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
       console.warn(`[MediTrans AI] Query token fetch failed (${queryErr.message}), trying server proxy fallback...`);
     }
 
-    // Attempt 3: Server proxy route /api/drive/download
+    // Stage 2: Server Proxy (/api/drive/download)
     try {
       const proxyUrl = `/api/drive/download?fileId=${encodeURIComponent(fileId)}&token=${encodeURIComponent(token)}`;
       const response = await fetch(proxyUrl, {
@@ -337,8 +340,8 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
       });
 
       if (response.ok) {
-        clearTimeout(timeoutId);
-        return await response.arrayBuffer();
+        const ab = await response.arrayBuffer();
+        return storeAndReturn(ab);
       }
 
       const errJson = await response.json().catch(() => ({}));
@@ -348,8 +351,34 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
       }
       throw new Error(errJson.error || `Không thể tải tệp từ Google Drive (Server proxy ${response.status})`);
     } catch (proxyErr: any) {
+      if (proxyErr.message?.includes('Xác thực Google Drive hết hạn')) {
+        throw proxyErr;
+      }
+      console.warn(`[MediTrans AI] Server proxy fetch failed (${proxyErr.message}), trying direct Authorization header...`);
+    }
+
+    // Stage 3: Direct fetch with Authorization header fallback
+    try {
+      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        signal: controller.signal
+      });
+
+      if (response.ok) {
+        const ab = await response.arrayBuffer();
+        return storeAndReturn(ab);
+      }
+
+      if (response.status === 401) {
+        cachedToken = null;
+        throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
+      }
+      throw new Error(`Không thể tải tệp từ Google Drive (Mã lỗi ${response.status})`);
+    } catch (directErr: any) {
       clearTimeout(timeoutId);
-      throw proxyErr;
+      throw directErr;
     }
   } catch (error: any) {
     clearTimeout(timeoutId);

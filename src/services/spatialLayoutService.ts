@@ -1355,10 +1355,17 @@ function buildTableRegionFromRows(
   };
 }
 
+const pageSpatialCache = new Map<string, PageSpatialData>();
+
 /**
  * Extract spatial text blocks & detect table regions from a pdfjs page.
  */
 export async function extractSpatialBlocksFromPdfPage(pdfPage: any): Promise<PageSpatialData> {
+  const pageKey = pdfPage ? `${pdfPage.pageNumber}_${pdfPage.ref?.num}_${pdfPage.ref?.gen}_${pdfPage.view?.join(',')}` : '';
+  if (pageKey && pageSpatialCache.has(pageKey)) {
+    return pageSpatialCache.get(pageKey)!;
+  }
+
   const viewport = pdfPage.getViewport({ scale: 1.0 });
   const textContent = await pdfPage.getTextContent();
   const rawItems: RawTextItem[] = [];
@@ -1826,7 +1833,7 @@ export async function extractSpatialBlocksFromPdfPage(pdfPage: any): Promise<Pag
   // Detect geometric table regions & annotate blocks
   const tableResult = detectTableRegions(lines, blocks, pageWidth, pageHeight);
 
-  return {
+  const pageSpatialData: PageSpatialData = {
     pageNum: pdfPage.pageNumber,
     pageWidth,
     pageHeight,
@@ -1835,6 +1842,12 @@ export async function extractSpatialBlocksFromPdfPage(pdfPage: any): Promise<Pag
     tableDetected: tableResult.tableDetected,
     tables: tableResult.tables
   };
+
+  if (pageKey) {
+    pageSpatialCache.set(pageKey, pageSpatialData);
+  }
+
+  return pageSpatialData;
 }
 
 /**

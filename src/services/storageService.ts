@@ -1,5 +1,5 @@
 const DB_NAME = 'MediTransCacheDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -14,6 +14,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains('translations')) {
         db.createObjectStore('translations');
+      }
+      if (!db.objectStoreNames.contains('pdfBuffers')) {
+        db.createObjectStore('pdfBuffers');
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -90,5 +93,31 @@ export async function getTranslationsCache(docKey: string): Promise<any> {
     });
   } catch (e) {
     return {};
+  }
+}
+
+export async function savePdfBufferCache(docKey: string, buffer: ArrayBuffer): Promise<void> {
+  if (!docKey || !buffer) return;
+  try {
+    const db = await openDB();
+    const tx = db.transaction('pdfBuffers', 'readwrite');
+    tx.objectStore('pdfBuffers').put(buffer, docKey);
+  } catch (e) {
+    console.warn('Failed to save PDF buffer cache:', e);
+  }
+}
+
+export async function getPdfBufferCache(docKey: string): Promise<ArrayBuffer | null> {
+  if (!docKey) return null;
+  try {
+    const db = await openDB();
+    const tx = db.transaction('pdfBuffers', 'readonly');
+    const req = tx.objectStore('pdfBuffers').get(docKey);
+    return new Promise((resolve) => {
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch (e) {
+    return null;
   }
 }
