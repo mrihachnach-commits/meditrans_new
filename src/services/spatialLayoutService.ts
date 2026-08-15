@@ -378,7 +378,7 @@ export const TYPOGRAPHY_POLICY: Record<SpatialTextBlock['blockType'], Typography
   caption: {
     preserveSingleLine: false,
     maxScaleDown: 0.90,
-    justify: false,
+    justify: true,
     preserveLastLineLeft: true,
     lineHeightRatio: 1.12
   },
@@ -3502,21 +3502,30 @@ export function drawSpatialOverlayOnCanvas(
 
           const line = p.lines[li];
           const isLastLineOfParagraph = li === p.lines.length - 1;
+
+          const isCaptionBlock = isCaption || origBlock.blockType === 'caption' || origBlock.isCaption;
+          const totalLinesInBlock = bLayout.totalLinesCount;
+          const isCaptionSingleLine = isCaptionBlock && totalLinesInBlock <= 1;
+
           const isJustified = (
             policy.justify || 
             origBlock.blockType === 'paragraph' || 
             origBlock.blockType === 'table_body' || 
             origBlock.blockType === 'table_cell' || 
+            origBlock.blockType === 'caption' ||
+            origBlock.isCaption ||
             origBlock.customAlign === 'justify'
           ) && 
           origBlock.customAlign !== 'center' && 
           origBlock.customAlign !== 'right' && 
-          !isCaption && 
+          !isCaptionSingleLine && 
           !isHeading;
 
           let lineStartX = scaledX + line.xOffset;
 
-          if (isCaption || origBlock.customAlign === 'center') {
+          const shouldCenter = isCaptionSingleLine || origBlock.customAlign === 'center';
+
+          if (shouldCenter) {
             const lineWidth = line.words.reduce((acc, w) => acc + w.width, 0) + (line.listBulletWidth || 0);
             if (availWidth > lineWidth) {
               lineStartX = scaledX + (availWidth - lineWidth) / 2;
