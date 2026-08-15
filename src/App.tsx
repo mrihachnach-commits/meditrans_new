@@ -528,6 +528,36 @@ export default function App() {
   const [summaryRange, setSummaryRange] = useState<{from: number, to: number}>({from: 1, to: 1});
   const summarySignalRef = useRef<AbortController | null>(null);
 
+  // Canvas Layout (Spatial Canvas) Toggle Setting
+  const [enableCanvasLayout, setEnableCanvasLayout] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('enableCanvasLayout');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const enableCanvasLayoutRef = useRef(enableCanvasLayout);
+  useEffect(() => {
+    enableCanvasLayoutRef.current = enableCanvasLayout;
+  }, [enableCanvasLayout]);
+
+  const toggleEnableCanvasLayout = () => {
+    setEnableCanvasLayout(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('enableCanvasLayout', String(next));
+      } catch (e) {
+        console.warn('Could not save enableCanvasLayout setting:', e);
+      }
+      if (!next && translationPanelMode === 'spatial-canvas') {
+        setTranslationPanelMode('translation');
+      }
+      return next;
+    });
+  };
+
   // Initialize summary range when numPages changes
   useEffect(() => {
     if (numPages > 0) {
@@ -2981,59 +3011,62 @@ export default function App() {
 
       if (signal.aborted) return null;
 
-      // 3. AI Spatial Layout Positioning: Execute simultaneously / in tandem with translation (or re-execute if force=true)
+      // 3. AI Spatial Layout Positioning: Background task if Canvas Layout feature is enabled in Settings
       const docKey = fileId || currentFileName || 'default_doc';
       const existingSpatialOverrides = loadPageSpatialOverrides(docKey, targetPage);
       const hasExistingSpatial = existingSpatialOverrides && Object.keys(existingSpatialOverrides).length > 0;
 
-      // If re-translating (force=true) or not yet positioned, re-run AI spatial positioning & layout
-      if ((!hasExistingSpatial || force) && pdfDoc && fullContent && fullContent.trim().length > 0 && !signal.aborted) {
-        try {
-          const pdfPageObj = await pdfDoc.getPage(targetPage);
-          const spatialData = await extractSpatialBlocksFromPdfPage(pdfPageObj);
-          pdfPageObj.cleanup();
+      // Only run AI spatial layout positioning if Canvas Layout is ENABLED in Settings
+      if (enableCanvasLayoutRef.current && (!hasExistingSpatial || force) && pdfDoc && fullContent && fullContent.trim().length > 0 && !signal.aborted) {
+        // Run in background non-blocking so text translation returns instantly
+        (async () => {
+          try {
+            const pdfPageObj = await pdfDoc.getPage(targetPage);
+            const spatialData = await extractSpatialBlocksFromPdfPage(pdfPageObj);
+            pdfPageObj.cleanup();
 
-          if (spatialData && spatialData.blocks && spatialData.blocks.length > 0) {
-            const payloadBlocks = spatialData.blocks.map(b => ({
-              id: b.id,
-              originalText: b.originalText,
-              blockType: b.blockType,
-              fontSize: b.fontSize,
-              isHeading: b.isHeading,
-              y: b.y
-            }));
+            if (spatialData && spatialData.blocks && spatialData.blocks.length > 0) {
+              const payloadBlocks = spatialData.blocks.map(b => ({
+                id: b.id,
+                originalText: b.originalText,
+                blockType: b.blockType,
+                fontSize: b.fontSize,
+                isHeading: b.isHeading,
+                y: b.y
+              }));
 
-            if (translationService.current && typeof translationService.current.translateSpatialBlocksWithAI === 'function') {
-              const aiResults = await translationService.current.translateSpatialBlocksWithAI(payloadBlocks, {
-                pageNum: targetPage,
-                referenceMarkdown: fullContent
-              });
-
-              if (aiResults && aiResults.length > 0) {
-                const updatedBlocks = applySpatialAIResults(spatialData.blocks, aiResults);
-                const overrides: Record<string, Partial<SpatialTextBlock>> = {};
-                updatedBlocks.forEach(b => {
-                  overrides[b.id] = {
-                    translatedText: b.translatedText,
-                    customFontStyle: b.customFontStyle,
-                    customFontSize: b.customFontSize,
-                    blockType: b.blockType,
-                    customAlign: b.customAlign
-                  };
+              if (translationService.current && typeof translationService.current.translateSpatialBlocksWithAI === 'function') {
+                const aiResults = await translationService.current.translateSpatialBlocksWithAI(payloadBlocks, {
+                  pageNum: targetPage,
+                  referenceMarkdown: fullContent
                 });
-                savePageSpatialOverrides(docKey, targetPage, overrides);
-                if (fileId && fileId !== docKey) {
-                  savePageSpatialOverrides(fileId, targetPage, overrides);
-                }
-                if (typeof window !== 'undefined') {
-                  window.dispatchEvent(new CustomEvent('spatial-overrides-updated', { detail: { bookId: docKey, pageNum: targetPage } }));
+
+                if (aiResults && aiResults.length > 0) {
+                  const updatedBlocks = applySpatialAIResults(spatialData.blocks, aiResults);
+                  const overrides: Record<string, Partial<SpatialTextBlock>> = {};
+                  updatedBlocks.forEach(b => {
+                    overrides[b.id] = {
+                      translatedText: b.translatedText,
+                      customFontStyle: b.customFontStyle,
+                      customFontSize: b.customFontSize,
+                      blockType: b.blockType,
+                      customAlign: b.customAlign
+                    };
+                  });
+                  savePageSpatialOverrides(docKey, targetPage, overrides);
+                  if (fileId && fileId !== docKey) {
+                    savePageSpatialOverrides(fileId, targetPage, overrides);
+                  }
+                  if (typeof window !== 'undefined') {
+                    window.dispatchEvent(new CustomEvent('spatial-overrides-updated', { detail: { bookId: docKey, pageNum: targetPage } }));
+                  }
                 }
               }
             }
+          } catch (spatialErr) {
+            console.warn(`[MediTrans] Simultaneous spatial positioning notice for page ${targetPage}:`, spatialErr);
           }
-        } catch (spatialErr) {
-          console.warn(`[MediTrans] Simultaneous spatial positioning notice for page ${targetPage}:`, spatialErr);
-        }
+        })();
       }
 
       return fullContent;
@@ -4360,18 +4393,22 @@ export default function App() {
                     >
                       <Maximize className="w-3 h-3" />
                     </button>
-                    <div className="w-px h-3 bg-slate-200 mx-0.5" />
-                    <button 
-                      onClick={() => setTranslationPanelMode(m => m === 'spatial-canvas' ? 'translation' : 'spatial-canvas')}
-                      className={cn(
-                        "flex items-center gap-1 px-1.5 py-1 rounded transition-all text-[9px] font-black uppercase tracking-tight",
-                        translationPanelMode === 'spatial-canvas' ? "bg-indigo-600 text-white shadow-md" : "hover:bg-white text-slate-600"
-                      )}
-                      title="Bật/Tắt chế độ Dynamic Canvas (Bảo tồn vị trí chữ + giữ nguyên hình ảnh, bảng biểu)"
-                    >
-                      <Layers className="w-3 h-3" />
-                      <span className="hidden xl:inline">Spatial Canvas</span>
-                    </button>
+                    {enableCanvasLayout && (
+                      <>
+                        <div className="w-px h-3 bg-slate-200 mx-0.5" />
+                        <button 
+                          onClick={() => setTranslationPanelMode(m => m === 'spatial-canvas' ? 'translation' : 'spatial-canvas')}
+                          className={cn(
+                            "flex items-center gap-1 px-1.5 py-1 rounded transition-all text-[9px] font-black uppercase tracking-tight",
+                            translationPanelMode === 'spatial-canvas' ? "bg-indigo-600 text-white shadow-md" : "hover:bg-white text-slate-600"
+                          )}
+                          title="Bật/Tắt chế độ Dynamic Canvas (Bảo tồn vị trí chữ + giữ nguyên hình ảnh, bảng biểu)"
+                        >
+                          <Layers className="w-3 h-3" />
+                          <span className="hidden xl:inline">Spatial Canvas</span>
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -4466,17 +4503,19 @@ export default function App() {
                       <Languages className="w-3 h-3" />
                       <span>Dịch Text</span>
                     </button>
-                    <button 
-                      onClick={() => setTranslationPanelMode('spatial-canvas')}
-                      className={cn(
-                        "flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
-                        translationPanelMode === 'spatial-canvas' ? "bg-white shadow-xs text-indigo-600" : "text-slate-500 hover:text-slate-700"
-                      )}
-                      title="Spatial Layout: Đè Canvas giữ nguyên vị trí chữ + hình"
-                    >
-                      <Layers className="w-3 h-3 text-indigo-500" />
-                      <span>Canvas Layout</span>
-                    </button>
+                    {enableCanvasLayout && (
+                      <button 
+                        onClick={() => setTranslationPanelMode('spatial-canvas')}
+                        className={cn(
+                          "flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
+                          translationPanelMode === 'spatial-canvas' ? "bg-white shadow-xs text-indigo-600" : "text-slate-500 hover:text-slate-700"
+                        )}
+                        title="Spatial Layout: Đè Canvas giữ nguyên vị trí chữ + hình"
+                      >
+                        <Layers className="w-3 h-3 text-indigo-500" />
+                        <span>Canvas Layout</span>
+                      </button>
+                    )}
                     <button 
                       onClick={() => setTranslationPanelMode('summary')}
                       className={cn(
@@ -5387,6 +5426,37 @@ export default function App() {
                       <option value="gemini-3.6-flash">Chuyên sâu (3.6 Flash)</option>
                     </select>
                   </div>
+                </div>
+
+                {/* Canvas Layout Toggle Setting */}
+                <div className="space-y-3 pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Layers className="w-4 h-4 text-indigo-600" />
+                      <div>
+                        <label className="text-xs font-bold text-slate-700 uppercase tracking-widest block">
+                          Chế độ Canvas Layout (Bản dịch đè)
+                        </label>
+                      </div>
+                    </div>
+                    <button 
+                      type="button"
+                      onClick={toggleEnableCanvasLayout}
+                      className={cn(
+                        "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none cursor-pointer shrink-0",
+                        enableCanvasLayout ? "bg-indigo-600" : "bg-slate-200"
+                      )}
+                    >
+                      <span className={cn(
+                        "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                        enableCanvasLayout ? "translate-x-6" : "translate-x-1"
+                      )} />
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500 leading-relaxed bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                    💡 <strong>Bật:</strong> Xem bản dịch xếp đè vị trí chữ & hình ảnh gốc PDF.<br/>
+                    ⚡ <strong>Tắt:</strong> Tối ưu hóa dịch văn bản thuần (Dịch Text) siêu tốc, chuẩn xác và tiết kiệm hạn mức API.
+                  </p>
                 </div>
 
                 <div className="space-y-4 pt-4 border-t border-slate-100">
