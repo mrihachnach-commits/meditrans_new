@@ -7,6 +7,7 @@ export class GeminiService implements TranslationService {
   private exhaustedKeys: Set<string> = new Set();
   private static globalKeyLastUsed: Map<string, number> = new Map();
   private static lastSuccessfulKey: string | null = null;
+  private static requestDispatchLock: Promise<void> = Promise.resolve();
 
   constructor(apiKeys?: string | string[], modelName: string = "gemini-flash-lite-latest") {
     this.modelName = modelName;
@@ -26,8 +27,26 @@ export class GeminiService implements TranslationService {
     console.log(`[MediTrans] GeminiService: ${this.apiKeys.length} keys loaded. Model: ${modelName}`);
   }
 
-  private getMIN_REQUEST_INTERVAL(): number {
-    return this.apiKeys.length > 5 ? 500 : 800;
+  public static isProxyKey(key: string, engineOrModel?: string): boolean {
+    if (!key) return false;
+    const clean = key.trim();
+    const eng = (engineOrModel || '').toLowerCase();
+    if (clean.startsWith('sk-') || clean.startsWith('sh-') || clean.startsWith('sai-')) return true;
+    if (eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy')) return true;
+    if (!clean.startsWith('AIzaSy') && clean.length >= 16 && (eng === 'shopaikey' || eng.includes('proxy'))) return true;
+    return false;
+  }
+
+  private isCurrentKeyProxy(key: string): boolean {
+    return GeminiService.isProxyKey(key, this.modelName);
+  }
+
+  private getMIN_REQUEST_INTERVAL(key: string): number {
+    if (this.isCurrentKeyProxy(key)) {
+      // Stagger spacing for proxy multithreading
+      return this.apiKeys.length > 1 ? 100 : 200;
+    }
+    return this.apiKeys.length > 5 ? 400 : 700;
   }
 
   private getBestAvailableKey(): string | null {
@@ -35,18 +54,20 @@ export class GeminiService implements TranslationService {
 
     const now = Date.now();
     const validKeys = this.apiKeys.filter(k => !this.exhaustedKeys.has(k));
-    if (validKeys.length === 0) return null;
+    
+    // If all keys are marked exhausted, use any key to avoid starving
+    const candidateKeys = validKeys.length > 0 ? validKeys : this.apiKeys;
 
-    if (GeminiService.lastSuccessfulKey && validKeys.includes(GeminiService.lastSuccessfulKey)) {
+    if (GeminiService.lastSuccessfulKey && candidateKeys.includes(GeminiService.lastSuccessfulKey)) {
       const lastUsed = GeminiService.globalKeyLastUsed.get(GeminiService.lastSuccessfulKey) || 0;
-      if (now - lastUsed >= this.getMIN_REQUEST_INTERVAL()) {
+      if (now - lastUsed >= this.getMIN_REQUEST_INTERVAL(GeminiService.lastSuccessfulKey)) {
         return GeminiService.lastSuccessfulKey;
       }
     }
 
-    validKeys.sort((a, b) => (GeminiService.globalKeyLastUsed.get(a) || 0) - (GeminiService.globalKeyLastUsed.get(b) || 0));
+    candidateKeys.sort((a, b) => (GeminiService.globalKeyLastUsed.get(a) || 0) - (GeminiService.globalKeyLastUsed.get(b) || 0));
 
-    return validKeys[0];
+    return candidateKeys[0];
   }
 
   private async acquireKeyAndInstance(): Promise<{ ai: any, key: string }> {
@@ -59,8 +80,9 @@ export class GeminiService implements TranslationService {
     await this.waitForKeyRateLimit(key);
     
     try {
-      console.log(`[MediTrans] Using key: ...${key.substring(key.length - 4)} for ${this.modelName}`);
-      if (key.startsWith('sk-')) {
+      const isProxy = this.isCurrentKeyProxy(key);
+      console.log(`[MediTrans] Using key: ...${key.substring(key.length - 4)} (${isProxy ? 'ShopAIKey/Proxy' : 'Google Gemini'}) for ${this.modelName}`);
+      if (isProxy) {
         return { ai: null, key };
       }
       const ai = new GoogleGenerativeAI(key);
@@ -74,11 +96,11 @@ export class GeminiService implements TranslationService {
   private async waitForKeyRateLimit(key: string): Promise<void> {
     const now = Date.now();
     const lastUsed = GeminiService.globalKeyLastUsed.get(key) || 0;
-    const interval = this.getMIN_REQUEST_INTERVAL();
+    const interval = this.getMIN_REQUEST_INTERVAL(key);
     
     if (now - lastUsed < interval) {
       const waitTime = interval - (now - lastUsed);
-      if (waitTime > 50) {
+      if (waitTime > 30) {
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
     }
@@ -87,9 +109,16 @@ export class GeminiService implements TranslationService {
   }
 
   private rotateKey(exhaustedKey: string, isQuotaError: boolean = true): boolean {
+    if (this.apiKeys.length <= 1) {
+      // Single Key mode: Never permanently ban the single key!
+      // Return true so exponential backoff will retry with the single key without crashing multithreading.
+      console.warn(`[MediTrans] Single key ${isQuotaError ? 'quota/rate-limit' : 'temporary error'}. Will retry with exponential backoff.`);
+      return true;
+    }
+
     if (exhaustedKey) {
-      const waitTime = isQuotaError ? 30000 : 5000;
-      console.warn(`[MediTrans] Key ...${exhaustedKey.slice(-4)} ${isQuotaError ? 'QUOTA EXHAUSTED' : 'ERROR'}. Backoff: ${waitTime}ms`);
+      const waitTime = isQuotaError ? 20000 : 5000;
+      console.warn(`[MediTrans] Key ...${exhaustedKey.slice(-4)} ${isQuotaError ? 'QUOTA EXHAUSTED' : 'ERROR'}. Cooldown: ${waitTime}ms`);
       this.exhaustedKeys.add(exhaustedKey);
       
       setTimeout(() => {
@@ -98,7 +127,7 @@ export class GeminiService implements TranslationService {
       }, waitTime);
     }
     
-    return this.getBestAvailableKey() !== null;
+    return true;
   }
 
   private mapModelForOpenAI(modelName: string): string {
@@ -134,6 +163,15 @@ export class GeminiService implements TranslationService {
     return modelName;
   }
 
+  private getProxyBaseUrl(): string {
+    const baseUrl = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customBaseUrl') : null) || 'https://api.shopaikey.com/v1';
+    let cleanBaseUrl = baseUrl.trim().replace(/\/+$/, '');
+    if (!cleanBaseUrl.endsWith('/chat/completions')) {
+      cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
+    }
+    return cleanBaseUrl;
+  }
+
   private async *callOpenAIStream(
     key: string,
     model: string,
@@ -142,12 +180,7 @@ export class GeminiService implements TranslationService {
     imageBase64: string,
     signal?: AbortSignal
   ): AsyncGenerator<string> {
-    const baseUrl = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customBaseUrl') : null) || 'https://api.shopaikey.com/v1';
-    let cleanBaseUrl = baseUrl.trim().replace(/\/+$/, '');
-    if (!cleanBaseUrl.endsWith('/chat/completions')) {
-      cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
-    }
-
+    const cleanBaseUrl = this.getProxyBaseUrl();
     const mappedModel = this.mapModelForOpenAI(model);
 
     const messages: any[] = [];
@@ -184,7 +217,7 @@ export class GeminiService implements TranslationService {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${key}`
+        "Authorization": `Bearer ${key.trim()}`
       },
       body: JSON.stringify(body),
       signal
@@ -202,6 +235,7 @@ export class GeminiService implements TranslationService {
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
+    let yieldedAny = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -221,8 +255,9 @@ export class GeminiService implements TranslationService {
           const jsonStr = trimmed.slice(5).trim();
           try {
             const parsed = JSON.parse(jsonStr);
-            const content = parsed.choices?.[0]?.delta?.content;
+            const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.message?.content;
             if (content) {
+              yieldedAny = true;
               yield content;
             }
           } catch (e) {
@@ -237,7 +272,7 @@ export class GeminiService implements TranslationService {
       if (jsonStr && jsonStr !== "[DONE]") {
         try {
           const parsed = JSON.parse(jsonStr);
-          const content = parsed.choices?.[0]?.delta?.content;
+          const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.message?.content;
           if (content) yield content;
         } catch (e) {}
       }
@@ -252,12 +287,7 @@ export class GeminiService implements TranslationService {
     imageBase64: string,
     signal?: AbortSignal
   ): Promise<string> {
-    const baseUrl = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customBaseUrl') : null) || 'https://api.shopaikey.com/v1';
-    let cleanBaseUrl = baseUrl.trim().replace(/\/+$/, '');
-    if (!cleanBaseUrl.endsWith('/chat/completions')) {
-      cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
-    }
-
+    const cleanBaseUrl = this.getProxyBaseUrl();
     const mappedModel = this.mapModelForOpenAI(model);
 
     const messages: any[] = [];
@@ -294,7 +324,7 @@ export class GeminiService implements TranslationService {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${key}`
+        "Authorization": `Bearer ${key.trim()}`
       },
       body: JSON.stringify(body),
       signal
@@ -317,7 +347,7 @@ export class GeminiService implements TranslationService {
     const systemInstruction = "Bạn là dịch giả y khoa. Dịch chính xác và ngắn gọn.";
 
     try {
-      if (cleanKey.startsWith('sk-')) {
+      if (this.isCurrentKeyProxy(cleanKey)) {
         const text = await this.callOpenAINonStream(cleanKey, this.modelName, systemInstruction, prompt, "", undefined);
         const latencyMs = Date.now() - startTime;
         return { success: true, resultText: text || "Thành công", latencyMs };
@@ -338,13 +368,9 @@ export class GeminiService implements TranslationService {
   public async testSingleKey(key: string): Promise<boolean> {
     if (!key || !key.trim()) return false;
     const cleanKey = key.trim();
-    if (cleanKey.startsWith('sk-')) {
+    if (this.isCurrentKeyProxy(cleanKey)) {
       try {
-        const baseUrl = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customBaseUrl') : null) || 'https://api.shopaikey.com/v1';
-        let cleanBaseUrl = baseUrl.trim().replace(/\/+$/, '');
-        if (!cleanBaseUrl.endsWith('/chat/completions')) {
-          cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
-        }
+        const cleanBaseUrl = this.getProxyBaseUrl();
         const response = await fetch(cleanBaseUrl, {
           method: 'POST',
           headers: {
@@ -446,8 +472,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
   + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |).
   + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
 
-
-    const MAX_RETRIES = 5;
+    const MAX_RETRIES = 6;
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
@@ -455,15 +480,17 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         throw new Error("Translation aborted");
       }
       
-      let ai, key;
+      let ai, key: string;
       try {
         ({ ai, key } = await this.acquireKeyAndInstance());
       } catch (e: any) {
         throw new Error("Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.");
       }
 
-      // Handle ShopAIKey / OpenAI Proxy Key (sk-...)
-      if (key.startsWith('sk-')) {
+      const isProxy = this.isCurrentKeyProxy(key);
+
+      // Handle ShopAIKey / OpenAI Proxy Key
+      if (isProxy) {
         try {
           let fullText = "";
           for await (const chunkText of this.callOpenAIStream(key, requestModel, systemInstruction, prompt, imageBuffer, signal)) {
@@ -472,18 +499,33 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
             yield chunkText;
           }
           GeminiService.lastSuccessfulKey = key;
+          
           if (!fullText) {
-            throw new Error("Proxy API returned no text.");
+            // Auto fallback to non-stream if stream ended with 0 text
+            console.warn(`[MediTrans] Stream returned empty for page ${pageNumber}. Retrying non-stream...`);
+            const fallbackText = await this.callOpenAINonStream(key, requestModel, systemInstruction, prompt, imageBuffer, signal);
+            if (fallbackText) {
+              fullText = fallbackText;
+              yield fallbackText;
+            } else {
+              throw new Error("Proxy API returned empty response.");
+            }
           }
+          
           console.log(`[MediTrans] Translation for page: ${pageNumber} finished via ShopAIKey/Proxy in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
-          break;
+          return;
         } catch (error: any) {
           if (signal?.aborted || error.message === "Translation aborted") {
             throw new Error("Translation aborted");
           }
           const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
+          const isServerErr = error.message?.includes("500") || error.message?.includes("502") || error.message?.includes("503") || error.message?.includes("504") || error.message?.toLowerCase().includes("fetch");
+          
           if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
             retryCount++;
+            const delay = Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500);
+            console.warn(`[MediTrans] Retrying page ${pageNumber} (attempt ${retryCount}/${MAX_RETRIES}) after ${delay.toFixed(0)}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
           throw error;
@@ -566,7 +608,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         if ((isQuotaError || isUnavailableError || isPermissionDeniedError || isNetworkError) && retryCount < MAX_RETRIES) {
           const canRotate = this.rotateKey(key, isQuotaError || isPermissionDeniedError);
           retryCount++;
-          if (canRotate) {
+          if (canRotate && this.apiKeys.length > 1) {
             await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
             continue;
           }
@@ -588,12 +630,12 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
     
     if (signal?.aborted) throw new Error("Translation aborted");
 
-    const MAX_RETRIES = 5;
+    const MAX_RETRIES = 6;
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
       if (signal?.aborted) throw new Error("Translation aborted");
-      let ai, key;
+      let ai, key: string;
       try {
         ({ ai, key } = await this.acquireKeyAndInstance());
       } catch (e) {
@@ -634,8 +676,9 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
   + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |).
   + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
 
-      if (key.startsWith('sk-')) {
+      const isProxy = this.isCurrentKeyProxy(key);
 
+      if (isProxy) {
         try {
           const text = await this.callOpenAINonStream(key, requestModel, systemInstruction, prompt, imageBuffer, signal);
           const resultText = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
@@ -646,6 +689,8 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
           const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
           if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
             retryCount++;
+            const delay = Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500);
+            await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
           throw error;
@@ -683,7 +728,10 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
                               error.message?.toLowerCase().includes("fetch failed");
 
         if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuotaError || isPermissionDeniedError || isNetworkError)) {
-          retryCount++; continue;
+          retryCount++;
+          const delay = Math.pow(1.5, retryCount) * 1000 + Math.random() * 500;
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
         }
         throw error;
       }
@@ -695,14 +743,14 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
     const systemInstruction = `Chuyên gia từ điển y khoa. Trả về JSON.`;
     const prompt = `Tra cứu: "${term}"`;
 
-    let ai, key;
+    let ai, key: string;
     try {
       ({ ai, key } = await this.acquireKeyAndInstance());
     } catch (e) {
       throw new Error("Không tìm thấy API Key.");
     }
 
-    if (key.startsWith('sk-')) {
+    if (this.isCurrentKeyProxy(key)) {
       const text = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, "", undefined);
       return JSON.parse(text.replace(/```json\n?|```/g, '').trim());
     }
@@ -737,7 +785,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
   }
 
   async performOCR(imageBuffer: string): Promise<string> {
-    let ai, key;
+    let ai, key: string;
     try {
        ({ ai, key } = await this.acquireKeyAndInstance());
     } catch (e) {
@@ -747,7 +795,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
     const systemInstruction = `OCR Y KHOA: Trích xuất văn bản chính xác.`;
     const prompt = "Hãy trích xuất văn bản từ hình ảnh này.";
 
-    if (key.startsWith('sk-')) {
+    if (this.isCurrentKeyProxy(key)) {
       return await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, imageBuffer, undefined);
     }
 
@@ -772,10 +820,10 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
     const systemInstruction = `BÁC SĨ CHUYÊN KHOA: Tóm tắt nội dung y khoa Markdown.`;
     const prompt = `Tóm tắt (${type}):\n\n${content}`;
 
-    let ai, key;
+    let ai, key: string;
     try { ({ ai, key } = await this.acquireKeyAndInstance()); } catch (e) { throw new Error("API Key error."); }
 
-    if (key.startsWith('sk-')) {
+    if (this.isCurrentKeyProxy(key)) {
       for await (const chunkText of this.callOpenAIStream(key, this.modelName, systemInstruction, prompt, "", signal)) {
         if (signal?.aborted) break;
         yield chunkText;
@@ -795,6 +843,237 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         if (chunk.text()) yield chunk.text();
       }
     } catch (error: any) { throw error; }
+  }
+
+  async translateSpatialBlocksWithAI(
+    blocks: Array<{
+      id: string;
+      originalText: string;
+      blockType: string;
+      fontSize: number;
+      isHeading?: boolean;
+      y: number;
+    }>,
+    contextInfo?: { 
+      pageNum?: number; 
+      bookTitle?: string;
+      referenceMarkdown?: string;
+    }
+  ): Promise<Array<{
+    id: string;
+    translatedText: string;
+    fontStyle?: 'normal' | 'bold' | 'italic';
+    fontSizeScale?: number;
+    blockType?: string;
+    customAlign?: 'left' | 'center' | 'right';
+  }>> {
+    if (!blocks || blocks.length === 0) return [];
+
+    let ai, key: string;
+    try {
+      ({ ai, key } = await this.acquireKeyAndInstance());
+    } catch (e: any) {
+      throw new Error(e.message || "Không có API Key khả dụng.");
+    }
+
+    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP & THIẾT KẾ CHẾ BẢN SÁCH CHUYÊN NGHIỆP (Medical Desktop Publishing / DTP Specialist).
+Nhiệm vụ: Dịch và định dạng hoàn hảo 100% tất cả các khối văn bản từ trang tài liệu y khoa tiếng Anh sang tiếng Việt chuẩn y khoa, bảo toàn tuyệt đối cấu trúc dòng, danh sách, in đậm, in nghiêng y hệt tài liệu gốc.
+
+QUY TẮC BẮT BUỘC VỀ ĐỊNH DẠNG & BẢO TỒN CẤU TRÚC (HIGH FIDELITY FORMATTING):
+1. BẢO TỒN CÁC CÂU, CÁC Ý VÀ DANH SÁCH (LIST PRESERVATION):
+   - Nếu khối văn bản gốc chứa danh sách (1., 2., 3., 4., hoặc a), b), c) hoặc •, -): BẮT BUỘC sử dụng ký tự xuống dòng '\\n' để phân tách từng ý riêng biệt, ví dụ:
+     "Bốn bước cơ bản liên quan đến việc tạo ảnh cộng hưởng từ (MRI)—\\n1. Đặt bệnh nhân vào trong từ trường máy chụp\\n2. Gửi xung sóng vô tuyến (RF) bằng cuộn dây\\n3. Thu nhận tín hiệu từ bệnh nhân bằng cuộn dây\\n4. Chuyển đổi tín hiệu thành hình ảnh bằng hệ thống máy tính xử lý phức tạp."
+   - TUYỆT ĐỐI KHÔNG DỒN CÁC Ý DANH SÁCH 1, 2, 3, 4 THÀNH MỘT DÒNG DUY NHẤT.
+
+2. BẢO TỒN ĐỊNH DẠNG IN ĐẬM VÀ IN NGHIÊNG (BOLD & ITALIC PRESERVATION):
+   - Câu hỏi, tiêu đề phụ in nghiêng: Bọc bằng dấu sao '*...*', ví dụ: "*Các proton giúp tạo ảnh MRI như thế nào?*", đồng thời đặt "fontStyle": "italic".
+   - Thuật ngữ, từ khóa quan trọng hoặc tiêu đề in đậm: Bọc bằng '**...**' hoặc đặt "fontStyle": "bold".
+   - Tiêu đề chương / Huy hiệu / Header: Dịch chuẩn xác (ví dụ: "CHAPTER 1" -> "CHƯƠNG 1", "Section 1" -> "Phần 1", "Basic Principles" -> "Nguyên tắc cơ bản").
+
+3. QUY TẮC ZERO ENGLISH RESIDUE (DỊCH 100% SẠCH SẼ):
+   - Dịch toàn bộ mọi nhãn chú thích trong sơ đồ/hình ảnh (Diagram callouts/labels), kể cả các cụm từ ngắn:
+     * "Complete LM recovered" -> "Hồi phục hoàn toàn từ hóa dọc (LM)"
+     * "forces add up to form LM" -> "Các lực cộng lại tạo thành từ hóa dọc (LM)"
+     * "TM ↓, LM ↑" -> "TM giảm, LM tăng"
+     * "Longitudinal relaxation" -> "Thư giãn dọc"
+     * "Transverse relaxation" -> "Thư giãn ngang"
+     * "More protons precess along +ve side of z-axis" -> "Nhiều proton tiến động theo chiều dương trục Z"
+     * "After cancelling few remain along +ve z-side" -> "Sau khi triệt tiêu, còn lại một số theo chiều dương trục Z"
+     * "Slice Selection Gradient" -> "Gradient chọn lát cắt"
+     * "Phase Encoding Gradient" -> "Gradient mã hóa pha"
+     * "Frequency Encoding Gradient" -> "Gradient mã hóa tần số"
+     * "RF pulse" -> "Xung RF (Tần số vô tuyến)"
+     * "dephasing / rephasing" -> "Mất pha / Tái đồng pha"
+     * "precession / precessing" -> "Tiến động / Đang tiến động"
+     * "decay / recovery" -> "Suy giảm / Phục hồi"
+     * "time (ms)" -> "Thời gian (ms)"
+     * "amplitude / frequency" -> "Biên độ / Tần số"
+   - Tiêu đề sách, tiêu đề chương, tiêu đề hình ảnh:
+     * "Fig. 2.1: Longitudinal relaxation" -> "Hình 2.1: Thư giãn dọc"
+     * "T1, T2 Relaxations and Image Weighting 9" -> "9 T1, T2 Thư giãn và Trọng số Hình ảnh"
+
+4. KÝ HIỆU DUY NHẤT ĐƯỢC GIỮ NGUYÊN:
+   - Ký hiệu trục tọa độ đơn lẻ: X, Y, Z, +ve, -ve.
+   - Đơn vị đo lường quốc tế: 1.5 T, 64 MHz, ms, s, °, %.
+
+5. THIẾT KẾ CĂN CHỈNH & TỈ LỆ:
+   - Giữ nguyên "id" chính xác của từng khối. Không bỏ sót bất kỳ khối nào.
+   - fontSizeScale: Đề xuất tỉ lệ (0.80 - 1.15) để văn bản tiếng Việt vừa vặn với kích thước ban đầu trên canvas.
+   - customAlign: "center" cho chú thích hình/tiêu đề giữa, "left" cho đoạn văn/danh sách, "right" cho số trang/header phải.
+
+Trả về kết quả ở định dạng JSON Array chứa tất cả các phần tử.`;
+
+    const referenceContext = contextInfo?.referenceMarkdown 
+      ? `\n\nBẢN DỊCH THAM KHẢO CỦA TRANG NÀY ĐỂ THỐNG NHẤT THUẬT NGỮ:\n"""\n${contextInfo.referenceMarkdown.slice(0, 3000)}\n"""\n`
+      : '';
+
+    const prompt = `Dưới đây là toàn bộ danh sách các khối văn bản trên trang sách y khoa (Trang ${contextInfo?.pageNum || 1}):${referenceContext}
+
+DANH SÁCH CÁC KHỐI CẦN DỊCH & ĐỊNH VỊ:
+${JSON.stringify(blocks.map(b => ({
+      id: b.id,
+      originalText: b.originalText,
+      blockType: b.blockType,
+      fontSize: b.fontSize,
+      isHeading: b.isHeading,
+      y: b.y
+    })), null, 2)}
+
+Hãy dịch 100% không còn sót tiếng Anh và trả về JSON Array:
+[
+  {
+    "id": "blk_1",
+    "translatedText": "Nội dung tiếng Việt dịch chuẩn...",
+    "fontStyle": "normal" | "bold" | "italic",
+    "fontSizeScale": 1.0,
+    "blockType": "heading" | "paragraph" | "caption" | "diagram_label" | "header" | "footer" | "symbol",
+    "customAlign": "left" | "center" | "right"
+  }
+]`;
+
+    if (this.isCurrentKeyProxy(key)) {
+      const resText = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, "", undefined);
+      try {
+        const clean = resText.replace(/```json\n?|```/g, '').trim();
+        return JSON.parse(clean);
+      } catch (err) {
+        console.error("[SpatialAI] Parse error OpenAI Proxy:", err);
+        return [];
+      }
+    }
+
+    try {
+      const genModel = ai.getGenerativeModel({
+        model: this.modelName,
+        systemInstruction: systemInstruction,
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: "application/json"
+        }
+      });
+
+      const result = await genModel.generateContent(prompt);
+      const response = await result.response;
+      const resText = response.text().replace(/```json\n?|```/g, '').trim();
+      return JSON.parse(resText);
+    } catch (error: any) {
+      console.error("[SpatialAI] Error translating spatial blocks with Gemini:", error);
+      throw error;
+    }
+  }
+
+  async generateSpatialBlockVariants(
+    context: {
+      originalText: string;
+      translatedText?: string;
+      blockType: string;
+      semanticType?: string;
+      layoutContext?: string;
+      preferredLineCount?: number;
+      targetWidth?: number;
+      targetHeight?: number;
+      isBold?: boolean;
+      isItalic?: boolean;
+      isSerif?: boolean;
+    }
+  ): Promise<string[]> {
+    if (!context || !context.originalText) return [];
+
+    let ai, key: string;
+    try {
+      ({ ai, key } = await this.acquireKeyAndInstance());
+    } catch (e: any) {
+      console.warn("[SpatialAI] Cannot acquire API key for variants, using fallback:", e.message);
+      return [];
+    }
+
+    const roleGuidelineMap: Record<string, string> = {
+      chapter_title: "CHƯƠNG TIÊU ĐỀ: Bảo toàn tuyệt đối ý nghĩa, giữ nguyên số dòng gốc (preferredLineCount), có hình dáng silhouette ngắt dòng cân đối.",
+      heading: "TIÊU ĐỀ KHỐI/MỤC: Giữ đúng số dòng gốc, dùng thuật ngữ y khoa Việt Nam ngắn gọn, súc tích, tránh từ thừa.",
+      caption: "CHÚ THÍCH (CAPTION): Ngắn gọn, súc tích, bảo toàn ý nghĩa chú thích hình/bảng, giữ width-profile vừa vặn.",
+      table_caption: "CHÚ THÍCH BẢNG: Giữ đúng thuật ngữ bảng, súc tích, vừa vặn bề rộng bảng.",
+      table_header: "TIÊU ĐỀ CỘT BẢNG: Cực kỳ súc tích, giữ nguyên ý nghĩa cột, vừa vặn khung ô bảng.",
+      diagram_label: "NHÃN SƠ ĐỒ/HÌNH: Đúng 1 dòng đơn (single line), ưu tiên giữ thuật ngữ viết tắt chuẩn (như ETE, TIRADS) dạng 'ETE: Xâm lấn ngoài tuyến giáp'."
+    };
+
+    const roleGuideline = roleGuidelineMap[context.blockType] || "Súc tích, bảo toàn 100% ý nghĩa y khoa và thuật ngữ chuyên ngành.";
+
+    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP & THIẾT KẾ CHẾ BẢN SÁCH CHUYÊN NGHIỆP (Medical DTP Specialist).
+Mục tiêu: Tạo tối đa 3 phương án dịch tiếng Việt thay thế (alternative translations) cho khối văn bản y khoa, dùng để tối ưu không gian hiển thị trên bản DTP PDF.
+
+VAI TRÒ KHỐI & CHỈ DẪN NẮT DÒNG:
+${roleGuideline}
+
+YÊU CẦU BẤT DI BẤT DỊCH:
+1. Bảo toàn 100% ý nghĩa y khoa, tuyệt đối KHÔNG thêm, KHÔNG bớt thông tin.
+2. Giữ nguyên toàn bộ số, đơn vị (mm, cm, T, %, mg, mL, µm...), danh pháp, mã phân loại (T1, T2, TIRADS, ETE, pH...), tên gen và trích dẫn [1], [39]...
+3. Giữ nguyên mức độ chắc chắn y khoa (may/might -> có thể, không tự ý chuyển thành khẳng định tuyệt đối).
+4. Sử dụng câu văn tiếng Việt tự nhiên, chuẩn phong cách sách giáo khoa y khoa.
+5. Ưu tiên rút gọn ngữ pháp (modifier compression, redundancy removal, nominalization) nhưng TUYỆT ĐỐI KHÔNG bỏ danh từ có nghĩa y khoa.
+
+Trả về duy nhất 1 JSON Array danh sách string các phương án dịch tiếng Việt (ví dụ: ["Phương án 1", "Phương án 2", "Phương án 3"]).`;
+
+    const prompt = `Gốc (English): "${context.originalText}"
+Bản dịch gốc: "${context.translatedText || ''}"
+Loại khối (Block Type): "${context.blockType}"
+Bố cục (Layout Context): "${context.layoutContext || 'page'}"
+Dòng dự kiến (Preferred Line Count): ${context.preferredLineCount || 1}
+Bề rộng khung (Target Width): ${context.targetWidth ? Math.round(context.targetWidth) + ' pt' : 'Unspecified'}
+Chiều cao khung (Target Height): ${context.targetHeight ? Math.round(context.targetHeight) + ' pt' : 'Unspecified'}
+
+Hãy tạo tối đa 3 phương án dịch tiếng Việt thay thế ngắn gọn, chuẩn xác y khoa và trả về JSON Array:`;
+
+    if (this.isCurrentKeyProxy(key)) {
+      try {
+        const resText = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, "", undefined);
+        const clean = resText.replace(/```json\n?|```/g, '').trim();
+        const parsed = JSON.parse(clean);
+        return Array.isArray(parsed) ? parsed.filter(s => typeof s === 'string' && s.trim().length > 0) : [];
+      } catch (err) {
+        console.warn("[SpatialAI] Error generating variants with OpenAI Proxy:", err);
+        return [];
+      }
+    }
+
+    try {
+      const genModel = ai.getGenerativeModel({
+        model: this.modelName,
+        systemInstruction: systemInstruction,
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: "application/json"
+        }
+      });
+
+      const result = await genModel.generateContent(prompt);
+      const response = await result.response;
+      const resText = response.text().replace(/```json\n?|```/g, '').trim();
+      const parsed = JSON.parse(resText);
+      return Array.isArray(parsed) ? parsed.filter(s => typeof s === 'string' && s.trim().length > 0) : [];
+    } catch (error: any) {
+      console.warn("[SpatialAI] Error generating variants with Gemini:", error);
+      return [];
+    }
   }
 }
 

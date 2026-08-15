@@ -13,6 +13,14 @@ export interface TranslationService {
   hasApiKey(): Promise<boolean>;
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
   testSingleKeyTranslation(apiKey: string, sampleText: string): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }>;
+  translateSpatialBlocksWithAI?(blocks: any[], options?: { pageNum?: number; referenceMarkdown?: string }): Promise<any[]>;
+  generateSpatialBlockVariants?(context: {
+    originalText: string;
+    translatedText?: string;
+    blockType: string;
+    preferredLineCount?: number;
+    targetWidth?: number;
+  }): Promise<string[]>;
 }
 
 export type TranslationEngine = 'gemini-3.6-flash' | 'gemini-3-flash-preview' | 'gemini-flash-lite-latest';

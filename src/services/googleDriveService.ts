@@ -260,6 +260,10 @@ export async function uploadFileToDrive(
 
 /**
  * Download file binary from Google Drive as ArrayBuffer for PDF.js
+ * Implements 3-stage fallback:
+ * 1. Direct fetch with Authorization header
+ * 2. Direct fetch with access_token query param (bypasses CORS preflight)
+ * 3. Server proxy (/api/drive/download)
  */
 export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<ArrayBuffer> {
   const token = await getGoogleOAuthToken();
@@ -271,24 +275,82 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
   }, 60000); // 60 second timeout
 
   try {
-    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-      headers: {
-        'Authorization': `Bearer ${token}`
-      },
-      signal: controller.signal
-    });
+    // Attempt 1: Direct fetch with Authorization header
+    try {
+      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        signal: controller.signal
+      });
 
-    clearTimeout(timeoutId);
+      if (response.ok) {
+        clearTimeout(timeoutId);
+        return await response.arrayBuffer();
+      }
 
-    if (!response.ok) {
       if (response.status === 401) {
         cachedToken = null;
         throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
       }
-      throw new Error(`Không thể tải tệp từ Google Drive (Mã lỗi ${response.status})`);
+
+      console.warn(`[MediTrans AI] Direct Drive download status ${response.status}, trying access_token query parameter...`);
+    } catch (directErr: any) {
+      if (directErr.message?.includes('Xác thực Google Drive hết hạn')) {
+        throw directErr;
+      }
+      console.warn(`[MediTrans AI] Direct Drive header fetch failed (${directErr.message}), trying access_token query parameter fallback...`);
     }
 
-    return await response.arrayBuffer();
+    // Attempt 2: Direct fetch with access_token query param (Simple GET without custom headers to avoid CORS preflight)
+    try {
+      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&access_token=${encodeURIComponent(token)}`, {
+        signal: controller.signal
+      });
+
+      if (response.ok) {
+        clearTimeout(timeoutId);
+        return await response.arrayBuffer();
+      }
+
+      if (response.status === 401) {
+        cachedToken = null;
+        throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
+      }
+
+      console.warn(`[MediTrans AI] Query token Drive download status ${response.status}, trying server proxy fallback...`);
+    } catch (queryErr: any) {
+      if (queryErr.message?.includes('Xác thực Google Drive hết hạn')) {
+        throw queryErr;
+      }
+      console.warn(`[MediTrans AI] Query token fetch failed (${queryErr.message}), trying server proxy fallback...`);
+    }
+
+    // Attempt 3: Server proxy route /api/drive/download
+    try {
+      const proxyUrl = `/api/drive/download?fileId=${encodeURIComponent(fileId)}&token=${encodeURIComponent(token)}`;
+      const response = await fetch(proxyUrl, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        signal: controller.signal
+      });
+
+      if (response.ok) {
+        clearTimeout(timeoutId);
+        return await response.arrayBuffer();
+      }
+
+      const errJson = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        cachedToken = null;
+        throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
+      }
+      throw new Error(errJson.error || `Không thể tải tệp từ Google Drive (Server proxy ${response.status})`);
+    } catch (proxyErr: any) {
+      clearTimeout(timeoutId);
+      throw proxyErr;
+    }
   } catch (error: any) {
     clearTimeout(timeoutId);
     console.error(`[MediTrans AI] Error in downloadDriveFileAsArrayBuffer for file ${fileId}:`, error);

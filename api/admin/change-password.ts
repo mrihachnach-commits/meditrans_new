@@ -8,8 +8,11 @@ export default async function handler(req: CustomRequest, res: any) {
   try {
     await checkAdmin(req);
     
-    const { uid, newPassword, email } = req.body;
-    if (!uid || !newPassword) return res.status(400).json({ error: "UID và mật khẩu mới là bắt buộc" });
+    const { uid, newPassword, email } = req.body || {};
+    if (!uid || typeof uid !== 'string') return res.status(400).json({ error: "UID không hợp lệ" });
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 6) {
+      return res.status(400).json({ error: "Mật khẩu mới phải từ 6 ký tự trở lên" });
+    }
 
     const currentAdminApp = getAdminApp();
     if (currentAdminApp) {

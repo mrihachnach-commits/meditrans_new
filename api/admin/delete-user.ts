@@ -8,7 +8,8 @@ export default async function handler(req: CustomRequest, res: any) {
   try {
     await checkAdmin(req);
     
-    const { uid, email } = req.body;
+    const { uid, email } = req.body || {};
+    if (!uid || typeof uid !== 'string') return res.status(400).json({ error: "UID không hợp lệ" });
     console.log(`[Server] Admin delete-user request for ${email} (${uid})`);
     
     let authDeleted = false;

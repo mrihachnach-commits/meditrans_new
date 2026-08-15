@@ -15,7 +15,9 @@
 }
 
 .pdf-container canvas {
-  @apply shadow-2xl rounded-lg border border-slate-200 bg-white min-h-[500px] block;
+  @apply bg-white block;
+  min-height: 0 !important;
+  max-width: none !important;
 }
 
 .markdown-body {
