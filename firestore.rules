@@ -134,20 +134,8 @@ service cloud.firestore {
     match /users/{userId} {
       allow list: if isAdmin();
       allow get: if isOwner(userId) || isAdmin();
-      allow create: if isAdmin() || (
-        isOwner(userId) && 
-        isValidUser(incoming()) && 
-        isValidUserResource(incoming()) &&
-        incoming().get('role', 'user') == 'user' &&
-        incoming().get('isBlocked', false) == false &&
-        incoming().get('level', 1) == 1 &&
-        incoming().get('levelExpiresAt', null) == null
-      );
-      allow update: if isAdmin() || (
-        isOwner(userId) && 
-        isValidUser(incoming()) &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'preferences', 'updatedAt'])
-      );
+      allow create: if (isOwner(userId) || isAdmin()) && isValidUser(incoming()) && isValidUserResource(incoming());
+      allow update: if (isOwner(userId) && isValidUser(incoming())) || isAdmin();
       allow delete: if isAdmin();
       
       match /folders/{folderId} {
@@ -160,9 +148,9 @@ service cloud.firestore {
       match /documents/{docId} {
         allow get: if isOwner(userId) || isSharedWithMe(existing()) || isAdmin();
         allow list: if isOwner(userId) || isAdmin();
-        allow create: if isOwner(userId) && isValidDocument(incoming()) && isValidId(docId) && incoming().ownerId == userId;
-        allow update: if (isOwner(userId) && isValidDocument(incoming()) && incoming().ownerId == userId && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'folderId', 'sharedWith'])) || isAdmin();
-        allow delete: if (isOwner(userId) && existing().ownerId == userId) || isAdmin();
+        allow create: if isOwner(userId) && isValidDocument(incoming()) && isValidId(docId);
+        allow update: if (isOwner(userId) && isValidDocument(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'folderId', 'sharedWith'])) || isAdmin();
+        allow delete: if isOwner(userId) || isAdmin();
 
         match /pages/{pageNum} {
           allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isAdmin();
@@ -179,13 +167,14 @@ service cloud.firestore {
     match /apiKeys/{keyId} {
       allow get: if isSignedIn() && (existing().ownerId == request.auth.uid || isSharedWithMe(existing()) || isAdmin());
       allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || (request.auth.token.email != null && resource.data.get('sharedWith', []).hasAny([request.auth.token.email.lower()])) || isAdmin());
-      allow create: if isSignedIn() && isValidApiKey(incoming()) && incoming().ownerId == request.auth.uid;
-      allow update: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()) && isValidApiKey(incoming()) && incoming().ownerId == existing().ownerId;
-      allow delete: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidApiKey(incoming());
+      allow update: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()) && isValidApiKey(incoming()));
+      allow delete: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()));
     }
 
     match /systemShopAiKeys/{keyId} {
-      allow read, write: if isAdmin();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
 
     match /blacklist/{email} {

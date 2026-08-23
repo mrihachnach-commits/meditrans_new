@@ -8,14 +8,8 @@ export default async function handler(req: CustomRequest, res: any) {
   try {
     await checkAdmin(req);
     
-    const { email, password, displayName, role } = req.body || {};
-    if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-      return res.status(400).json({ error: "Email không hợp lệ" });
-    }
-    if (!password || typeof password !== 'string' || password.length < 6) {
-      return res.status(400).json({ error: "Mật khẩu phải có ít nhất 6 ký tự" });
-    }
-    const cleanRole = (role === 'admin' || role === 'user') ? role : 'user';
+    const { email, password, displayName, role } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email và mật khẩu là bắt buộc" });
 
     let uid = "";
     try {
@@ -39,7 +33,7 @@ export default async function handler(req: CustomRequest, res: any) {
       uid = signUpData.localId;
     }
     
-    const userData = { uid, email, displayName: displayName || email.split('@')[0], role: cleanRole, createdAt: new Date().toISOString() };
+    const userData = { uid, email, displayName: displayName || email.split('@')[0], role: role || "user", createdAt: new Date().toISOString() };
     await firestoreRest.setDoc("users", uid, userData, req.idToken);
     
     return res.status(200).json({ success: true, uid, userData });

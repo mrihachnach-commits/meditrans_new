@@ -9,8 +9,8 @@ import createUserHandler from "./api/admin/create-user";
 import listUsersHandler from "./api/admin/list-users";
 import deleteUserHandler from "./api/admin/delete-user";
 import changePasswordHandler from "./api/admin/change-password";
-import indexHandler from "./api/index";
 import driveDownloadHandler from "./api/drive/download";
+import indexHandler from "./api/index";
 
 const PORT = 3000;
 

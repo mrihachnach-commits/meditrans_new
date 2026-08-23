@@ -6,14 +6,21 @@
 
 import { GoogleAuthProvider, signInWithPopup, linkWithPopup, reauthenticateWithPopup } from 'firebase/auth';
 import { auth } from '../firebase';
-import { getPdfBufferCache, savePdfBufferCache } from './storageService';
+import { getFileBufferCache, saveFileBufferCache } from './storageService';
 
 // Cache token in memory
 let cachedToken: string | null = null;
 let tokenExpiresAt: number = 0;
 
-// Memory cache for active session PDF ArrayBuffers
-const driveBufferMemoryCache = new Map<string, ArrayBuffer>();
+// Cache MediTrans AI folder ID in RAM and localStorage
+let cachedMediTransFolderId: string | null = null;
+
+export function clearCachedMediTransFolderId() {
+  cachedMediTransFolderId = null;
+  try {
+    localStorage.removeItem('meditrans_folder_id');
+  } catch (e) {}
+}
 
 /**
  * Connect to Google Drive via Firebase GoogleAuthProvider popup.
@@ -139,13 +146,28 @@ export interface DriveFileMetadata {
 }
 
 /**
- * Get or create the "MediTrans AI" folder on Google Drive
+ * Get or create the "MediTrans AI" folder on Google Drive.
+ * Caches folder ID in RAM and localStorage to eliminate unnecessary search queries.
  */
 export async function getOrCreateMediTransFolder(token?: string): Promise<string> {
+  // 1. Check RAM memory cache
+  if (cachedMediTransFolderId) {
+    return cachedMediTransFolderId;
+  }
+
+  // 2. Check localStorage
+  try {
+    const savedFolderId = localStorage.getItem('meditrans_folder_id');
+    if (savedFolderId) {
+      cachedMediTransFolderId = savedFolderId;
+      return savedFolderId;
+    }
+  } catch (e) {}
+
   const authToken = token || await getGoogleOAuthToken();
   const folderName = 'MediTrans AI';
 
-  // 1. Search for existing folder named "MediTrans AI"
+  // 3. Search for existing folder named "MediTrans AI"
   const q = `mimeType='application/vnd.google-apps.folder' and name='${folderName.replace(/'/g, "\\'")}' and trashed=false`;
   const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1`;
 
@@ -157,14 +179,19 @@ export async function getOrCreateMediTransFolder(token?: string): Promise<string
     if (searchRes.ok) {
       const data = await searchRes.json();
       if (data.files && data.files.length > 0) {
-        return data.files[0].id;
+        const folderId = data.files[0].id;
+        cachedMediTransFolderId = folderId;
+        try {
+          localStorage.setItem('meditrans_folder_id', folderId);
+        } catch (e) {}
+        return folderId;
       }
     }
   } catch (err) {
     console.warn('[GoogleDriveService] Error searching folder:', err);
   }
 
-  // 2. Folder does not exist, create it
+  // 4. Folder does not exist, create it
   const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
     method: 'POST',
     headers: {
@@ -185,7 +212,12 @@ export async function getOrCreateMediTransFolder(token?: string): Promise<string
   }
 
   const folderData = await createRes.json();
-  return folderData.id;
+  const newFolderId = folderData.id;
+  cachedMediTransFolderId = newFolderId;
+  try {
+    localStorage.setItem('meditrans_folder_id', newFolderId);
+  } catch (e) {}
+  return newFolderId;
 }
 
 /**
@@ -263,129 +295,116 @@ export async function uploadFileToDrive(
 }
 
 /**
- * Download file binary from Google Drive as ArrayBuffer for PDF.js
- * Implements 3-stage fallback:
- * 1. Direct fetch with Authorization header
- * 2. Direct fetch with access_token query param (bypasses CORS preflight)
- * 3. Server proxy (/api/drive/download)
+ * Download file binary from Google Drive as ArrayBuffer for PDF.js.
+ * Features:
+ * 1. Multi-Layer Smart Cache (RAM Memory Cache + IndexedDB): Instantaneous re-opening (0 - 10ms).
+ * 2. Dual-Channel Racing (Google CDN Direct vs Server Streaming Proxy /api/drive/download):
+ *    Fires both streams simultaneously, picks the fastest channel, and aborts the loser stream.
  */
 export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<ArrayBuffer> {
-  // 1. Fast Memory Cache Check (Instant 0ms)
-  const memCached = driveBufferMemoryCache.get(fileId);
-  if (memCached) {
-    console.log(`[MediTrans AI] Memory Cache Hit for PDF buffer: ${fileId}`);
-    return memCached.slice(0);
+  // Step 1: Check Multi-Layer Smart Cache (RAM + IndexedDB)
+  const cachedBuffer = await getFileBufferCache(fileId);
+  if (cachedBuffer && cachedBuffer.byteLength > 0) {
+    console.log(`[MediTrans AI] Instantaneous load from Multi-Layer Cache for file ${fileId} (<10ms)`);
+    return cachedBuffer;
   }
 
-  // 2. Fast IndexedDB Cache Check (Instant <10ms)
-  try {
-    const idbCached = await getPdfBufferCache(fileId);
-    if (idbCached && idbCached.byteLength > 0) {
-      console.log(`[MediTrans AI] IndexedDB Cache Hit for PDF buffer: ${fileId}`);
-      driveBufferMemoryCache.set(fileId, idbCached);
-      return idbCached.slice(0);
-    }
-  } catch (err) {
-    console.warn('[MediTrans AI] Could not load PDF buffer from IndexedDB cache:', err);
-  }
-
+  // Step 2: Dual-Channel Racing (Google CDN Direct vs Server Streaming Proxy)
   const token = await getGoogleOAuthToken();
+  const controllerA = new AbortController();
+  const controllerB = new AbortController();
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    console.warn(`[MediTrans AI] Timeout for downloadDriveFileAsArrayBuffer (30s) for file: ${fileId}`);
-    controller.abort();
-  }, 30000); // 30 second timeout
-
-  const storeAndReturn = (ab: ArrayBuffer): ArrayBuffer => {
-    clearTimeout(timeoutId);
-    driveBufferMemoryCache.set(fileId, ab);
-    savePdfBufferCache(fileId, ab).catch(e => console.warn('Failed to cache PDF in IndexedDB:', e));
-    return ab.slice(0);
+  const directFetch = async (): Promise<ArrayBuffer> => {
+    const directUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`;
+    const res = await fetch(directUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controllerA.signal
+    });
+    if (!res.ok) {
+      if (res.status === 401) cachedToken = null;
+      throw new Error(`Google CDN direct fetch failed with status ${res.status}`);
+    }
+    const buf = await res.arrayBuffer();
+    if (!buf || buf.byteLength === 0) throw new Error("Google CDN direct fetch returned empty body");
+    return buf;
   };
 
+  const proxyFetch = async (): Promise<ArrayBuffer> => {
+    const proxyUrl = `/api/drive/download?fileId=${encodeURIComponent(fileId)}`;
+    const res = await fetch(proxyUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controllerB.signal
+    });
+    if (!res.ok) {
+      if (res.status === 401) cachedToken = null;
+      throw new Error(`Server streaming proxy fetch failed with status ${res.status}`);
+    }
+    const buf = await res.arrayBuffer();
+    if (!buf || buf.byteLength === 0) throw new Error("Server streaming proxy fetch returned empty body");
+    return buf;
+  };
+
+  const startTime = Date.now();
+
   try {
-    // Stage 1: Fast direct GET using access_token parameter (Bypasses CORS preflight OPTIONS request)
-    try {
-      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&access_token=${encodeURIComponent(token)}`, {
-        signal: controller.signal
-      });
+    const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+      let settledCount = 0;
+      let errors: any[] = [];
+      let isDone = false;
 
-      if (response.ok) {
-        const ab = await response.arrayBuffer();
-        return storeAndReturn(ab);
-      }
-
-      if (response.status === 401) {
-        cachedToken = null;
-        throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
-      }
-
-      console.warn(`[MediTrans AI] Query token Drive download status ${response.status}, trying server proxy fallback...`);
-    } catch (queryErr: any) {
-      if (queryErr.message?.includes('Xác thực Google Drive hết hạn')) {
-        throw queryErr;
-      }
-      console.warn(`[MediTrans AI] Query token fetch failed (${queryErr.message}), trying server proxy fallback...`);
-    }
-
-    // Stage 2: Server Proxy (/api/drive/download)
-    try {
-      const proxyUrl = `/api/drive/download?fileId=${encodeURIComponent(fileId)}&token=${encodeURIComponent(token)}`;
-      const response = await fetch(proxyUrl, {
-        headers: {
-          'Authorization': `Bearer ${token}`
+      // Channel A: Google CDN Direct
+      directFetch().then(
+        (buf) => {
+          if (!isDone) {
+            isDone = true;
+            controllerB.abort(); // Cancel loser channel
+            const elapsed = Date.now() - startTime;
+            console.log(`[Dual-Channel Racing] Channel A (Google CDN Direct) WON in ${elapsed}ms for file ${fileId}`);
+            resolve(buf);
+          }
         },
-        signal: controller.signal
-      });
+        (err) => {
+          if (err.name !== 'AbortError') {
+            console.warn('[Dual-Channel Racing] Channel A error:', err.message || err);
+          }
+          settledCount++;
+          errors.push(err);
+          if (settledCount === 2 && !isDone) {
+            reject(new Error(`Tải tệp từ Google Drive thất bại ở cả 2 đường truyền: ${errors.map(e => e.message).join('; ')}`));
+          }
+        }
+      );
 
-      if (response.ok) {
-        const ab = await response.arrayBuffer();
-        return storeAndReturn(ab);
-      }
-
-      const errJson = await response.json().catch(() => ({}));
-      if (response.status === 401) {
-        cachedToken = null;
-        throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
-      }
-      throw new Error(errJson.error || `Không thể tải tệp từ Google Drive (Server proxy ${response.status})`);
-    } catch (proxyErr: any) {
-      if (proxyErr.message?.includes('Xác thực Google Drive hết hạn')) {
-        throw proxyErr;
-      }
-      console.warn(`[MediTrans AI] Server proxy fetch failed (${proxyErr.message}), trying direct Authorization header...`);
-    }
-
-    // Stage 3: Direct fetch with Authorization header fallback
-    try {
-      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
+      // Channel B: Server Streaming Proxy
+      proxyFetch().then(
+        (buf) => {
+          if (!isDone) {
+            isDone = true;
+            controllerA.abort(); // Cancel loser channel
+            const elapsed = Date.now() - startTime;
+            console.log(`[Dual-Channel Racing] Channel B (Server Streaming Proxy) WON in ${elapsed}ms for file ${fileId}`);
+            resolve(buf);
+          }
         },
-        signal: controller.signal
-      });
+        (err) => {
+          if (err.name !== 'AbortError') {
+            console.warn('[Dual-Channel Racing] Channel B error:', err.message || err);
+          }
+          settledCount++;
+          errors.push(err);
+          if (settledCount === 2 && !isDone) {
+            reject(new Error(`Tải tệp từ Google Drive thất bại ở cả 2 đường truyền: ${errors.map(e => e.message).join('; ')}`));
+          }
+        }
+      );
+    });
 
-      if (response.ok) {
-        const ab = await response.arrayBuffer();
-        return storeAndReturn(ab);
-      }
+    // Step 3: Save arrayBuffer to Multi-Layer Smart Cache
+    saveFileBufferCache(fileId, arrayBuffer);
 
-      if (response.status === 401) {
-        cachedToken = null;
-        throw new Error("Xác thực Google Drive hết hạn. Vui lòng thử lại.");
-      }
-      throw new Error(`Không thể tải tệp từ Google Drive (Mã lỗi ${response.status})`);
-    } catch (directErr: any) {
-      clearTimeout(timeoutId);
-      throw directErr;
-    }
+    return arrayBuffer;
   } catch (error: any) {
-    clearTimeout(timeoutId);
-    console.error(`[MediTrans AI] Error in downloadDriveFileAsArrayBuffer for file ${fileId}:`, error);
-    if (error.name === 'AbortError') {
-      throw new Error("Quá thời gian tải tài liệu từ Google Drive. Vui lòng kiểm tra kết nối mạng.");
-    }
+    console.error(`[MediTrans AI] Error in Dual-Channel Racing for file ${fileId}:`, error);
     throw error;
   }
 }

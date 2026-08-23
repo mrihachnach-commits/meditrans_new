@@ -1,6 +1,9 @@
 const DB_NAME = 'MediTransCacheDB';
 const DB_VERSION = 2;
 
+// Memory RAM Cache for instantaneous re-opening (<1ms)
+const fileBufferMemoryCache = new Map<string, ArrayBuffer>();
+
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof window === 'undefined' || !window.indexedDB) {
@@ -15,13 +18,91 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('translations')) {
         db.createObjectStore('translations');
       }
-      if (!db.objectStoreNames.contains('pdfBuffers')) {
-        db.createObjectStore('pdfBuffers');
+      if (!db.objectStoreNames.contains('fileBuffers')) {
+        db.createObjectStore('fileBuffers');
       }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+/**
+ * Multi-layer Binary Cache: Save ArrayBuffer to RAM Memory Cache + IndexedDB
+ */
+export async function saveFileBufferCache(fileId: string, buffer: ArrayBuffer): Promise<void> {
+  if (!fileId || !buffer || buffer.byteLength === 0) return;
+  
+  // 1. RAM Memory Cache
+  fileBufferMemoryCache.set(fileId, buffer);
+
+  // 2. IndexedDB Persistent Cache
+  try {
+    const db = await openDB();
+    const tx = db.transaction('fileBuffers', 'readwrite');
+    tx.objectStore('fileBuffers').put(buffer, fileId);
+  } catch (e) {
+    console.warn('[StorageService] Failed to save binary buffer to IndexedDB:', e);
+  }
+}
+
+/**
+ * Multi-layer Binary Cache: Fetch ArrayBuffer from RAM Memory Cache or IndexedDB
+ */
+export async function getFileBufferCache(fileId: string): Promise<ArrayBuffer | null> {
+  if (!fileId) return null;
+
+  // Layer 1: RAM Cache (Instant 0ms)
+  if (fileBufferMemoryCache.has(fileId)) {
+    const ramBuf = fileBufferMemoryCache.get(fileId)!;
+    console.log(`[StorageService] RAM Memory Cache hit for file: ${fileId} (0ms)`);
+    return ramBuf.slice(0); // Return a slice to prevent ArrayBuffer detaching issues
+  }
+
+  // Layer 2: IndexedDB Cache (Instant 1-10ms)
+  try {
+    const db = await openDB();
+    const tx = db.transaction('fileBuffers', 'readonly');
+    const req = tx.objectStore('fileBuffers').get(fileId);
+    
+    return new Promise((resolve) => {
+      req.onsuccess = () => {
+        if (req.result) {
+          console.log(`[StorageService] IndexedDB Cache hit for file: ${fileId} (~5ms)`);
+          const buf = req.result as ArrayBuffer;
+          fileBufferMemoryCache.set(fileId, buf);
+          resolve(buf.slice(0));
+        } else {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    });
+  } catch (e) {
+    console.warn('[StorageService] IndexedDB read error:', e);
+    return null;
+  }
+}
+
+/**
+ * Clear cached binary file buffer from RAM and IndexedDB
+ */
+export async function clearFileBufferCache(fileId?: string): Promise<void> {
+  if (fileId) {
+    fileBufferMemoryCache.delete(fileId);
+    try {
+      const db = await openDB();
+      const tx = db.transaction('fileBuffers', 'readwrite');
+      tx.objectStore('fileBuffers').delete(fileId);
+    } catch (e) {}
+  } else {
+    fileBufferMemoryCache.clear();
+    try {
+      const db = await openDB();
+      const tx = db.transaction('fileBuffers', 'readwrite');
+      tx.objectStore('fileBuffers').clear();
+    } catch (e) {}
+  }
 }
 
 export interface ActiveDocSession {
@@ -93,31 +174,5 @@ export async function getTranslationsCache(docKey: string): Promise<any> {
     });
   } catch (e) {
     return {};
-  }
-}
-
-export async function savePdfBufferCache(docKey: string, buffer: ArrayBuffer): Promise<void> {
-  if (!docKey || !buffer) return;
-  try {
-    const db = await openDB();
-    const tx = db.transaction('pdfBuffers', 'readwrite');
-    tx.objectStore('pdfBuffers').put(buffer, docKey);
-  } catch (e) {
-    console.warn('Failed to save PDF buffer cache:', e);
-  }
-}
-
-export async function getPdfBufferCache(docKey: string): Promise<ArrayBuffer | null> {
-  if (!docKey) return null;
-  try {
-    const db = await openDB();
-    const tx = db.transaction('pdfBuffers', 'readonly');
-    const req = tx.objectStore('pdfBuffers').get(docKey);
-    return new Promise((resolve) => {
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => resolve(null);
-    });
-  } catch (e) {
-    return null;
   }
 }

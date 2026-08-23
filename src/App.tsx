@@ -15,17 +15,13 @@ import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
 import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 import { AdminPanelModal } from './components/AdminPanelModal';
-import { SpatialCanvasViewer } from './components/SpatialCanvasViewer';
-import { 
-  extractSpatialBlocksFromPdfPage, 
-  savePageSpatialOverrides, 
-  loadPageSpatialOverrides, 
-  applySpatialAIResults,
-  SpatialTextBlock 
-} from './services/spatialLayoutService';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
+const PDFJS_VERSION = '3.11.174';
+const PDFJS_WORKER_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
+const PDFJS_CMAP_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/cmaps/`;
+
+pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
 
 import { 
   Upload, 
@@ -48,7 +44,6 @@ import {
   RefreshCcw,
   KeyRound,
   Layout,
-  Layers,
   ArrowLeft,
   ZoomIn,
   ZoomOut,
@@ -440,7 +435,6 @@ export default function App() {
   });
   const [showSettings, setShowSettings] = useState(false);
   const [showApiSettings, setShowApiSettings] = useState(false);
-  const [showFontPopover, setShowFontPopover] = useState(false);
   const [showProxyModal, setShowProxyModal] = useState(false);
   const [activeKeyFolder, setActiveKeyFolder] = useState<'all' | 'gemini' | 'shopaikey'>(() => {
     return (localStorage.getItem('mediTrans_activeKeyFolder') as any) || 'all';
@@ -519,44 +513,13 @@ export default function App() {
   const [renameKeyName, setRenameKeyName] = useState('');
   const [isUpdatingKeyName, setIsUpdatingKeyName] = useState(false);
   
-  // Summarization & Spatial Canvas State
-  const [translationPanelMode, setTranslationPanelMode] = useState<'translation' | 'spatial-canvas' | 'summary'>('translation');
-  const [currentPdfPageObj, setCurrentPdfPageObj] = useState<any>(null);
+  // Summarization State
+  const [translationPanelMode, setTranslationPanelMode] = useState<'translation' | 'summary'>('translation');
   const [summaryText, setSummaryText] = useState<string>('');
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [isSavingSummary, setIsSavingSummary] = useState(false);
   const [summaryRange, setSummaryRange] = useState<{from: number, to: number}>({from: 1, to: 1});
   const summarySignalRef = useRef<AbortController | null>(null);
-
-  // Canvas Layout (Spatial Canvas) Toggle Setting
-  const [enableCanvasLayout, setEnableCanvasLayout] = useState<boolean>(() => {
-    try {
-      const saved = localStorage.getItem('enableCanvasLayout');
-      return saved !== null ? saved === 'true' : true;
-    } catch {
-      return true;
-    }
-  });
-
-  const enableCanvasLayoutRef = useRef(enableCanvasLayout);
-  useEffect(() => {
-    enableCanvasLayoutRef.current = enableCanvasLayout;
-  }, [enableCanvasLayout]);
-
-  const toggleEnableCanvasLayout = () => {
-    setEnableCanvasLayout(prev => {
-      const next = !prev;
-      try {
-        localStorage.setItem('enableCanvasLayout', String(next));
-      } catch (e) {
-        console.warn('Could not save enableCanvasLayout setting:', e);
-      }
-      if (!next && translationPanelMode === 'spatial-canvas') {
-        setTranslationPanelMode('translation');
-      }
-      return next;
-    });
-  };
 
   // Initialize summary range when numPages changes
   useEffect(() => {
@@ -665,7 +628,7 @@ export default function App() {
 
       const loadingTask = pdfjs.getDocument({
         url,
-        cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+        cMapUrl: PDFJS_CMAP_URL,
         cMapPacked: true,
         disableAutoFetch: false,
         disableStream: false,
@@ -1205,7 +1168,7 @@ export default function App() {
           try {
             const loadingTask = pdfjs.getDocument({
               data: activeSession.fileBuffer,
-              cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+              cMapUrl: PDFJS_CMAP_URL,
               cMapPacked: true,
             });
             const pdf = await loadingTask.promise;
@@ -1272,9 +1235,9 @@ export default function App() {
     };
   }, [user, userRole]);
 
-  // Real-time listener for System ShopAIKeys (Admin only)
+  // Real-time listener for System ShopAIKeys
   useEffect(() => {
-    if (!user || userRole !== 'admin') {
+    if (!user) {
       setSystemShopAiKeys([]);
       return;
     }
@@ -1285,7 +1248,7 @@ export default function App() {
       console.warn("System shopAiKeys listener failed:", err);
     });
     return () => unsub();
-  }, [user, userRole]);
+  }, [user]);
 
   // Real-time listener for userKeysMap (Admin view key counts)
   useEffect(() => {
@@ -2376,7 +2339,7 @@ export default function App() {
         const arrayBuffer = await downloadDriveFileAsArrayBuffer(fileData.driveFileId);
         loadingTask = pdfjs.getDocument({
           data: arrayBuffer,
-          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+          cMapUrl: PDFJS_CMAP_URL,
           cMapPacked: true,
           disableAutoFetch: false,
           disableStream: false,
@@ -2385,7 +2348,7 @@ export default function App() {
         setFileUrl(fileData.downloadUrl);
         loadingTask = pdfjs.getDocument({
           url: fileData.downloadUrl,
-          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+          cMapUrl: PDFJS_CMAP_URL,
           cMapPacked: true,
           disableAutoFetch: false,
           disableStream: false,
@@ -2458,7 +2421,7 @@ export default function App() {
       
       const loadingTask = pdfjs.getDocument({
         data: arrayBuffer,
-        cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+        cMapUrl: PDFJS_CMAP_URL,
         cMapPacked: true,
         disableAutoFetch: false,
         disableStream: false,
@@ -2630,8 +2593,8 @@ export default function App() {
 
         const loadingTask = pdfjs.getDocument({
           url,
-          // Use unpkg for cmaps as well for consistency with worker
-          cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+          // Use cdnjs for cmaps as well for high performance
+          cMapUrl: PDFJS_CMAP_URL,
           cMapPacked: true,
           disableAutoFetch: false,
           disableStream: false,
@@ -2648,7 +2611,7 @@ export default function App() {
           const arrayBuffer = await selectedFile.arrayBuffer();
           const loadingTask = pdfjs.getDocument({
             data: arrayBuffer,
-            cMapUrl: `https://unpkg.com/pdfjs-dist@3.11.174/cmaps/`,
+            cMapUrl: PDFJS_CMAP_URL,
             cMapPacked: true,
           });
           const pdf = await loadingTask.promise;
@@ -2698,7 +2661,6 @@ export default function App() {
           const textLayerDiv = textLayerRef.current;
           textLayerDiv.innerHTML = '';
           const page = await pdfDoc.getPage(pageNum);
-          setCurrentPdfPageObj(page);
           const textViewport = page.getViewport({ scale: zoom });
           textLayerDiv.style.width = `${textViewport.width}px`;
           textLayerDiv.style.height = `${textViewport.height}px`;
@@ -2724,11 +2686,7 @@ export default function App() {
 
     // Ensure previous render task is cancelled
     if (renderTaskRef.current) {
-      try {
-        renderTaskRef.current.cancel();
-      } catch {
-        // Ignore cancel errors
-      }
+      renderTaskRef.current.cancel();
       renderTaskRef.current = null;
     }
 
@@ -2744,7 +2702,6 @@ export default function App() {
 
     try {
       const page = await pdfDoc.getPage(pageNum);
-      setCurrentPdfPageObj(page);
       
       // iOS Canvas Limit Check: Ensure canvas doesn't exceed 4096px which is safe for most mobile browsers
       const MAX_CANVAS_DIMENSION = 4096;
@@ -2771,14 +2728,7 @@ export default function App() {
           viewport: viewport,
         } as any);
         renderTaskRef.current = renderTask;
-        try {
-          await renderTask.promise;
-        } catch (rErr: any) {
-          if (rErr?.name === 'RenderingCancelledException') {
-            return;
-          }
-          throw rErr;
-        }
+        await renderTask.promise;
         
         // Small delay for mobile browsers to ensure canvas buffer is flushed before capture
         if (isMobile) {
@@ -2952,8 +2902,7 @@ export default function App() {
     targetPage: number, 
     signal: AbortSignal, 
     engine?: TranslationEngine,
-    onProgress?: (content: string) => void,
-    force = false
+    onProgress?: (content: string) => void
   ) => {
     const currentFileId = fileIdRef.current;
     if (!translationService.current || !pdfDoc) return null;
@@ -3010,65 +2959,6 @@ export default function App() {
       }
 
       if (signal.aborted) return null;
-
-      // 3. AI Spatial Layout Positioning: Background task if Canvas Layout feature is enabled in Settings
-      const docKey = fileId || currentFileName || 'default_doc';
-      const existingSpatialOverrides = loadPageSpatialOverrides(docKey, targetPage);
-      const hasExistingSpatial = existingSpatialOverrides && Object.keys(existingSpatialOverrides).length > 0;
-
-      // Only run AI spatial layout positioning if Canvas Layout is ENABLED in Settings
-      if (enableCanvasLayoutRef.current && (!hasExistingSpatial || force) && pdfDoc && fullContent && fullContent.trim().length > 0 && !signal.aborted) {
-        // Run in background non-blocking so text translation returns instantly
-        (async () => {
-          try {
-            const pdfPageObj = await pdfDoc.getPage(targetPage);
-            const spatialData = await extractSpatialBlocksFromPdfPage(pdfPageObj);
-            pdfPageObj.cleanup();
-
-            if (spatialData && spatialData.blocks && spatialData.blocks.length > 0) {
-              const payloadBlocks = spatialData.blocks.map(b => ({
-                id: b.id,
-                originalText: b.originalText,
-                blockType: b.blockType,
-                fontSize: b.fontSize,
-                isHeading: b.isHeading,
-                y: b.y
-              }));
-
-              if (translationService.current && typeof translationService.current.translateSpatialBlocksWithAI === 'function') {
-                const aiResults = await translationService.current.translateSpatialBlocksWithAI(payloadBlocks, {
-                  pageNum: targetPage,
-                  referenceMarkdown: fullContent
-                });
-
-                if (aiResults && aiResults.length > 0) {
-                  const updatedBlocks = applySpatialAIResults(spatialData.blocks, aiResults);
-                  const overrides: Record<string, Partial<SpatialTextBlock>> = {};
-                  updatedBlocks.forEach(b => {
-                    overrides[b.id] = {
-                      translatedText: b.translatedText,
-                      customFontStyle: b.customFontStyle,
-                      customFontSize: b.customFontSize,
-                      blockType: b.blockType,
-                      customAlign: b.customAlign
-                    };
-                  });
-                  savePageSpatialOverrides(docKey, targetPage, overrides);
-                  if (fileId && fileId !== docKey) {
-                    savePageSpatialOverrides(fileId, targetPage, overrides);
-                  }
-                  if (typeof window !== 'undefined') {
-                    window.dispatchEvent(new CustomEvent('spatial-overrides-updated', { detail: { bookId: docKey, pageNum: targetPage } }));
-                  }
-                }
-              }
-            }
-          } catch (spatialErr) {
-            console.warn(`[MediTrans] Simultaneous spatial positioning notice for page ${targetPage}:`, spatialErr);
-          }
-        })();
-      }
-
       return fullContent;
 
     } catch (error) {
@@ -3077,7 +2967,7 @@ export default function App() {
       }
       throw error;
     }
-  }, [pdfDoc, selectedEngine, fileId, currentFileName]);
+  }, [pdfDoc, selectedEngine]);
 
   const translateCurrentPage = useCallback(async (pageNumber?: number, force = false, engine?: TranslationEngine) => {
     const targetPage = pageNumber ?? currentPage;
@@ -3132,8 +3022,7 @@ export default function App() {
           if (currentPageRef.current === targetPage) {
             setActiveTranslation({ page: targetPage, content: text, status: 'loading' });
           }
-        },
-        force
+        }
       );
 
       if (content !== null) {
@@ -4064,149 +3953,154 @@ export default function App() {
       </AnimatePresence>
       {/* Header */}
       {(!isFullScreen && !(pdfDoc && window.innerWidth < 768)) && (
-        <header className="h-12 border-b border-slate-200 bg-white flex items-center justify-between px-3 md:px-4 shrink-0 shadow-2xs z-30">
-          <div className="flex items-center gap-2">
-            {file || pdfDoc ? (
-              <button 
-                onClick={clearFile}
-                className="p-1.5 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
-                title="Quay lại danh sách tệp"
-              >
-                <ArrowLeft className="w-4 h-4" />
-              </button>
-            ) : null}
-            <LogoWithText onClick={handleGoHome} />
-          </div>
-
-          <div className="flex items-center gap-1.5 sm:gap-2">
-            {pdfDoc && (
-              <div className="hidden md:flex items-center bg-slate-100/90 hover:bg-slate-100 rounded-full pl-3 pr-1 py-1 gap-1.5 border border-slate-200/80 max-w-[280px] lg:max-w-[360px] transition-all">
-                <FileText className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                <span className="text-xs font-bold text-slate-700 truncate" title={currentFileName}>{currentFileName}</span>
-                <button 
-                  onClick={clearFile}
-                  className="p-1 hover:bg-rose-100 text-slate-400 hover:text-rose-600 rounded-full transition-colors shrink-0"
-                  title="Đóng tệp hiện tại"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
-
-            {userRole === 'admin' && (
-              <button 
-                onClick={() => {
-                  setShowAdminPanel(true);
-                  fetchAllUsers();
-                }}
-                className="flex items-center gap-1 px-2.5 py-1 bg-amber-500 text-white rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-2xs hover:bg-amber-600"
-                title="Quản trị hệ thống"
-              >
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Quản trị</span>
-              </button>
-            )}
-
+        <header className="h-14 border-b border-slate-200 bg-white flex items-center justify-between px-4 shrink-0 shadow-sm z-30">
+          {file || pdfDoc ? (
             <button 
-              onClick={() => setShowDrivePickerModal(true)}
-              className="flex items-center gap-1 px-2.5 py-1 bg-indigo-50 border border-indigo-100 text-indigo-600 hover:bg-indigo-100 rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-2xs"
-              title="Mở Google Drive"
+              onClick={clearFile}
+              className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500 mr-2"
+              title="Quay lại quản lý file"
             >
-              <HardDrive className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Google Drive</span>
+              <ArrowLeft className="w-5 h-5" />
             </button>
+          ) : null}
+          <LogoWithText onClick={handleGoHome} />
 
-            <div className="h-4 w-px bg-slate-200 mx-0.5" />
-
+        <div className="flex items-center gap-2">
+          {pdfDoc && (
+            <div className="hidden md:flex items-center bg-slate-50 rounded-full px-3 py-1 gap-2 border border-slate-100 max-w-[300px]">
+              <FileText className="w-3.5 h-3.5 text-slate-400" />
+              <span className="text-xs font-medium text-slate-600 truncate">{currentFileName}</span>
+            </div>
+          )}
+          
+          <div className="h-6 w-px bg-slate-200 mx-1 hidden md:block" />
+          
+          {pdfDoc && (
             <button 
-              onClick={() => setShowSettings(true)}
-              className="p-1.5 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
-              title="Cài đặt hệ thống"
+              onClick={clearFile}
+              className="flex items-center gap-1.5 px-3 py-1.5 hover:bg-slate-100 text-slate-500 hover:text-indigo-600 rounded-full transition-all text-[10px] font-bold uppercase tracking-wider"
+              title="Đóng tài liệu hiện tại"
             >
-              <Settings className="w-4 h-4" />
+              <X className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Đóng file</span>
             </button>
+          )}
 
-            {userRole === 'admin' && (
-              <button 
-                onClick={() => setShowApiSettings(true)}
-                className="p-1.5 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
-                title="Quản lý API Keys"
-              >
-                <Key className="w-4 h-4" />
-              </button>
-            )}
-
+          {userRole === 'admin' && (
             <button 
               onClick={() => {
-                const nextState = !showTranslationPanel;
-                setShowTranslationPanel(nextState);
-                if (window.innerWidth < 768) {
-                  setMobileViewMode(nextState ? 'split' : 'pdf');
-                }
+                setShowAdminPanel(true);
+                fetchAllUsers();
               }}
-              className={cn(
-                "p-1.5 rounded-full transition-all",
-                showTranslationPanel ? "bg-indigo-50 text-indigo-600 shadow-2xs" : "hover:bg-slate-100 text-slate-500"
-              )}
-              title={showTranslationPanel ? "Ẩn khung dịch" : "Hiện khung dịch"}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 text-white rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm hover:bg-amber-600"
+              title="Quản trị hệ thống"
             >
-              <Languages className="w-4 h-4" />
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Quản trị</span>
             </button>
-            
+          )}
+
+          <button 
+            onClick={() => setShowDrivePickerModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 border border-indigo-100 text-indigo-600 hover:bg-indigo-100 rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm"
+            title="Mở hoặc chọn tài liệu từ Google Drive"
+          >
+            <HardDrive className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Google Drive</span>
+          </button>
+
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
+            title="Cài đặt hệ thống"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+
+          {userRole === 'admin' && (
             <button 
-              onClick={toggleFullScreen}
-              className={cn(
-                "p-1.5 rounded-full transition-all",
-                isFullScreen ? "bg-indigo-600 text-white shadow-md shadow-indigo-100" : "hover:bg-slate-100 text-slate-500"
-              )}
-              title={isFullScreen ? "Thoát toàn màn hình" : "Toàn màn hình"}
+              onClick={() => setShowApiSettings(true)}
+              className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
+              title="Quản lý API Keys"
             >
-              {isFullScreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+              <Key className="w-4 h-4" />
             </button>
+          )}
 
-            <div className="h-4 w-px bg-slate-200 mx-0.5" />
+          <button 
+            onClick={() => {
+              const nextState = !showTranslationPanel;
+              setShowTranslationPanel(nextState);
+              if (!nextState) {}
+              
+              // On mobile, also update mobileViewMode for better sync
+              if (window.innerWidth < 768) {
+                setMobileViewMode(nextState ? 'split' : 'pdf');
+              }
+            }}
+            className={cn(
+              "p-2 rounded-full transition-all",
+              showTranslationPanel ? "bg-indigo-50 text-indigo-600 shadow-sm" : "hover:bg-slate-100 text-slate-500"
+            )}
+            title={showTranslationPanel ? "Đóng Tra cứu & Dịch thuật" : "Mở Tra cứu & Dịch thuật"}
+          >
+            <Languages className="w-4 h-4" />
+          </button>
+          
+          <button 
+            onClick={toggleFullScreen}
+            className={cn(
+              "p-2 rounded-full transition-all",
+              isFullScreen ? "bg-indigo-600 text-white shadow-lg shadow-indigo-100" : "hover:bg-slate-100 text-slate-500"
+            )}
+            title={isFullScreen ? "Thoát toàn màn hình" : "Toàn màn hình (F11)"}
+          >
+            {isFullScreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+          </button>
 
-            {isAuthReady && (
-              user ? (
-                <div className="flex items-center gap-1.5 pl-0.5">
-                  <div className="hidden xl:flex flex-col items-end mr-0.5">
-                    <span className="text-[10px] font-bold text-slate-700 leading-none">{user.displayName || 'Người dùng'}</span>
-                    <span className="text-[8px] text-slate-400 font-medium truncate max-w-[100px]">{user.email}</span>
-                  </div>
-                  <div className="relative group">
-                    <img 
-                      src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || 'User'}&background=6366f1&color=fff`} 
-                      alt="Avatar" 
-                      className="w-7 h-7 rounded-full border-2 border-white shadow-xs cursor-pointer object-cover"
-                      referrerPolicy="no-referrer"
-                    />
-                    <div className="absolute right-0 top-full mt-1.5 w-48 bg-white rounded-2xl shadow-xl border border-slate-100 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 p-2">
-                      <div className="px-3 py-2 border-b border-slate-50 mb-1">
-                        <p className="text-xs font-bold text-slate-800 truncate">{user.displayName}</p>
-                        <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
-                      </div>
-                      <button 
-                        onClick={handleLogout}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors text-xs font-bold"
-                      >
-                        <LogOut className="w-3.5 h-3.5" />
-                        Đăng xuất
-                      </button>
+          <div className="h-6 w-px bg-slate-200 mx-1" />
+
+          {isAuthReady && (
+            user ? (
+              <div className="flex items-center gap-2 pl-1">
+                <div className="hidden lg:flex flex-col items-end mr-1">
+                  <span className="text-[10px] font-bold text-slate-700 leading-none">{user.displayName || 'Người dùng'}</span>
+                  <span className="text-[8px] text-slate-400 font-medium">{user.email}</span>
+                </div>
+                <div className="relative group">
+                  <img 
+                    src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || 'User'}&background=6366f1&color=fff`} 
+                    alt="Avatar" 
+                    className="w-8 h-8 rounded-full border-2 border-white shadow-sm cursor-pointer"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div className="absolute right-0 top-full mt-2 w-48 bg-white rounded-2xl shadow-xl border border-slate-100 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 p-2">
+                    <div className="px-3 py-2 border-b border-slate-50 mb-1">
+                      <p className="text-xs font-bold text-slate-800 truncate">{user.displayName}</p>
+                      <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
                     </div>
+                    <button 
+                      onClick={handleLogout}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-rose-500 hover:bg-rose-50 rounded-xl transition-colors text-xs font-bold"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      Đăng xuất
+                    </button>
                   </div>
                 </div>
-              ) : (
-                <button 
-                  onClick={() => setShowAuthModal(true)}
-                  className="flex items-center gap-1.5 bg-indigo-600 text-white px-3 py-1 rounded-full text-xs font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100 active:scale-95"
-                >
-                  <LogIn className="w-3.5 h-3.5" />
-                  <span>Đăng nhập</span>
-                </button>
-              )
-            )}
-          </div>
-        </header>
+              </div>
+            ) : (
+              <button 
+                onClick={() => setShowAuthModal(true)}
+                className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-1.5 rounded-full text-xs font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 active:scale-95"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                Đăng nhập
+              </button>
+            )
+          )}
+        </div>
+      </header>
       )}
 
       {/* Main Content */}
@@ -4393,22 +4287,6 @@ export default function App() {
                     >
                       <Maximize className="w-3 h-3" />
                     </button>
-                    {enableCanvasLayout && (
-                      <>
-                        <div className="w-px h-3 bg-slate-200 mx-0.5" />
-                        <button 
-                          onClick={() => setTranslationPanelMode(m => m === 'spatial-canvas' ? 'translation' : 'spatial-canvas')}
-                          className={cn(
-                            "flex items-center gap-1 px-1.5 py-1 rounded transition-all text-[9px] font-black uppercase tracking-tight",
-                            translationPanelMode === 'spatial-canvas' ? "bg-indigo-600 text-white shadow-md" : "hover:bg-white text-slate-600"
-                          )}
-                          title="Bật/Tắt chế độ Dynamic Canvas (Bảo tồn vị trí chữ + giữ nguyên hình ảnh, bảng biểu)"
-                        >
-                          <Layers className="w-3 h-3" />
-                          <span className="hidden xl:inline">Spatial Canvas</span>
-                        </button>
-                      </>
-                    )}
                   </div>
                 </div>
               </div>
@@ -4489,64 +4367,77 @@ export default function App() {
                 isFullScreen ? "flex w-1/2" : (mobileViewMode === 'translation' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0" : (showTranslationPanel ? "hidden md:flex w-1/2" : "hidden")))
               )}
             >
-              <div className="h-10 border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-2xs overflow-x-auto no-scrollbar gap-2 bg-white">
-                <div className="flex items-center gap-2 shrink-0">
-                  <div className="flex items-center gap-0.5 p-0.5 bg-slate-100/80 rounded-lg border border-slate-200/60">
-                    <button 
-                      onClick={() => setTranslationPanelMode('translation')}
-                      className={cn(
-                        "flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
-                        translationPanelMode === 'translation' ? "bg-white shadow-xs text-indigo-600" : "text-slate-500 hover:text-slate-700"
-                      )}
-                      title="Xem văn bản dịch Markdown"
-                    >
-                      <Languages className="w-3 h-3" />
-                      <span>Dịch Text</span>
-                    </button>
-                    {enableCanvasLayout && (
+              <div className="h-11 border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-sm overflow-x-auto no-scrollbar">
+                <div className="flex items-center gap-3 min-w-max">
+                  <div className="flex items-center gap-2">
+                    <div className="flex md:hidden items-center gap-0.5 mr-1">
                       <button 
-                        onClick={() => setTranslationPanelMode('spatial-canvas')}
-                        className={cn(
-                          "flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
-                          translationPanelMode === 'spatial-canvas' ? "bg-white shadow-xs text-indigo-600" : "text-slate-500 hover:text-slate-700"
-                        )}
-                        title="Spatial Layout: Đè Canvas giữ nguyên vị trí chữ + hình"
+                        onClick={() => setShowSettings(true)}
+                        className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
+                        title="Cài đặt hệ thống"
                       >
-                        <Layers className="w-3 h-3 text-indigo-500" />
-                        <span>Canvas Layout</span>
+                        <Settings className="w-3.5 h-3.5" />
                       </button>
-                    )}
-                    <button 
-                      onClick={() => setTranslationPanelMode('summary')}
-                      className={cn(
-                        "flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
-                        translationPanelMode === 'summary' ? "bg-white shadow-xs text-indigo-600" : "text-slate-500 hover:text-slate-700"
-                      )}
-                      title="Tóm tắt nội dung y khoa"
-                    >
-                      <ScrollText className="w-3 h-3" />
-                      <span>Tóm tắt</span>
-                    </button>
+                      <button 
+                        onClick={() => setShowApiSettings(true)}
+                        className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
+                        title="Quản lý API Keys"
+                      >
+                        <Key className="w-3.5 h-3.5" />
+                      </button>
+                      <button 
+                        onClick={clearFile}
+                        className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1 p-1 bg-slate-100/50 rounded-lg border border-slate-200/50">
+                      <button 
+                        onClick={() => setTranslationPanelMode('translation')}
+                        className={cn(
+                          "flex items-center gap-1.5 px-2 py-1 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
+                          translationPanelMode === 'translation' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
+                        )}
+                      >
+                        <Languages className="w-3 h-3" />
+                        <span>Dịch</span>
+                      </button>
+                      <button 
+                        onClick={() => setTranslationPanelMode('summary')}
+                        className={cn(
+                          "flex items-center gap-1.5 px-2 py-1 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
+                          translationPanelMode === 'summary' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
+                        )}
+                      >
+                        <ScrollText className="w-3 h-3" />
+                        <span>Tóm tắt</span>
+                      </button>
+                    </div>
                   </div>
+                  
+                  <div className="h-4 w-px bg-slate-200" />
                   
                   {isTranslating && (
                     <button 
                       onClick={cancelTranslation}
-                      className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-50 border border-rose-200 text-rose-600 hover:bg-rose-100 transition-all text-[9px] font-black uppercase"
+                      className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-rose-50 border border-rose-100 text-rose-600 hover:bg-rose-100 transition-all"
                       title="Dừng dịch thuật"
                     >
                       <Square className="w-2.5 h-2.5 fill-current" />
-                      <span>Dừng</span>
+                      <span className="text-[9px] font-black uppercase tracking-tight">Dừng</span>
                     </button>
                   )}
+
+                  {isTranslating && <div className="h-4 w-px bg-slate-200" />}
 
                   <button 
                     onClick={toggleAutoTranslate}
                     className={cn(
-                      "flex items-center gap-1 px-2 py-0.5 rounded-lg transition-all border text-[9px] font-black uppercase tracking-tight",
+                      "flex items-center gap-1.5 px-2 py-0.5 rounded-full transition-all border",
                       autoTranslate 
-                        ? "bg-emerald-50 border-emerald-200 text-emerald-700" 
-                        : "bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-500"
+                        ? "bg-emerald-50 border-emerald-100 text-emerald-600" 
+                        : "bg-slate-50 border-slate-100 text-slate-400 hover:text-slate-500"
                     )}
                     title="Tự động dịch khi chuyển trang"
                   >
@@ -4554,12 +4445,13 @@ export default function App() {
                       "w-1.5 h-1.5 rounded-full",
                       autoTranslate ? "bg-emerald-500 animate-pulse" : "bg-slate-300"
                     )} />
-                    <span>Auto</span>
+                    <span className="text-[9px] font-black uppercase tracking-tight">Auto</span>
                   </button>
+
+                  <div className="h-4 w-px bg-slate-200" />
                 </div>
                 
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {/* Download Translation */}
+                <div className="flex items-center gap-1.5 md:gap-3 min-w-max ml-0 md:ml-4 flex-wrap pb-2 md:pb-0">
                   <button 
                     onClick={() => {
                       if (translations[currentPage]?.status === 'success') {
@@ -4569,188 +4461,266 @@ export default function App() {
                       }
                       setShowDownloadModal(true);
                     }}
-                    className="p-1.5 rounded-lg text-indigo-600 bg-indigo-50 hover:bg-indigo-100 transition-all border border-indigo-100/80 shadow-2xs"
+                    className="flex items-center justify-center p-2 rounded-xl text-indigo-600 bg-indigo-50 hover:bg-indigo-100 transition-all border border-indigo-100 shadow-sm hover:scale-105 active:scale-95"
                     title="Tải tập tin dịch"
                   >
-                    <Download className="w-3.5 h-3.5" />
+                    <Download className="w-4 h-4" />
                   </button>
 
-                  {/* Translate Buttons */}
-                  {translationPanelMode !== 'summary' ? (
-                    <div className="flex items-center gap-1">
+                  <div className="h-4 w-px bg-slate-200 hidden xs:block" />
+
+                  {translationPanelMode === 'translation' ? (
+                    <div className="flex items-center gap-1.5 md:gap-2">
                       <button 
                         onClick={() => translateCurrentPage(currentPage, true, selectedEngine)}
                         disabled={isTranslating}
                         className={cn(
-                          "px-2 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1 border shadow-2xs",
+                          "p-2 rounded-xl transition-all flex items-center justify-center border shadow-sm",
                           isTranslating
                             ? "bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed" 
-                            : "bg-indigo-50 text-indigo-600 border-indigo-200/60 hover:bg-indigo-100 active:scale-95"
+                            : "bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100 hover:shadow hover:scale-105 active:scale-95"
                         )}
-                        title={isTranslating ? 'Đang dịch...' : (translations[currentPage] ? 'Dịch lại (Thường)' : 'Dịch trang')}
+                        title={isTranslating ? 'Đang dịch thường...' : (translations[currentPage] ? 'Dịch lại (Thường)' : 'Dịch thường')}
                       >
-                        {isTranslating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5 text-amber-500" />}
-                        <span className="hidden sm:inline text-[11px]">{translations[currentPage] ? "Dịch lại" : "Dịch thường"}</span>
+                        {isTranslating ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Zap className="w-4 h-4" />
+                        )}
                       </button>
 
                       <button 
                         onClick={() => translateCurrentPage(currentPage, true, 'gemini-3.6-flash')}
                         disabled={isTranslating}
                         className={cn(
-                          "px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1 shadow-2xs text-white",
+                          "p-2 rounded-xl transition-all flex items-center justify-center shadow-lg",
                           isTranslating
-                            ? "bg-slate-300 cursor-not-allowed shadow-none" 
-                            : "bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 active:scale-95"
+                            ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
+                            : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 hover:scale-105 active:scale-95"
                         )}
-                        title={isTranslating ? 'Đang dịch chuyên sâu...' : 'Dịch chuyên sâu (3.6 Flash)'}
+                        title={isTranslating ? 'Đang dịch chuyên sâu...' : (translations[currentPage] ? 'Dịch lại (Chuyên sâu 3.6 Flash)' : 'Dịch chuyên sâu (3.6 Flash)')}
                       >
-                        {isTranslating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-amber-300" />}
-                        <span className="hidden sm:inline text-[11px]">3.6 Flash</span>
+                        {isTranslating ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-4 h-4" />
+                        )}
                       </button>
                     </div>
                   ) : (
-                    /* Summary Controls - Compact */
-                    <div className="flex items-center gap-1 bg-slate-50 p-0.5 rounded-lg border border-slate-200">
+                    <div className="flex items-center gap-1.5 bg-slate-100/50 p-1 rounded-2xl border border-slate-200/50">
                       <button 
                         onClick={() => handleSummarize('page')}
                         disabled={isSummarizing}
-                        className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase transition-all bg-white text-indigo-600 shadow-2xs hover:bg-indigo-50"
+                        className={cn(
+                          "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 md:gap-2",
+                          isSummarizing 
+                            ? "text-slate-400 opacity-50" 
+                            : "bg-white text-indigo-600 shadow-sm hover:bg-indigo-50"
+                        )}
                         title="Tóm tắt trang hiện tại"
                       >
-                        Trang
+                        {isSummarizing ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <FileSearch className="w-3.5 h-3.5" />
+                        )}
+                        <span className="hidden sm:inline">Trang</span>
                       </button>
 
+                      <div className="flex items-center gap-1 px-1 bg-white/60 rounded-lg border border-slate-200 shadow-inner group transition-all focus-within:ring-2 focus-within:ring-indigo-100">
+                        <input 
+                          type="number" 
+                          min={1} 
+                          max={numPages} 
+                          value={summaryRange.from} 
+                          onChange={(e) => setSummaryRange(prev => ({ ...prev, from: parseInt(e.target.value) || 1 }))}
+                          className="w-7 md:w-8 text-[10px] font-black bg-transparent border-none p-0 text-center text-slate-600 focus:ring-0"
+                          title="Trang bắt đầu"
+                        />
+                        <span className="text-[10px] font-black text-slate-400">→</span>
+                        <input 
+                          type="number" 
+                          min={1} 
+                          max={numPages} 
+                          value={summaryRange.to} 
+                          onChange={(e) => setSummaryRange(prev => ({ ...prev, to: parseInt(e.target.value) || 1 }))}
+                          className="w-7 md:w-8 text-[10px] font-black bg-transparent border-none p-0 text-center text-slate-600 focus:ring-0"
+                          title="Trang kết thúc"
+                        />
+                        <button 
+                          onClick={() => handleSummarize('chapter')}
+                          disabled={isSummarizing}
+                          className={cn(
+                            "ml-1 p-1.5 rounded-lg transition-all",
+                            isSummarizing 
+                              ? "text-slate-300" 
+                              : "text-indigo-600 hover:bg-indigo-50 active:scale-90"
+                          )}
+                          title="Tóm tắt khoảng tùy chọn"
+                        >
+                          <Layout className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      
                       <button 
                         onClick={() => handleSummarize('document')}
                         disabled={isSummarizing}
-                        className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase transition-all bg-white text-indigo-600 shadow-2xs hover:bg-indigo-50"
+                        className={cn(
+                          "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 md:gap-2",
+                          isSummarizing 
+                            ? "text-slate-400 opacity-50" 
+                            : "bg-white text-indigo-600 shadow-sm hover:bg-indigo-50"
+                        )}
                         title="Tóm tắt toàn bộ tài liệu"
                       >
-                        Tài liệu
+                        <BookOpen className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Tài liệu</span>
                       </button>
                     </div>
                   )}
 
-                  {/* Copy Button */}
-                  {(translationPanelMode !== 'summary' ? translations[currentPage]?.content : summaryText) && (
-                    <button 
-                      onClick={() => handleCopyTranslation(translationPanelMode !== 'summary' ? translations[currentPage].content : summaryText, currentPage)}
-                      className={cn(
-                        "p-1.5 border rounded-lg transition-all flex items-center gap-1 shadow-2xs",
-                        copiedPage === currentPage 
-                          ? "bg-emerald-50 border-emerald-200 text-emerald-600" 
-                          : "bg-white border-slate-200 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50/50"
-                      )}
-                      title="Sao chép văn bản dịch"
-                    >
-                      {copiedPage === currentPage ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    </button>
-                  )}
+                  <div className="h-4 w-px bg-slate-200 hidden xs:block" />
 
-                  {/* Font Settings Popover */}
-                  <div className="relative">
-                    <button 
-                      onClick={() => setShowFontPopover(!showFontPopover)}
-                      className={cn(
-                        "p-1.5 border rounded-lg transition-all flex items-center gap-1 shadow-2xs",
-                        showFontPopover ? "bg-indigo-50 border-indigo-200 text-indigo-600" : "bg-white border-slate-200 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50/50"
-                      )}
-                      title="Tùy chỉnh phông chữ & cỡ chữ"
-                    >
-                      <FontIcon className="w-3.5 h-3.5" />
-                    </button>
-
-                    {showFontPopover && (
-                      <div className="absolute right-0 top-full mt-1.5 w-64 bg-white rounded-2xl shadow-xl border border-slate-200 p-3 z-50 flex flex-col gap-3 text-slate-700 text-xs animate-in fade-in zoom-in-95">
-                        <div className="flex items-center justify-between pb-1.5 border-b border-slate-100">
-                          <span className="font-bold text-slate-800 flex items-center gap-1.5">
-                            <FontIcon className="w-3.5 h-3.5 text-indigo-600" />
-                            Phông Chữ Dịch
+                  <AnimatePresence>
+                    {translationPanelMode === 'translation' && serviceStatus && (
+                      <motion.div 
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="hidden xs:flex items-center gap-2 px-2.5 py-1.5 bg-indigo-50 border border-indigo-100/50 rounded-xl"
+                      >
+                        <Zap className={cn("w-3 h-3", serviceStatus.activeKeys > 0 ? "text-amber-500 animate-pulse" : "text-slate-400")} />
+                        <div className="flex flex-col">
+                          <span className="text-[8px] leading-none font-black uppercase tracking-tight text-indigo-700 mb-0.5">
+                            {serviceStatus.model.toLowerCase().includes('flash') ? "Gemini Flash" : "Gemini Pro"}
                           </span>
-                          <button 
-                            onClick={() => setShowFontPopover(false)}
-                            className="p-1 hover:bg-slate-100 rounded-md text-slate-400"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-
-                        {/* Font Family */}
-                        <div className="flex flex-col gap-1">
-                          <span className="text-[11px] font-medium text-slate-500">Kiểu phông:</span>
-                          <select 
-                            value={fontFamily}
-                            onChange={(e) => setFontFamily(e.target.value)}
-                            className="w-full text-xs font-bold bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-slate-700 focus:ring-1 focus:ring-indigo-500 outline-none"
-                          >
-                            <option value="Inter">Không chân (Inter)</option>
-                            <option value="Cormorant Garamond">Dễ đọc (Cormorant)</option>
-                            <option value="Playfair Display">Nghệ thuật (Playfair)</option>
-                            <option value="JetBrains Mono">Đơn cách (Mono)</option>
-                          </select>
-                        </div>
-
-                        {/* Font Size */}
-                        <div className="flex items-center justify-between pt-1 border-t border-slate-100">
-                          <span className="text-[11px] font-medium text-slate-500">Cỡ chữ Markdown:</span>
-                          <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 p-0.5 rounded-lg">
-                            <button
-                              onClick={() => setFontSize(prev => Math.max(12, prev - 1))}
-                              disabled={fontSize <= 12}
-                              className="w-5 h-5 flex items-center justify-center rounded hover:bg-slate-200 disabled:opacity-30 font-bold"
-                            >
-                              -
-                            </button>
-                            <span className="text-xs font-mono font-bold w-8 text-center">{fontSize}px</span>
-                            <button
-                              onClick={() => setFontSize(prev => Math.min(30, prev + 1))}
-                              disabled={fontSize >= 30}
-                              className="w-5 h-5 flex items-center justify-center rounded hover:bg-slate-200 disabled:opacity-30 font-bold"
-                            >
-                              +
-                            </button>
+                          <div className="flex items-center gap-1">
+                            <span className="text-[7px] font-bold text-indigo-400 leading-none">
+                              {serviceStatus.activeKeys}/{serviceStatus.totalKeys} Keys
+                            </span>
+                            {serviceStatus.lastUsedSuffix !== '...' && (
+                              <span className="text-[7px] px-1 bg-white rounded-sm text-indigo-600 font-mono leading-none border border-indigo-100">
+                                *{serviceStatus.lastUsedSuffix}
+                              </span>
+                            )}
                           </div>
                         </div>
-                      </div>
+                      </motion.div>
                     )}
+                  </AnimatePresence>
+
+                  {(translationPanelMode === 'translation' ? translations[currentPage]?.content : summaryText) && (
+                    <div className="flex items-center gap-1.5 ml-auto">
+                      <button 
+                        onClick={() => handleCopyTranslation(translationPanelMode === 'translation' ? translations[currentPage].content : summaryText, currentPage)}
+                        className={cn(
+                          "p-2 border rounded-xl transition-all flex items-center gap-1.5 shadow-sm",
+                          copiedPage === currentPage 
+                            ? "bg-emerald-50 border-emerald-200 text-emerald-600" 
+                            : "bg-white border-slate-200 text-slate-400 hover:text-indigo-600 hover:border-indigo-100 hover:bg-indigo-50/30"
+                        )}
+                        title="Sao chép"
+                      >
+                        {copiedPage === currentPage ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span className="hidden xs:inline text-[9px] font-black uppercase tracking-wider">Đã chép!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span className="hidden xs:inline text-[9px] font-black uppercase tracking-wider text-slate-400">Chép</span>
+                          </>
+                        )}
+                      </button>
+
+                      {translationPanelMode === 'summary' && summaryText && (
+                        <>
+                          <button 
+                            onClick={handleSaveSummary}
+                            disabled={isSavingSummary || isSummarizing}
+                            className="p-2 border border-slate-200 rounded-xl bg-white text-slate-400 hover:text-indigo-600 hover:border-indigo-100 hover:bg-indigo-50/30 transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+                            title="Lưu tóm tắt vào đám mây"
+                          >
+                            {isSavingSummary ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                            <span className="hidden xs:inline text-[9px] font-black uppercase tracking-wider">Lưu</span>
+                          </button>
+                          <button 
+                            onClick={handleDownloadSummary}
+                            className="p-2 border border-slate-200 rounded-xl bg-white text-slate-400 hover:text-indigo-600 hover:border-indigo-100 hover:bg-indigo-50/30 transition-all flex items-center gap-1.5 shadow-sm"
+                            title="Tải xuống tóm tắt"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span className="hidden xs:inline text-[9px] font-black uppercase tracking-wider text-slate-400">Tải</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="h-4 w-px bg-slate-200 hidden md:block" />
+                  
+                  {/* Font Controls at the end */}
+                  <div className="flex items-center gap-1.5 bg-slate-50 rounded-xl p-1 border border-slate-200/80 shadow-sm">
+                    {/* Font Family Selector */}
+                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg hover:bg-slate-100 transition-colors">
+                      <FontIcon className="w-3.5 h-3.5 text-indigo-500" />
+                      <select 
+                        value={fontFamily}
+                        onChange={(e) => setFontFamily(e.target.value)}
+                        className="text-[11px] font-bold bg-transparent border-none focus:ring-0 cursor-pointer text-slate-700 p-0 outline-none select-none"
+                        title="Kiểu phông chữ"
+                      >
+                        <option value="Inter">Không chân (Inter)</option>
+                        <option value="Cormorant Garamond">Dễ đọc (Cormorant)</option>
+                        <option value="Playfair Display">Nghệ thuật (Playfair)</option>
+                        <option value="JetBrains Mono">Đơn cách (Mono)</option>
+                      </select>
+                    </div>
+                    
+                    <div className="w-px h-4 bg-slate-200" />
+                    
+                    {/* Font Size Selector & Quick Controls */}
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setFontSize(prev => Math.max(12, prev - 1))}
+                        disabled={fontSize <= 12}
+                        className="p-1 rounded-lg hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent text-slate-500 hover:text-indigo-600 transition-all active:scale-90"
+                        title="Giảm cỡ chữ"
+                      >
+                        <Minus className="w-3 h-3" />
+                      </button>
+
+                      <div className="flex items-center gap-0.5 px-1 rounded-lg hover:bg-slate-100 transition-colors">
+                        <ALargeSmall className="w-3.5 h-3.5 text-indigo-500" />
+                        <select 
+                          value={fontSize}
+                          onChange={(e) => setFontSize(Number(e.target.value))}
+                          className="text-[11px] font-black bg-transparent border-none focus:ring-0 cursor-pointer text-slate-700 p-0 outline-none w-10 text-center"
+                          title="Cỡ chữ"
+                        >
+                          {[12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 28, 30].map(size => (
+                            <option key={size} value={size}>{size}px</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <button
+                        onClick={() => setFontSize(prev => Math.min(30, prev + 1))}
+                        disabled={fontSize >= 30}
+                        className="p-1 rounded-lg hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent text-slate-500 hover:text-indigo-600 transition-all active:scale-90"
+                        title="Tăng cỡ chữ"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
               
-              <div className={cn(
-                "flex-1 flex flex-col min-h-0",
-                translationPanelMode === 'spatial-canvas' ? "p-0 overflow-hidden bg-slate-100" : "overflow-auto p-6 md:p-12 bg-white"
-              )}>
+              <div className="flex-1 overflow-auto p-6 md:p-12 bg-white">
                 <AnimatePresence mode="wait">
-                  {translationPanelMode === 'spatial-canvas' ? (
-                    <motion.div 
-                      key="spatial-canvas-view"
-                      initial={{ opacity: 0, scale: 0.98 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.98 }}
-                      className="w-full flex-1 h-full flex flex-col min-h-0"
-                    >
-                      <SpatialCanvasViewer 
-                        pdfPage={currentPdfPageObj}
-                        pdfDoc={pdfDoc}
-                        pageNum={currentPage}
-                        translationMarkdown={
-                          activeTranslation && activeTranslation.page === currentPage 
-                            ? activeTranslation.content 
-                            : (translations[currentPage]?.content || '')
-                        }
-                        zoom={zoom}
-                        onZoomChange={setZoom}
-                        fontFamily={fontFamily}
-                        bookId={fileId || currentFileName || 'default_doc'}
-                        translationService={translationService.current}
-                        userKeys={userKeys}
-                        engineKeys={engineKeys}
-                        selectedEngine={selectedEngine}
-                        onOpenApiSettings={() => setShowApiSettings(true)}
-                      />
-                    </motion.div>
-                  ) : translationPanelMode === 'summary' ? (
+                  {translationPanelMode === 'summary' ? (
                     <motion.div 
                       key="summary-view"
                       initial={{ opacity: 0, y: 10 }}
@@ -5426,37 +5396,6 @@ export default function App() {
                       <option value="gemini-3.6-flash">Chuyên sâu (3.6 Flash)</option>
                     </select>
                   </div>
-                </div>
-
-                {/* Canvas Layout Toggle Setting */}
-                <div className="space-y-3 pt-4 border-t border-slate-100">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Layers className="w-4 h-4 text-indigo-600" />
-                      <div>
-                        <label className="text-xs font-bold text-slate-700 uppercase tracking-widest block">
-                          Chế độ Canvas Layout (Bản dịch đè)
-                        </label>
-                      </div>
-                    </div>
-                    <button 
-                      type="button"
-                      onClick={toggleEnableCanvasLayout}
-                      className={cn(
-                        "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none cursor-pointer shrink-0",
-                        enableCanvasLayout ? "bg-indigo-600" : "bg-slate-200"
-                      )}
-                    >
-                      <span className={cn(
-                        "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
-                        enableCanvasLayout ? "translate-x-6" : "translate-x-1"
-                      )} />
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-slate-500 leading-relaxed bg-slate-50 p-2.5 rounded-xl border border-slate-100">
-                    💡 <strong>Bật:</strong> Xem bản dịch xếp đè vị trí chữ & hình ảnh gốc PDF.<br/>
-                    ⚡ <strong>Tắt:</strong> Tối ưu hóa dịch văn bản thuần (Dịch Text) siêu tốc, chuẩn xác và tiết kiệm hạn mức API.
-                  </p>
                 </div>
 
                 <div className="space-y-4 pt-4 border-t border-slate-100">
