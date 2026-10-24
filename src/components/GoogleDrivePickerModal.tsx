@@ -11,15 +11,18 @@ import {
   AlertCircle,
   ExternalLink,
   Plus,
-  FolderPlus
+  FolderPlus,
+  Download
 } from 'lucide-react';
 import { 
   listUserDriveFiles, 
   uploadFileToDrive, 
   getGoogleOAuthToken, 
   connectGoogleDrive,
+  downloadDriveFileAsArrayBuffer,
   DriveFileMetadata 
 } from '../services/googleDriveService';
+import { saveAs } from 'file-saver';
 import { motion } from 'motion/react';
 
 interface GoogleDrivePickerModalProps {
@@ -43,6 +46,7 @@ export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [downloadingDriveFileId, setDownloadingDriveFileId] = useState<string | null>(null);
 
   const fetchDriveFiles = async () => {
     setLoading(true);
@@ -278,17 +282,42 @@ export const GoogleDrivePickerModal: React.FC<GoogleDrivePickerModalProps> = ({
                         onOpenDriveFile(file);
                         onClose();
                       }}
-                      className="px-3 py-1.5 bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1"
+                      className="px-3 py-1.5 bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
                       title="Mở tài liệu để dịch ngay"
                     >
                       <span>Mở dịch</span>
+                    </button>
+                    <button 
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        setDownloadingDriveFileId(file.id);
+                        try {
+                          const buf = await downloadDriveFileAsArrayBuffer(file.id);
+                          const blob = new Blob([buf], { type: 'application/pdf' });
+                          saveAs(blob, file.name);
+                        } catch (err: any) {
+                          alert("Không thể tải file: " + (err.message || "Lỗi tải"));
+                        } finally {
+                          setDownloadingDriveFileId(null);
+                        }
+                      }}
+                      disabled={downloadingDriveFileId === file.id}
+                      className="px-2.5 py-1.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-600 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                      title="Tải trực tiếp file PDF về máy tính"
+                    >
+                      {downloadingDriveFileId === file.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5" />
+                      )}
+                      <span>Tải về</span>
                     </button>
                     <button 
                       onClick={() => {
                         onSaveDriveFile(file);
                         onClose();
                       }}
-                      className="px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-800 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1"
+                      className="px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-800 hover:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
                       title="Lưu vào quản lý tài liệu và chọn thư mục"
                     >
                       <FolderPlus className="w-3.5 h-3.5" />

@@ -49,6 +49,8 @@ import {
 } from '../firebase';
 import { cn } from '../../lib/utils.js';
 import { motion, AnimatePresence } from 'motion/react';
+import { saveAs } from 'file-saver';
+import { downloadDriveFileAsArrayBuffer } from '../services/googleDriveService';
 
 interface FolderData {
   id: string;
@@ -106,6 +108,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [openingFileId, setOpeningFileId] = useState<string | null>(null);
+  const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
   const [user, setUser] = useState<User | null>(() => auth.currentUser);
@@ -708,17 +711,39 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                     "absolute right-0 top-full mt-2 w-48 bg-white rounded-2xl shadow-xl border border-slate-100 py-1.5 z-50 flex flex-col gap-0.5 transition-all origin-top-right",
                     activeMenuId === file.id ? "opacity-100 scale-100" : "opacity-0 scale-95 pointer-events-none"
                   )}>
-                    {file.downloadUrl && (
+                    {(file.driveFileId || file.downloadUrl) && (
                       <button 
-                        onClick={(e) => {
+                        onClick={async (e) => {
                           e.stopPropagation();
-                          window.open(file.downloadUrl, '_blank');
-                          setActiveMenuId(null);
+                          setDownloadingFileId(file.id);
+                          try {
+                            if (file.driveFileId) {
+                              const buf = await downloadDriveFileAsArrayBuffer(file.driveFileId);
+                              const blob = new Blob([buf], { type: 'application/pdf' });
+                              saveAs(blob, file.name);
+                            } else if (file.downloadUrl) {
+                              const res = await fetch(file.downloadUrl);
+                              const blob = await res.blob();
+                              saveAs(blob, file.name);
+                            }
+                          } catch (err: any) {
+                            console.error("Lỗi khi tải file:", err);
+                            alert("Không thể tải file: " + (err.message || "Lỗi mạng"));
+                          } finally {
+                            setDownloadingFileId(null);
+                            setActiveMenuId(null);
+                          }
                         }}
-                        className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-emerald-600 flex items-center gap-2.5 transition-colors"
+                        disabled={downloadingFileId === file.id}
+                        className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-emerald-600 flex items-center gap-2.5 transition-colors cursor-pointer disabled:opacity-50"
+                        title="Tải trực tiếp file PDF về máy tính"
                       >
-                        <Download className="w-4 h-4 text-slate-400" />
-                        <span>Tải về</span>
+                        {downloadingFileId === file.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin text-emerald-600" />
+                        ) : (
+                          <Download className="w-4 h-4 text-emerald-600" />
+                        )}
+                        <span>{downloadingFileId === file.id ? "Đang tải về..." : "Tải về (PDF gốc)"}</span>
                       </button>
                     )}
                     {onBulkTranslate && viewMode === 'my' && (

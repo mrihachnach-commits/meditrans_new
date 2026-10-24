@@ -10,7 +10,12 @@ export class GeminiService implements TranslationService {
   private static requestDispatchLock: Promise<void> = Promise.resolve();
 
   constructor(apiKeys?: string | string[], modelName: string = "gemini-2.5-flash-lite") {
-    this.modelName = modelName;
+    const cleanModel = (modelName || '').trim();
+    if (!cleanModel || cleanModel === 'gemini' || cleanModel === 'shopaikey' || cleanModel === 'openai') {
+      this.modelName = "gemini-2.5-flash-lite";
+    } else {
+      this.modelName = cleanModel;
+    }
     
     if (Array.isArray(apiKeys)) {
       this.apiKeys = Array.from(new Set(apiKeys.filter(k => k && k.trim() !== "")));
@@ -24,7 +29,7 @@ export class GeminiService implements TranslationService {
       }
     });
     
-    console.log(`[MediTrans] GeminiService: ${this.apiKeys.length} keys loaded. Model: ${modelName}`);
+    console.log(`[MediTrans] GeminiService: ${this.apiKeys.length} keys loaded. Model: ${this.modelName}`);
   }
 
   public static isProxyKey(key: string, engineOrModel?: string): boolean {
@@ -161,6 +166,23 @@ export class GeminiService implements TranslationService {
       return 'gemini-2.5-flash-lite';
     }
     return modelName;
+  }
+
+  public mapModelForGoogle(modelName?: string): string {
+    const clean = (modelName || '').toLowerCase().trim();
+    if (!clean || clean === 'gemini' || clean === 'shopaikey' || clean === 'openai') {
+      return 'gemini-3.6-flash';
+    }
+    // If it is already an active modern Google Generative AI model name
+    if (clean === 'gemini-3.6-flash' || clean === 'gemini-3-flash-preview' || clean === 'gemini-flash-latest') {
+      return clean;
+    }
+    // Deep / Pro modes
+    if (clean.includes('3.6') || clean.includes('pro') || clean.includes('deep')) {
+      return 'gemini-3.6-flash';
+    }
+    // Default to active modern flash model
+    return 'gemini-3.6-flash';
   }
 
   private getProxyBaseUrl(): string {
@@ -353,12 +375,32 @@ export class GeminiService implements TranslationService {
         return { success: true, resultText: text || "Thành công", latencyMs };
       } else {
         const ai = new GoogleGenerativeAI(cleanKey);
-        const genModel = ai.getGenerativeModel({ model: this.modelName });
-        const res = await genModel.generateContent(`${systemInstruction}\n${prompt}`);
-        const response = await res.response;
-        const text = response.text()?.trim();
-        const latencyMs = Date.now() - startTime;
-        return { success: true, resultText: text || "Thành công", latencyMs };
+        const candidates = Array.from(new Set([
+          this.mapModelForGoogle(this.modelName),
+          'gemini-3.6-flash',
+          'gemini-3-flash-preview',
+          'gemini-flash-latest'
+        ]));
+        
+        let lastError: any = null;
+        for (const modelCandidate of candidates) {
+          try {
+            const genModel = ai.getGenerativeModel({ model: modelCandidate });
+            const res = await genModel.generateContent(`${systemInstruction}\n${prompt}`);
+            const response = await res.response;
+            const text = response.text()?.trim();
+            const latencyMs = Date.now() - startTime;
+            return { success: true, resultText: text || "Thành công", latencyMs };
+          } catch (modelErr: any) {
+            lastError = modelErr;
+            if (modelErr?.message?.includes('404') || modelErr?.message?.toLowerCase().includes('not found')) {
+              console.warn(`[GeminiService] Model ${modelCandidate} not available for key ...${cleanKey.slice(-4)}, trying next candidate...`);
+              continue;
+            }
+            throw modelErr;
+          }
+        }
+        throw lastError || new Error("Không thể kết nối với mô hình Gemini khả dụng.");
       }
     } catch (err: any) {
       return { success: false, error: err.message || "Lỗi không xác định" };
@@ -390,10 +432,26 @@ export class GeminiService implements TranslationService {
     } else {
       try {
         const ai = new GoogleGenerativeAI(cleanKey);
-        const genModel = ai.getGenerativeModel({ model: this.modelName });
-        const res = await genModel.generateContent('Hi');
-        return !!res;
-      } catch (e) {
+        const candidates = Array.from(new Set([
+          this.mapModelForGoogle(this.modelName),
+          'gemini-3.6-flash',
+          'gemini-3-flash-preview'
+        ]));
+        for (const modelCandidate of candidates) {
+          try {
+            const genModel = ai.getGenerativeModel({ model: modelCandidate });
+            const res = await genModel.generateContent('Hi');
+            if (res) return true;
+          } catch (e: any) {
+            if (e?.message?.includes('404') || e?.message?.toLowerCase().includes('not found')) {
+              continue;
+            }
+            return false;
+          }
+        }
+        return false;
+      } catch (e: any) {
+        console.warn(`[GeminiService] testSingleKey error for ...${cleanKey.slice(-4)}:`, e?.message || e);
         return false;
       }
     }
@@ -535,8 +593,9 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
       // Handle Standard Google Gemini Key (AIzaSy...)
       try {
         const fetchStartTime = Date.now();
+        const googleModel = this.mapModelForGoogle(requestModel);
         const genModel = ai.getGenerativeModel({ 
-          model: requestModel,
+          model: googleModel,
           systemInstruction: systemInstruction,
           generationConfig: {
             temperature: 0,
@@ -698,8 +757,9 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
       }
 
       try {
+        const googleModel = this.mapModelForGoogle(requestModel);
         const genModel = ai.getGenerativeModel({ 
-          model: requestModel,
+          model: googleModel,
           systemInstruction: systemInstruction,
           generationConfig: { temperature: 0 }
         });
@@ -756,8 +816,9 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
     }
 
     try {
+      const googleModel = this.mapModelForGoogle(this.modelName);
       const genModel = ai.getGenerativeModel({ 
-        model: this.modelName,
+        model: googleModel,
         systemInstruction: systemInstruction,
         generationConfig: {
           temperature: 0,
@@ -800,8 +861,9 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
     }
 
     try {
+      const googleModel = this.mapModelForGoogle(this.modelName);
       const genModel = ai.getGenerativeModel({ 
-        model: this.modelName,
+        model: googleModel,
         systemInstruction: systemInstruction,
         generationConfig: { temperature: 0.1 }
       });
@@ -832,8 +894,9 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
     }
 
     try {
+      const googleModel = this.mapModelForGoogle(this.modelName);
       const genModel = ai.getGenerativeModel({ 
-        model: this.modelName,
+        model: googleModel,
         systemInstruction: systemInstruction,
         generationConfig: { temperature: 0.2 }
       });

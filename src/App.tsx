@@ -472,6 +472,19 @@ export default function App() {
         ...prev,
         [keyId]: res
       }));
+      if (res.success && user) {
+        const targetKey = userKeys.find(k => k.id === keyId);
+        if (targetKey && !targetKey.isSystem && !keyId.startsWith('system_') && (targetKey.ownerId === user.uid || userRole === 'admin')) {
+          try {
+            await updateDoc(doc(db, 'apiKeys', keyId), {
+              status: 'active',
+              lastUsed: serverTimestamp()
+            });
+          } catch (e) {
+            console.warn("[handleTestKey] Could not update key status in Firestore", e);
+          }
+        }
+      }
     } catch (err: any) {
       setKeyTestResults(prev => ({
         ...prev,
@@ -479,6 +492,48 @@ export default function App() {
       }));
     } finally {
       setTestingKeyId(null);
+    }
+  };
+
+  const [isResettingKeys, setIsResettingKeys] = useState(false);
+  const handleResetAllKeysToActive = async () => {
+    if (!user || userKeys.length === 0) return;
+    setIsResettingKeys(true);
+    try {
+      const keysToReset = userKeys.filter(k => 
+        !k.isSystem && 
+        !k.id.startsWith('system_') && 
+        (k.ownerId === user.uid || userRole === 'admin')
+      );
+      if (keysToReset.length === 0) {
+        showToast("Không tìm thấy Key nào thuộc quyền của bạn để khôi phục.", "info");
+        return;
+      }
+      let count = 0;
+      await Promise.all(keysToReset.map(async (k) => {
+        try {
+          await updateDoc(doc(db, 'apiKeys', k.id), {
+            status: 'active',
+            lastUsed: serverTimestamp()
+          });
+          count++;
+        } catch (err) {
+          console.warn(`Error resetting key ${k.id}`, err);
+        }
+      }));
+      showToast(`Đã khôi phục trạng thái hoạt động cho ${count} API Key thành công!`, 'success');
+    } catch (e: any) {
+      showToast("Lỗi khi khôi phục trạng thái key: " + (e?.message || ""), 'error');
+    } finally {
+      setIsResettingKeys(false);
+    }
+  };
+
+  const handleSelectKeyFolder = (folder: 'all' | 'gemini' | 'shopaikey') => {
+    setActiveKeyFolder(folder);
+    const folderKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && k.value?.trim());
+    if (folderKeys.length > 0 && (!selectedKeyId || !folderKeys.some(k => k.id === selectedKeyId))) {
+      setSelectedKeyId(folderKeys[0].id);
     }
   };
 
@@ -883,8 +938,9 @@ export default function App() {
   }, [ownedKeys, sharedKeys, systemShopAiKeys]);
 
   const hasValidKeysForFolder = useCallback((folder: 'all' | 'gemini' | 'shopaikey') => {
-    const validVaultKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && k.status !== 'error' && k.value?.trim());
-    if (validVaultKeys.length > 0) return true;
+    // If the vault has keys matching this folder, they are available to use/rotate
+    const folderVaultKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && k.value?.trim());
+    if (folderVaultKeys.length > 0) return true;
 
     if (folder === 'gemini' || folder === 'all') {
       const geminiManual = engineKeys['gemini-2.5-flash-lite'] || (import.meta as any).env?.VITE_GEMINI_API_KEY || (process as any).env?.GEMINI_API_KEY;
@@ -977,20 +1033,23 @@ export default function App() {
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
-          const vService = new GeminiService(vKey.value, vKey.engine || selectedEngine);
+          const canUpdateFirestore = !vKey.isSystem && vKey.id && !vKey.id.startsWith('system_') && (vKey.ownerId === user.uid || userRole === 'admin');
+          const vService = new GeminiService(vKey.value, selectedEngine);
           const vRes = await vService.checkAvailableKeys();
           const isActive = vRes.manualKey;
           
           if (isActive) activeVaultCount++;
           
-          // Update Firestore for each key
-          try {
-            await updateDoc(doc(db, 'apiKeys', vKey.id), {
-              lastUsed: serverTimestamp(),
-              status: isActive ? 'active' : 'error'
-            });
-          } catch (e: any) {
-            handleFirestoreError(e, OperationType.UPDATE, `apiKeys/${vKey.id}`);
+          // Update Firestore for each key if user has permission
+          if (canUpdateFirestore) {
+            try {
+              await updateDoc(doc(db, 'apiKeys', vKey.id), {
+                lastUsed: serverTimestamp(),
+                status: isActive ? 'active' : 'error'
+              });
+            } catch (e: any) {
+              console.warn(`[performKeyCheck] Could not update key status for ${vKey.id}:`, e);
+            }
           }
           
           // If this is the currently selected key, store its result for the notification
@@ -1912,6 +1971,53 @@ export default function App() {
 
 
 
+  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const handleDownloadOriginalPdf = async () => {
+    if (file) {
+      saveAs(file, file.name);
+      showToast(`Đã tải xuống file: ${file.name}`, 'success');
+      return;
+    }
+
+    if (activeFileBufferRef.current && activeFileBufferRef.current.byteLength > 0) {
+      const blob = new Blob([activeFileBufferRef.current], { type: 'application/pdf' });
+      saveAs(blob, currentFileName || 'document.pdf');
+      showToast(`Đã tải xuống file: ${currentFileName || 'document.pdf'}`, 'success');
+      return;
+    }
+
+    const driveId = activeDriveFileRef.current?.id || activeFileDataRef.current?.driveFileId;
+    if (driveId) {
+      setIsDownloadingPdf(true);
+      try {
+        const buf = await downloadDriveFileAsArrayBuffer(driveId);
+        activeFileBufferRef.current = buf;
+        const blob = new Blob([buf], { type: 'application/pdf' });
+        saveAs(blob, currentFileName || 'document.pdf');
+        showToast(`Đã tải xuống file: ${currentFileName || 'document.pdf'}`, 'success');
+      } catch (err: any) {
+        showToast(`Không thể tải tệp từ Google Drive: ${err.message}`, 'error');
+      } finally {
+        setIsDownloadingPdf(false);
+      }
+      return;
+    }
+
+    if (fileUrl) {
+      try {
+        const res = await fetch(fileUrl);
+        const blob = await res.blob();
+        saveAs(blob, currentFileName || 'document.pdf');
+        showToast(`Đã tải xuống file: ${currentFileName || 'document.pdf'}`, 'success');
+      } catch (e: any) {
+        saveAs(fileUrl, currentFileName || 'document.pdf');
+      }
+      return;
+    }
+
+    showToast("Không tìm thấy dữ liệu tệp PDF để tải về.", "error");
+  };
+
   const handleDownload = async (pagesToDownload?: number[]) => {
     const pages = pagesToDownload || [currentPage];
     const availablePages = pages.filter(p => translations[p]?.status === 'success');
@@ -2337,6 +2443,8 @@ export default function App() {
       if (fileData.driveFileId) {
         // Fetch ArrayBuffer directly from Google Drive API
         const arrayBuffer = await downloadDriveFileAsArrayBuffer(fileData.driveFileId);
+        activeFileBufferRef.current = arrayBuffer;
+        activeFileDataRef.current = fileData;
         loadingTask = pdfjs.getDocument({
           data: arrayBuffer,
           cMapUrl: PDFJS_CMAP_URL,
@@ -2418,6 +2526,8 @@ export default function App() {
     try {
       console.log(`[MediTrans AI] Opening Google Drive File (No Auto-Save): ${driveFile.name} (${driveFile.id})`);
       const arrayBuffer = await downloadDriveFileAsArrayBuffer(driveFile.id);
+      activeFileBufferRef.current = arrayBuffer;
+      activeDriveFileRef.current = driveFile;
       
       const loadingTask = pdfjs.getDocument({
         data: arrayBuffer,
@@ -3372,7 +3482,7 @@ export default function App() {
 
     // If no primary key selected or selectedKeyId didn't match active folder, pick the first valid key in folder
     if (!primaryKey && folderKeys.length > 0) {
-      const firstValid = folderKeys.find(k => k.status !== 'error' && k.value?.trim());
+      const firstValid = folderKeys.find(k => k.status !== 'error' && k.value?.trim()) || folderKeys.find(k => k.value?.trim());
       if (firstValid && firstValid.value?.trim()) {
         primaryKey = firstValid.value.trim();
         selectedVaultKeyName = firstValid.name;
@@ -3382,10 +3492,15 @@ export default function App() {
 
     // Add other compatible keys from active folder in vault for rotation / multi-threading
     if (folderKeys.length > 0) {
-      const otherVaultKeys = folderKeys
+      const otherActiveKeys = folderKeys
         .filter(k => k.status !== 'error' && k.value?.trim() && k.value.trim() !== primaryKey)
         .map(k => k.value.trim());
       
+      const otherFallbackKeys = folderKeys
+        .filter(k => k.status === 'error' && k.value?.trim() && k.value.trim() !== primaryKey)
+        .map(k => k.value.trim());
+
+      const otherVaultKeys = [...otherActiveKeys, ...otherFallbackKeys];
       if (otherVaultKeys.length > 0) {
         console.log(`[MediTrans AI] Found ${otherVaultKeys.length} additional compatible keys in folder '${activeKeyFolder}'`);
       }
@@ -4256,12 +4371,28 @@ export default function App() {
                       <Search className="w-3.5 h-3.5" />
                     </button>
                     <div className="w-px h-3 bg-slate-200 mx-0.5" />
+                    {/* Nút tải PDF gốc đặt bên trái cạnh nút phóng to thu nhỏ xem PDF */}
+                    <button 
+                      onClick={handleDownloadOriginalPdf}
+                      disabled={isDownloadingPdf}
+                      className="p-1.5 hover:bg-emerald-50 text-emerald-600 hover:text-emerald-700 rounded transition-all flex items-center gap-1 active:scale-95 disabled:opacity-50 cursor-pointer"
+                      title="Tải về file PDF gốc từ Google Drive về máy tính"
+                    >
+                      {isDownloadingPdf ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-600" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5 text-emerald-600" />
+                      )}
+                      <span className="text-[10px] font-bold hidden sm:inline">Tải PDF</span>
+                    </button>
+                    <div className="w-px h-3 bg-slate-200 mx-0.5" />
                     <button 
                       onClick={() => {
                         setIsAutoFit(false);
                         setZoom(z => Math.max(0.5, z - 0.1));
                       }} 
                       className="p-1.5 hover:bg-white hover:shadow-sm rounded transition-all text-slate-500"
+                      title="Thu nhỏ PDF"
                     >
                       <ZoomOut className="w-3.5 h-3.5" />
                     </button>
@@ -4452,6 +4583,7 @@ export default function App() {
                 </div>
                 
                 <div className="flex items-center gap-1.5 md:gap-3 min-w-max ml-0 md:ml-4 flex-wrap pb-2 md:pb-0">
+                  {/* Tải tập tin Word đã dịch */}
                   <button 
                     onClick={() => {
                       if (translations[currentPage]?.status === 'success') {
@@ -4461,10 +4593,11 @@ export default function App() {
                       }
                       setShowDownloadModal(true);
                     }}
-                    className="flex items-center justify-center p-2 rounded-xl text-indigo-600 bg-indigo-50 hover:bg-indigo-100 transition-all border border-indigo-100 shadow-sm hover:scale-105 active:scale-95"
-                    title="Tải tập tin dịch"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-all border border-indigo-100 shadow-sm hover:scale-105 active:scale-95 text-xs font-bold cursor-pointer"
+                    title="Tải tài liệu bản dịch Word (.docx)"
                   >
-                    <Download className="w-4 h-4" />
+                    <FileText className="w-3.5 h-3.5 text-indigo-600" />
+                    <span className="hidden sm:inline">Tải Word</span>
                   </button>
 
                   <div className="h-4 w-px bg-slate-200 hidden xs:block" />
@@ -5444,7 +5577,7 @@ export default function App() {
                     <div className="grid grid-cols-3 gap-1.5 pt-1">
                       <button
                         type="button"
-                        onClick={() => setActiveKeyFolder('all')}
+                        onClick={() => handleSelectKeyFolder('all')}
                         className={cn(
                           "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
                           activeKeyFolder === 'all'
@@ -5460,7 +5593,7 @@ export default function App() {
 
                       <button
                         type="button"
-                        onClick={() => setActiveKeyFolder('gemini')}
+                        onClick={() => handleSelectKeyFolder('gemini')}
                         className={cn(
                           "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
                           activeKeyFolder === 'gemini'
@@ -5471,13 +5604,13 @@ export default function App() {
                         <Cpu className="w-3 h-3 text-indigo-500 shrink-0" />
                         <span className="truncate">Gemini</span>
                         <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                          {userKeys.filter(k => !isKeyShopAIKey(k)).length}
+                          {userKeys.filter(k => matchesKeyFolder(k, 'gemini')).length}
                         </span>
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => setActiveKeyFolder('shopaikey')}
+                        onClick={() => handleSelectKeyFolder('shopaikey')}
                         className={cn(
                           "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
                           activeKeyFolder === 'shopaikey'
@@ -5488,7 +5621,7 @@ export default function App() {
                         <Globe className="w-3 h-3 text-sky-500 shrink-0" />
                         <span className="truncate">ShopAIKey</span>
                         <span className="text-[9px] bg-sky-100 text-sky-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                          {userKeys.filter(k => isKeyShopAIKey(k)).length}
+                          {userKeys.filter(k => matchesKeyFolder(k, 'shopaikey')).length}
                         </span>
                       </button>
                     </div>
@@ -5741,6 +5874,18 @@ export default function App() {
                     </div>
                     {user && (
                       <div className="flex items-center gap-2">
+                        {userKeys.some(k => k.status === 'error') && (
+                          <button 
+                            type="button"
+                            onClick={handleResetAllKeysToActive}
+                            disabled={isResettingKeys}
+                            className="text-[10px] font-bold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200/80 px-2 py-1 rounded-md flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                            title="Khôi phục tất cả key lỗi về trạng thái Hoạt động"
+                          >
+                            {isResettingKeys ? <Loader2 className="w-3 h-3 animate-spin text-emerald-600" /> : <CheckCircle2 className="w-3 h-3 text-emerald-600" />}
+                            <span>Khôi phục Key lỗi</span>
+                          </button>
+                        )}
                         <button 
                           onClick={() => performKeyCheck(false)}
                           disabled={isCheckingKeys}
@@ -5776,7 +5921,7 @@ export default function App() {
                       <div className="bg-slate-100/90 p-1 rounded-2xl flex items-center gap-1 border border-slate-200/60">
                         <button
                           type="button"
-                          onClick={() => setActiveKeyFolder('all')}
+                          onClick={() => handleSelectKeyFolder('all')}
                           className={cn(
                             "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
                             activeKeyFolder === 'all'
@@ -5793,7 +5938,7 @@ export default function App() {
 
                         <button
                           type="button"
-                          onClick={() => setActiveKeyFolder('gemini')}
+                          onClick={() => handleSelectKeyFolder('gemini')}
                           className={cn(
                             "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
                             activeKeyFolder === 'gemini'
@@ -5804,13 +5949,13 @@ export default function App() {
                           <Cpu className="w-3.5 h-3.5 text-indigo-500" />
                           <span>Thư mục Gemini</span>
                           <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                            {userKeys.filter(k => !isKeyShopAIKey(k)).length}
+                            {userKeys.filter(k => matchesKeyFolder(k, 'gemini')).length}
                           </span>
                         </button>
 
                         <button
                           type="button"
-                          onClick={() => setActiveKeyFolder('shopaikey')}
+                          onClick={() => handleSelectKeyFolder('shopaikey')}
                           className={cn(
                             "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
                             activeKeyFolder === 'shopaikey'
@@ -5821,13 +5966,13 @@ export default function App() {
                           <Globe className="w-3.5 h-3.5 text-sky-500" />
                           <span>Thư mục ShopAIKey</span>
                           <span className="text-[9px] bg-sky-100 text-sky-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                            {userKeys.filter(k => isKeyShopAIKey(k)).length}
+                            {userKeys.filter(k => matchesKeyFolder(k, 'shopaikey')).length}
                           </span>
                         </button>
                       </div>
 
                       {/* Folder Scope Indicator Banner */}
-                      <div className="bg-sky-50/80 border border-sky-200/80 rounded-xl p-2.5 flex items-center justify-between text-[11px] text-sky-900 shadow-sm">
+                      <div className="bg-sky-50/80 border border-sky-200/80 rounded-xl p-2.5 flex items-center justify-between text-[11px] text-sky-900 shadow-sm flex-wrap gap-2">
                         <div className="flex items-center gap-2">
                           <CheckCircle2 className="w-4 h-4 text-sky-600 shrink-0" />
                           <span>
@@ -5841,6 +5986,17 @@ export default function App() {
                             </span>
                           </span>
                         </div>
+                        {userKeys.filter(k => matchesKeyFolder(k, activeKeyFolder) && k.status === 'error').length > 0 && (
+                          <button
+                            type="button"
+                            onClick={handleResetAllKeysToActive}
+                            disabled={isResettingKeys}
+                            className="ml-auto text-[10px] font-bold text-amber-800 hover:text-amber-900 bg-amber-100 hover:bg-amber-200/80 border border-amber-300 px-2 py-0.5 rounded-md flex items-center gap-1 transition-all cursor-pointer"
+                          >
+                            {isResettingKeys ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <RefreshCcw className="w-2.5 h-2.5" />}
+                            Khôi phục {userKeys.filter(k => matchesKeyFolder(k, activeKeyFolder) && k.status === 'error').length} Key lỗi
+                          </button>
+                        )}
                       </div>
 
                       {isAddingKey && (

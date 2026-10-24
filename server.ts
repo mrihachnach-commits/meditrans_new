@@ -10,6 +10,7 @@ import listUsersHandler from "./api/admin/list-users";
 import deleteUserHandler from "./api/admin/delete-user";
 import changePasswordHandler from "./api/admin/change-password";
 import driveDownloadHandler from "./api/drive/download";
+import layoutTranslateHandler from "./api/translate/layout";
 import indexHandler from "./api/index";
 
 const PORT = 3000;
@@ -26,6 +27,7 @@ async function start() {
   app.post("/api/admin/delete-user", deleteUserHandler);
   app.post("/api/admin/change-password", changePasswordHandler);
   app.get("/api/drive/download", driveDownloadHandler);
+  app.post("/api/translate/layout", layoutTranslateHandler);
   app.get("/api", indexHandler);
   app.get("/api/index", indexHandler);
 
