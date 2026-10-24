@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 function normalizeGeminiModel(model?: string): string {
   if (!model) return "gemini-3.8-flash";
@@ -82,6 +82,7 @@ ${JSON.stringify(blocks.map((b: any) => ({ id: b.id, text: b.text, type: b.type 
       const baseUrl = (customBaseUrl || "https://api.shopaikey.com/v1").replace(/\/+$/, "");
       const endpoint = baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl}/chat/completions`;
 
+      const proxyModel = model ? (model.includes("pro") ? "gemini-2.5-flash-lite" : "gemini-2.5-flash-lite") : "gemini-2.5-flash-lite";
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
@@ -89,7 +90,7 @@ ${JSON.stringify(blocks.map((b: any) => ({ id: b.id, text: b.text, type: b.type 
           "Authorization": `Bearer ${apiKey.trim()}`,
         },
         body: JSON.stringify({
-          model: "gemini-1.5-flash",
+          model: proxyModel,
           temperature: 0,
           response_format: { type: "json_object" },
           messages: [
@@ -168,6 +169,9 @@ ${JSON.stringify(blocks.map((b: any) => ({ id: b.id, text: b.text, type: b.type 
         temperature: 0,
         responseMimeType: "application/json",
         responseSchema: responseSchema,
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.LOW,
+        },
       }
     });
 

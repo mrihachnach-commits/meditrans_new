@@ -5,12 +5,9 @@
       "destination": "https://tinyvault.space/api/upload"
     },
     {
-      "source": "/api/(.*)",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/(.*)",
+      "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
   ]
 }
+

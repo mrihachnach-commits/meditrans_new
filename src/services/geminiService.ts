@@ -514,12 +514,15 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
    - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 
-4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.`;
+4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
+
+5. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
 
     const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
 YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
 - Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
+- NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
 - DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
   + "Figure 1 – ..." -> "**Hình 1 – ...**"
   + "Figure 2 – ..." -> "**Hình 2 – ...**"
@@ -719,12 +722,15 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
    - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 
-4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.`;
+4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
+
+5. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
 
       const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
 YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
 - Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
+- NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
 - DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
   + "Figure 1 – ..." -> "**Hình 1 – ...**"
   + "Figure 2 – ..." -> "**Hình 2 – ...**"

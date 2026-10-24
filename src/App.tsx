@@ -224,8 +224,8 @@ interface TranslationState {
 }
 
 // --- UTILITIES ---
-const OPTIMIZED_IMAGE_DIM = 850;
-const OPTIMIZED_IMAGE_QUALITY = 0.5;
+const OPTIMIZED_IMAGE_DIM = 1150;
+const OPTIMIZED_IMAGE_QUALITY = 0.70;
 
 const optimizeCanvasImage = (canvas: HTMLCanvasElement): string => {
   const { width, height } = canvas;
@@ -3046,9 +3046,19 @@ export default function App() {
 
       if (!imageBuffer || signal.aborted) return null;
 
+      // Extract digital text for cross-referencing acronyms, numbers, and dosages
+      let textContentStr = "";
+      if (cached?.textContent?.items) {
+        textContentStr = cached.textContent.items
+          .map((item: any) => item.str || "")
+          .filter(Boolean)
+          .join(" ");
+      }
+
       // 2. Start Stream
       const stream = translationService.current.translateMedicalPageStream({ 
         imageBuffer, 
+        textContent: textContentStr,
         pageNumber: targetPage, 
         signal,
         model: engine || selectedEngine
