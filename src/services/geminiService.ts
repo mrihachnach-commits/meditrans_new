@@ -9,7 +9,7 @@ export class GeminiService implements TranslationService {
   private static lastSuccessfulKey: string | null = null;
   private static requestDispatchLock: Promise<void> = Promise.resolve();
 
-  constructor(apiKeys?: string | string[], modelName: string = "gemini-flash-lite-latest") {
+  constructor(apiKeys?: string | string[], modelName: string = "gemini-2.5-flash-lite") {
     this.modelName = modelName;
     
     if (Array.isArray(apiKeys)) {
@@ -154,11 +154,11 @@ export class GeminiService implements TranslationService {
       return legacyCustom.trim();
     }
 
-    if (modelName === 'gemini-flash-lite-latest' || modelName === 'gemini-flash') {
-      return 'gemini-1.5-flash';
+    if (modelName === 'gemini-flash-lite-latest' || modelName === 'gemini-flash' || modelName === 'gemini-2.5-flash-lite') {
+      return 'gemini-2.5-flash-lite';
     }
     if (modelName === 'gemini-3.6-flash' || modelName === 'gemini-3-flash-preview') {
-      return 'gemini-1.5-flash';
+      return 'gemini-2.5-flash-lite';
     }
     return modelName;
   }

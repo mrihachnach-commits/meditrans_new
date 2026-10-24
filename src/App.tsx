@@ -379,7 +379,7 @@ export default function App() {
   const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
     const saved = localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine;
     if (saved === 'gemini-3-flash-preview') return 'gemini-3.6-flash';
-    return saved || 'gemini-flash-lite-latest';
+    return saved || 'gemini-2.5-flash-lite';
   });
 
   const [customBaseUrl, setCustomBaseUrl] = useState<string>(() => {
@@ -420,7 +420,7 @@ export default function App() {
         return { 
           'gemini-3.6-flash': parsed['gemini-3.6-flash'] || parsed['gemini-3-flash-preview'] || '',
           'gemini-3-flash-preview': parsed['gemini-3-flash-preview'] || '',
-          'gemini-flash-lite-latest': parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
+          'gemini-2.5-flash-lite': parsed['gemini-2.5-flash-lite'] || parsed['gemini-flash-lite-latest'] || parsed['gemini-3.1-flash-lite-preview'] || parsed['gemini-flash'] || parsed['gemini-1.5-flash'] || '',
         };
       } catch (e) {
         console.error("Failed to parse engine keys:", e);
@@ -430,7 +430,7 @@ export default function App() {
     return {
       'gemini-3.6-flash': '',
       'gemini-3-flash-preview': '',
-      'gemini-flash-lite-latest': '',
+      'gemini-2.5-flash-lite': '',
     };
   });
   const [showSettings, setShowSettings] = useState(false);
@@ -887,7 +887,7 @@ export default function App() {
     if (validVaultKeys.length > 0) return true;
 
     if (folder === 'gemini' || folder === 'all') {
-      const geminiManual = engineKeys['gemini-flash-lite-latest'] || (import.meta as any).env?.VITE_GEMINI_API_KEY || (process as any).env?.GEMINI_API_KEY;
+      const geminiManual = engineKeys['gemini-2.5-flash-lite'] || (import.meta as any).env?.VITE_GEMINI_API_KEY || (process as any).env?.GEMINI_API_KEY;
       if (geminiManual && geminiManual.trim()) return true;
     }
     if (folder === 'shopaikey' || folder === 'all') {
@@ -5392,7 +5392,7 @@ export default function App() {
                       onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
                       className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
                     >
-                      <option value="gemini-flash-lite-latest">Cơ bản (Flash Lite)</option>
+                      <option value="gemini-2.5-flash-lite">Cơ bản (Flash Lite)</option>
                       <option value="gemini-3.6-flash">Chuyên sâu (3.6 Flash)</option>
                     </select>
                   </div>

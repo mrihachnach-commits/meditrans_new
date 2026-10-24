@@ -15,7 +15,7 @@ export interface TranslationService {
   testSingleKeyTranslation(apiKey: string, sampleText: string): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }>;
 }
 
-export type TranslationEngine = 'gemini-3.6-flash' | 'gemini-3-flash-preview' | 'gemini-flash-lite-latest';
+export type TranslationEngine = 'gemini-3.6-flash' | 'gemini-3-flash-preview' | 'gemini-2.5-flash-lite';
 
 export interface EngineConfig {
   apiKey?: string;
