@@ -25,7 +25,9 @@ import {
   Share2,
   Users,
   Zap,
-  HardDrive
+  HardDrive,
+  Bot,
+  BookOpen
 } from 'lucide-react';
 import { 
   db, 
@@ -79,9 +81,10 @@ interface FileExplorerProps {
   onLocalFileOpen: (file: File) => void;
   onBulkTranslate?: (file: FileData) => void;
   onOpenGoogleDrive?: () => void;
+  onAddToNotebook?: (file: FileData) => void;
 }
 
-export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate, onOpenGoogleDrive }) => {
+export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate, onOpenGoogleDrive, onAddToNotebook }) => {
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'my' | 'shared'>('my');
   const [myFolders, setMyFolders] = useState<FolderData[]>([]);
@@ -757,6 +760,20 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                       >
                         <Zap className="w-4 h-4 text-amber-500" />
                         <span>Dịch toàn bộ</span>
+                      </button>
+                    )}
+                    {onAddToNotebook && (
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onAddToNotebook(file);
+                          setActiveMenuId(null);
+                        }}
+                        className="w-full px-3.5 py-2 text-left text-xs font-bold text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 flex items-center gap-2.5 transition-colors cursor-pointer"
+                        title="Thêm tài liệu này vào Notebook AI Workspace"
+                      >
+                        <Bot className="w-4 h-4 text-indigo-600" />
+                        <span>Thêm vào Notebook AI</span>
                       </button>
                     )}
                     {viewMode === 'my' && (

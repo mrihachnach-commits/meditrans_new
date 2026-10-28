@@ -171,18 +171,12 @@ export class GeminiService implements TranslationService {
   public mapModelForGoogle(modelName?: string): string {
     const clean = (modelName || '').toLowerCase().trim();
     if (!clean || clean === 'gemini' || clean === 'shopaikey' || clean === 'openai') {
-      return 'gemini-3.6-flash';
+      return 'gemini-1.5-flash';
     }
-    // If it is already an active modern Google Generative AI model name
-    if (clean === 'gemini-3.6-flash' || clean === 'gemini-3-flash-preview' || clean === 'gemini-flash-latest') {
-      return clean;
+    if (clean.includes('pro')) {
+      return 'gemini-1.5-flash';
     }
-    // Deep / Pro modes
-    if (clean.includes('3.6') || clean.includes('pro') || clean.includes('deep')) {
-      return 'gemini-3.6-flash';
-    }
-    // Default to active modern flash model
-    return 'gemini-3.6-flash';
+    return 'gemini-1.5-flash';
   }
 
   private getProxyBaseUrl(): string {
@@ -192,6 +186,22 @@ export class GeminiService implements TranslationService {
       cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
     }
     return cleanBaseUrl;
+  }
+
+  private sanitizeBase64(input: string | undefined | null): string {
+    if (!input || typeof input !== 'string') return '';
+    let clean = input.trim();
+    if (!clean) return '';
+    if (clean.includes(',')) {
+      clean = clean.split(',')[1] || '';
+    }
+    return clean.replace(/\s+/g, '');
+  }
+
+  private formatOpenAIImage(input: string | undefined | null): string | null {
+    const raw = this.sanitizeBase64(input);
+    if (!raw) return null;
+    return `data:image/jpeg;base64,${raw}`;
   }
 
   private async *callOpenAIStream(
@@ -210,20 +220,27 @@ export class GeminiService implements TranslationService {
       messages.push({ role: "system", content: systemInstruction });
     }
 
-    const userContent: any[] = [];
-    if (imageBase64) {
-      const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
-      userContent.push({
-        type: "image_url",
-        image_url: { 
-          url: formattedImage,
-          detail: "high"
-        }
+    const imageUrl = this.formatOpenAIImage(imageBase64);
+    if (imageUrl) {
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { 
+              url: imageUrl,
+              detail: "high"
+            }
+          },
+          { type: "text", text: prompt }
+        ]
+      });
+    } else {
+      messages.push({
+        role: "user",
+        content: prompt
       });
     }
-    userContent.push({ type: "text", text: prompt });
-
-    messages.push({ role: "user", content: userContent });
 
     const body: any = {
       model: mappedModel,
@@ -317,20 +334,27 @@ export class GeminiService implements TranslationService {
       messages.push({ role: "system", content: systemInstruction });
     }
 
-    const userContent: any[] = [];
-    if (imageBase64) {
-      const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
-      userContent.push({
-        type: "image_url",
-        image_url: { 
-          url: formattedImage,
-          detail: "high"
-        }
+    const imageUrl = this.formatOpenAIImage(imageBase64);
+    if (imageUrl) {
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { 
+              url: imageUrl,
+              detail: "high"
+            }
+          },
+          { type: "text", text: prompt }
+        ]
+      });
+    } else {
+      messages.push({
+        role: "user",
+        content: prompt
       });
     }
-    userContent.push({ type: "text", text: prompt });
-
-    messages.push({ role: "user", content: userContent });
 
     const body: any = {
       model: mappedModel,
@@ -516,7 +540,9 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
 
 4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
 
-5. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
+5. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.
+
+6. QUY TẮC ĐỊNH DẠNG SỐ LIỆU VÀ PHÉP TOÁN: TUYỆT ĐỐI KHÔNG DÙNG cú pháp LaTeX math ($ ... $, $$ ... $$, \le, \ge, \%, \lt, \gt). Viết bằng ký tự Unicode thường: '>', '<', '≥', '≤', '%', 'từ > 0% đến ≤ 2%'.`;
 
     const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
@@ -609,7 +635,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
           {
             inlineData: {
               mimeType: "image/jpeg",
-              data: imageBuffer.split(",")[1] || imageBuffer,
+              data: this.sanitizeBase64(imageBuffer),
             },
           },
           prompt,
@@ -771,7 +797,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         });
 
         const result = await genModel.generateContent([
-          { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] || imageBuffer } },
+          { inlineData: { mimeType: "image/jpeg", data: this.sanitizeBase64(imageBuffer) } },
           prompt
         ]);
 
@@ -875,7 +901,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
       });
       const result = await genModel.generateContent([
         prompt, 
-        { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] || imageBuffer } }
+        { inlineData: { mimeType: "image/jpeg", data: this.sanitizeBase64(imageBuffer) } }
       ]);
       const response = await result.response;
       return response.text()?.trim() || "";
@@ -912,6 +938,88 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         if (chunk.text()) yield chunk.text();
       }
     } catch (error: any) { throw error; }
+  }
+
+  async *askNotebookQuestion(documentContext: string, question: string, signal?: AbortSignal): AsyncGenerator<string> {
+    const systemInstruction = `BẠN LÀ TRỢ LÝ TRI THỨC Y KHOA CAO CẤP (NOTEBOOKLM AI ASSISTANT). 
+NHIỆM VỤ: Trả lời câu hỏi và tổng hợp kiến thức y khoa dựa trên QUY TRÌNH TRA CỨU ĐA TẦNG KẾT HỢP (HYBRID TWO-PASS RETRIEVAL PROTOCOL).
+
+QUY TRÌNH XỬ LÝ ĐA TẦNG (HYBRID TWO-PASS RETRIEVAL PROTOCOL):
+1. BƯỚC 1 - ĐỊNH VỊ TRI THỨC (PASS 1): Tra cứu '📘 NGỮ CẢNH CẤU TRÚC: BÁO CÁO TRI THỨC TỔNG HỢP & BÁO CÁO NHÓM' để định vị chủ đề, bức tranh toàn cảnh và trích dẫn số trang nguồn [Trang X].
+2. BƯỚC 2 - ĐỐI CHIẾU NGUYÊN VĂN (PASS 2): Kiểm tra chéo với '🎯 BẢN DỊCH CHI TIẾT CÁC TRANG' (nếu có trong ngữ cảnh) để đảm bảo chính xác 100% đến từng con số, liều lượng, thuật ngữ y khoa và ca lâm sàng nguyên bản.
+3. TRÍCH DẪN NGUỒN CHUẨN XÁC: Luôn đính kèm trích dẫn trang nguồn (VD: [Trang 3], [Trang 5–8]) trong câu trả lời.
+4. ĐỊNH DẠNG MARKDOWN Y KHOA CHUYÊN NGHIỆP: Trình bày mạch lạc bằng tiêu đề, danh sách in đậm, bảng biểu nếu cần.
+5. TRẢ LỜI TRỰC TIẾP: Tuyệt đối không lặp lại câu hỏi của người dùng. Vào thẳng nội dung tư vấn y khoa chuyên môn.
+6. QUY TẮC ĐỊNH DẠNG SỐ LIỆU VÀ PHÉP TOÁN: TUYỆT ĐỐI KHÔNG DÙNG cú pháp LaTeX math ($ ... $, $$ ... $$, \le, \ge, \%, \lt, \gt). Viết bằng ký tự Unicode thường: '>', '<', '≥', '≤', '%', 'từ > 0% đến ≤ 2%'.`;
+
+    const prompt = `TÀI LIỆU NGUỒN:\n${documentContext}\n\nCÂU HỎI / YÊU CẦU TỪ NGƯỜI DÙNG: ${question}`;
+
+    const isSingleKey = this.apiKeys.length <= 1;
+    const MAX_RETRIES = isSingleKey ? 1 : 5;
+    let retryCount = 0;
+
+    while (retryCount <= MAX_RETRIES) {
+      if (signal?.aborted) throw new Error("Translation aborted");
+
+      let ai, key: string;
+      try {
+        ({ ai, key } = await this.acquireKeyAndInstance());
+      } catch (e: any) {
+        throw new Error("Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.");
+      }
+
+      const isProxy = this.isCurrentKeyProxy(key);
+
+      try {
+        if (isProxy) {
+          let fullText = "";
+          for await (const chunkText of this.callOpenAIStream(key, this.modelName, systemInstruction, prompt, "", signal)) {
+            if (signal?.aborted) break;
+            fullText += chunkText;
+            yield chunkText;
+          }
+          GeminiService.lastSuccessfulKey = key;
+          if (fullText) return;
+        } else {
+          const googleModel = this.mapModelForGoogle(this.modelName);
+          const genModel = ai.getGenerativeModel({ 
+            model: googleModel,
+            systemInstruction: systemInstruction,
+            generationConfig: { temperature: 0.2 }
+          });
+          const response = await genModel.generateContentStream(prompt);
+          let fullText = "";
+          for await (const chunk of response.stream) {
+            if (signal?.aborted) throw new Error("Aborted");
+            const txt = chunk.text();
+            if (txt) {
+              fullText += txt;
+              yield txt;
+            }
+          }
+          GeminiService.lastSuccessfulKey = key;
+          if (fullText) return;
+        }
+      } catch (error: any) {
+        if (signal?.aborted || error.message === "Aborted" || error.message === "Translation aborted") {
+          throw new Error("Translation aborted");
+        }
+        const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
+        const isServerErr = error.message?.includes("500") || error.message?.includes("502") || error.message?.includes("503") || error.message?.includes("504") || error.message?.toLowerCase().includes("fetch") || error.message?.toLowerCase().includes("overloaded") || error.message?.includes("404");
+
+        if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota || isServerErr)) {
+          retryCount++;
+          const delay = isSingleKey 
+            ? Math.min(2000, 500 * retryCount)
+            : Math.min(6000, Math.pow(1.5, retryCount) * 800 + Math.random() * 400);
+          console.warn(`[NotebookAI] Retrying after error (attempt ${retryCount}/${MAX_RETRIES}) after ${delay.toFixed(0)}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw error;
+      }
+      break;
+    }
   }
 }
 

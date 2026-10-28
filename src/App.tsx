@@ -13,9 +13,11 @@ import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
 import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
 import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, DriveFileMetadata } from './services/googleDriveService';
-import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
+import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache, saveSummaryCache, getSummaryCache } from './services/storageService';
 import { AdminPanelModal } from './components/AdminPanelModal';
+import { SynthesisReportViewer } from './components/SynthesisReportViewer';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
+import { cleanMarkdownLatexMath } from './utils/textSanitizer';
 
 const PDFJS_VERSION = '3.11.174';
 const PDFJS_WORKER_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
@@ -82,7 +84,11 @@ import {
   FileSearch,
   BookOpen,
   Sparkles,
-  Play
+  Play,
+  Bot,
+  MessageSquare,
+  Send,
+  MessageCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -243,6 +249,22 @@ const optimizeCanvasImage = (canvas: HTMLCanvasElement): string => {
   return temp.toDataURL('image/jpeg', OPTIMIZED_IMAGE_QUALITY);
 };
 
+const customMarkdownComponents = {
+  table: ({ node, ...props }: any) => (
+    <div className="overflow-x-auto max-w-full my-3 rounded-xl border border-slate-200 shadow-sm bg-white">
+      <table className="min-w-full divide-y divide-slate-200 text-xs border-collapse" {...props} />
+    </div>
+  ),
+  thead: ({ node, ...props }: any) => <thead className="bg-indigo-50/70" {...props} />,
+  th: ({ node, ...props }: any) => <th className="px-3 py-2 text-left font-bold text-slate-800 border-b border-slate-200 whitespace-nowrap" {...props} />,
+  td: ({ node, ...props }: any) => <td className="px-3 py-2 border-b border-slate-100 text-slate-700 font-normal" {...props} />,
+  pre: ({ node, ...props }: any) => (
+    <div className="overflow-x-auto max-w-full my-2 rounded-xl bg-slate-800 p-3 text-slate-100 font-mono text-xs">
+      <pre {...props} />
+    </div>
+  )
+};
+
 // --- COMPONENTS ---
 const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSize, fontFamily }: { 
   content: string; 
@@ -258,6 +280,8 @@ const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSi
     let text = content.replace(/&lt;br\s*\/?&gt;/gi, '<br/>');
     // Replace sequences of 4 or more dots (possibly with spaces) with a clean ' ... '
     text = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
+    // Clean raw LaTeX math expressions ($...$, \le, \ge, \%, \lt, \gt)
+    text = cleanMarkdownLatexMath(text);
     return text;
   }, [content]);
 
@@ -281,7 +305,7 @@ const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSi
       className="markdown-body select-text pb-60 md:pb-0"
       style={fontStyle}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={customMarkdownComponents}>
         {processedContent}
       </ReactMarkdown>
 
@@ -575,6 +599,62 @@ export default function App() {
   const [isSavingSummary, setIsSavingSummary] = useState(false);
   const [summaryRange, setSummaryRange] = useState<{from: number, to: number}>({from: 1, to: 1});
   const summarySignalRef = useRef<AbortController | null>(null);
+
+  // NotebookLM AI Assistant States
+  const [notebookMode, setNotebookMode] = useState<'synthesis' | 'chat'>('synthesis');
+  const [chatMessages, setChatMessages] = useState<Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: number }>>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isAskingNotebook, setIsAskingNotebook] = useState(false);
+
+  // Multi-Document Notebook AI States
+  const [sessionDocumentsMap, setSessionDocumentsMap] = useState<Record<string, { name: string; translations: Record<number, { content: string }> }>>({});
+  const [selectedNotebookDocIds, setSelectedNotebookDocIds] = useState<Set<string>>(new Set());
+  const [isFullNotebookView, setIsFullNotebookView] = useState<boolean>(false);
+
+  const isMultiDocNotebook = selectedNotebookDocIds.size > 1;
+  const isNotebook100FullWidth = isFullNotebookView || isMultiDocNotebook;
+
+  // Auto update session documents map when fileId and translations change
+  useEffect(() => {
+    if (fileId && currentFileName && Object.keys(translations).length > 0) {
+      setSessionDocumentsMap(prev => ({
+        ...prev,
+        [fileId]: { name: currentFileName, translations: { ...translations } }
+      }));
+      setSelectedNotebookDocIds(prev => {
+        const next = new Set(prev);
+        next.add(fileId);
+        return next;
+      });
+    }
+  }, [fileId, currentFileName, translations]);
+
+  // Restore saved synthesis report when notebook document selection changes
+  useEffect(() => {
+    if (selectedNotebookDocIds.size === 1) {
+      const singleDocId = Array.from(selectedNotebookDocIds)[0];
+      const docData = sessionDocumentsMap[singleDocId];
+      const key = singleDocId || docData?.name || fileId || currentFileName;
+      if (key) {
+        getSummaryCache(key).then(cached => {
+          if (cached) {
+            setSummaryText(cached);
+          }
+        });
+      }
+    } else if (selectedNotebookDocIds.size > 1) {
+      const multiKey = `multi_doc_${Array.from(selectedNotebookDocIds).sort().join('_')}`;
+      getSummaryCache(multiKey).then(cached => {
+        if (cached) {
+          setSummaryText(cached);
+        } else {
+          setSummaryText('');
+        }
+      });
+      setShowTranslationPanel(true);
+      setTranslationPanelMode('summary');
+    }
+  }, [selectedNotebookDocIds, fileId, currentFileName]);
 
   // Initialize summary range when numPages changes
   useEffect(() => {
@@ -2196,91 +2276,618 @@ export default function App() {
     }
   };
 
-  const handleSummarize = async (type: 'page' | 'document' | 'chapter') => {
-    if (!translationService.current) return;
-    
-    let contentToSummarize = "";
-    
-    if (type === 'page') {
-      contentToSummarize = translations[currentPage]?.content || "";
-      if (!contentToSummarize) {
-        showToast("Vui lòng dịch trang này trước khi tóm tắt.", 'info');
-        return;
-      }
-    } else if (type === 'chapter') {
-      const startPage = Math.max(1, summaryRange.from);
-      const endPage = Math.min(numPages, summaryRange.to);
-      
-      if (startPage > endPage) {
-        showToast("Khoảng trang không hợp lệ.", 'error');
-        return;
-      }
+  const handleRemoveNotebookDoc = (docId: string) => {
+    setSessionDocumentsMap(prev => {
+      const next = { ...prev };
+      delete next[docId];
+      return next;
+    });
+    setSelectedNotebookDocIds(prev => {
+      const next = new Set(prev);
+      next.delete(docId);
+      return next;
+    });
+    showToast("Đã xóa tài liệu khỏi Notebook AI", "info");
+  };
 
-      const pages = Object.keys(translations)
-        .map(Number)
-        .filter(p => p >= startPage && p <= endPage)
-        .sort((a, b) => a - b);
-        
-      if (pages.length === 0) {
-        showToast(`Không tìm thấy trang nào được dịch trong khoảng từ ${startPage} đến ${endPage}.`, 'info');
-        return;
-      }
-      
-      contentToSummarize = pages
-        .map(p => `--- Trang ${p} ---\n${translations[p].content}`)
-        .join("\n\n");
+  const getNotebookQAContext = async (questionText: string): Promise<string> => {
+    const docIds = Array.from(selectedNotebookDocIds);
+    const allPages = getAllNotebookPagesList();
 
-      if (pages.length < (endPage - startPage + 1)) {
-        showToast(`Đang tóm tắt dựa trên ${pages.length} trang đã dịch trong khoảng từ ${startPage} đến ${endPage}.`, 'info');
-      }
-    } else if (type === 'document') {
-      // Collect all translated pages
-      const pages = Object.keys(translations).map(Number).sort((a, b) => a - b);
-      if (pages.length === 0) {
-        showToast("Chưa có nội dung nào được dịch để tóm tắt.", 'info');
-        return;
-      }
-      
-      contentToSummarize = pages
-        .map(p => `--- Trang ${p} ---\n${translations[p].content}`)
-        .join("\n\n");
-        
-      if (type === 'document' && pages.length < numPages) {
-        if (!window.confirm(`Bạn mới chỉ dịch ${pages.length}/${numPages} trang. Bạn có muốn tóm tắt dựa trên những trang đã dịch không?`)) {
-          return;
+    if (allPages.length === 0) {
+      return "Chưa có trang nào được dịch.";
+    }
+
+    // 1. UƯ TIÊN LẤY BÁO CÁO TRI THỨC TỔNG HỢP & CÁC PHÂN ĐOẠN ĐÃ LƯU (NGỮ CẢNH CHÍNH)
+    let primarySynthesisReport = "";
+
+    if (summaryText && summaryText.trim().length > 50) {
+      primarySynthesisReport = summaryText;
+    } else {
+      if (docIds.length <= 1) {
+        let saveKey = fileId || currentFileName;
+        if (docIds.length === 1) saveKey = docIds[0] || saveKey;
+        if (saveKey) {
+          const cached = await getSummaryCache(saveKey);
+          if (cached) primarySynthesisReport = cached;
+        }
+      } else {
+        const sortedIds = [...docIds].sort();
+        const multiKey = `multi_doc_${sortedIds.join('_')}`;
+        const cachedMulti = await getSummaryCache(multiKey);
+        if (cachedMulti) {
+          primarySynthesisReport = cachedMulti;
+        } else {
+          const multiParts: string[] = [];
+          for (const id of docIds) {
+            const docData = sessionDocumentsMap[id];
+            const cachedDocSum = (await getSummaryCache(id)) || (docData?.name ? await getSummaryCache(docData.name) : null);
+            if (cachedDocSum) {
+              multiParts.push(`--- Báo cáo Tri thức: ${docData?.name || id} ---\n${cachedDocSum}`);
+            }
+          }
+          if (multiParts.length > 0) {
+            primarySynthesisReport = multiParts.join("\n\n==============================\n\n");
+          }
         }
       }
     }
 
-    setTranslationPanelMode('summary');
-    setSummaryText('');
-    setIsSummarizing(true);
+    // 2. TRÍCH XUẤT CÁC TRANG CỤ THỂ HOẶC TỰ ĐỘNG LỌC THEO TỪ KHÓA ĐỂ ĐỐI CHIẾU CHUẨN XÁC (HYBRID RETRIEVAL)
+    const requestedPageNums = new Set<number>();
     
+    // Explicit page mentions in question (e.g., "trang 5", "trang 12-15", "p.8")
+    const pageMatches = questionText.matchAll(/(?:trang|page|p\.|t)\s*(\d+)(?:\s*[-–—toâến]+\s*(\d+))?/gi);
+    for (const match of pageMatches) {
+      const start = parseInt(match[1], 10);
+      const end = match[2] ? parseInt(match[2], 10) : start;
+      if (!isNaN(start)) {
+        for (let p = Math.min(start, end); p <= Math.max(start, end); p++) {
+          requestedPageNums.add(p);
+        }
+      }
+    }
+
+    // Keyword matching if no explicit page numbers mentioned in question
+    if (requestedPageNums.size === 0 && questionText.trim().length > 3) {
+      const stopWords = new Set(['cho', 'tôi', 'biết', 'về', 'là', 'gì', 'như', 'thế', 'nào', 'trong', 'tài', 'liệu', 'báo', 'cáo', 'hãy', 'trình', 'bày', 'giải', 'thích']);
+      const keywords = questionText.toLowerCase().split(/[^\p{L}\d]+/u).filter(w => w.length >= 3 && !stopWords.has(w));
+      
+      if (keywords.length > 0) {
+        for (const p of allPages) {
+          const contentLower = (p.content || '').toLowerCase();
+          const matchCount = keywords.filter(k => contentLower.includes(k)).length;
+          if (matchCount >= Math.min(2, keywords.length)) {
+            requestedPageNums.add(p.pageNum);
+            if (requestedPageNums.size >= 8) break; // Limit to top 8 relevant pages to optimize token budget
+          }
+        }
+      }
+    }
+
+    let targetedPageContents = "";
+    if (requestedPageNums.size > 0) {
+      const matchedPages = allPages.filter(p => requestedPageNums.has(p.pageNum));
+      if (matchedPages.length > 0) {
+        targetedPageContents = matchedPages.map(p => `[Tài liệu: ${p.docName} - Trang ${p.pageNum}]\n${p.content}`).join("\n\n");
+      }
+    }
+
+    // High-Fidelity Fallback: If under 15 pages in total, attach all raw page translations for instant 100% fidelity cross-checking
+    if (!targetedPageContents && allPages.length <= 15) {
+      targetedPageContents = allPages.map(p => `[Tài liệu: ${p.docName} - Trang ${p.pageNum}]\n${p.content}`).join("\n\n");
+    }
+
+    // 3. LẮP RÁP NGỮ CẢNH KẾT HỢP ĐA TẦNG (HYBRID TWO-PASS CONTEXT)
+    let finalContext = "";
+
+    if (primarySynthesisReport) {
+      finalContext += `==============================\n📘 NGỮ CẢNH CẤU TRÚC: BÁO CÁO TRI THỨC TỔNG HỢP & CÁC PHÂN ĐOẠN ĐÃ LƯU (PASS 1)\n==============================\n${primarySynthesisReport}\n\n`;
+      
+      if (targetedPageContents) {
+        finalContext += `==============================\n🎯 BẢN DỊCH CHI TIẾT CÁC TRANG LIÊN QUAN ĐỂ ĐỐI CHIẾU CHUẨN XÁC NGUYÊN VĂN (PASS 2)\n==============================\n${targetedPageContents}\n\n`;
+      } else {
+        finalContext += `💡 (Tổng cộng ${allPages.length} trang đã dịch. Dữ liệu tri thức tổng hợp đã sẵn sàng phía trên. Nếu cần kiểm tra chính xác nguyên văn ở trang nào, vui lòng chỉ định số trang trong câu hỏi).\n\n`;
+      }
+    } else {
+      finalContext += `==============================\n📋 NGỮ CẢNH BẢN DỊCH CHI TIẾT CÁC TRANG (Chưa tạo Báo cáo Tri thức Tổng hợp)\n==============================\n`;
+      finalContext += allPages.map(p => `[Tài liệu: ${p.docName} - Trang ${p.pageNum}]\n${p.content}`).join("\n\n");
+    }
+
+    return finalContext.trim();
+  };
+
+  const getFullDocumentContext = () => {
+    const docIds = Array.from(selectedNotebookDocIds);
+    if (docIds.length === 0) {
+      const pages = Object.keys(translations).map(Number).sort((a, b) => a - b);
+      if (pages.length === 0) return "Chưa có trang nào được dịch.";
+      return `--- Tài liệu: ${currentFileName || 'Tài liệu hiện tại'} ---\n` + pages.map(p => `[Trang ${p}]\n${translations[p].content}`).join("\n\n");
+    }
+
+    let combinedContext = "";
+    for (const id of docIds) {
+      const docData = sessionDocumentsMap[id];
+      if (!docData) continue;
+      const pages = Object.keys(docData.translations)
+        .map(Number)
+        .filter(p => docData.translations[p]?.content)
+        .sort((a, b) => a - b);
+      
+      if (pages.length > 0) {
+        combinedContext += `==============================\n📋 TÀI LIỆU KẾT HỢP: ${docData.name}\n==============================\n\n`;
+        combinedContext += pages.map(p => `[Trang ${p}]\n${docData.translations[p].content}`).join("\n\n");
+        combinedContext += "\n\n\n";
+      }
+    }
+
+    return combinedContext.trim() || "Chưa có nội dung dịch nào trong các tài liệu đã chọn.";
+  };
+
+  const getAllNotebookPagesList = (): { docName: string; pageNum: number; content: string }[] => {
+    const docIds = Array.from(selectedNotebookDocIds);
+    const pageList: { docName: string; pageNum: number; content: string }[] = [];
+
+    if (docIds.length === 0) {
+      const pages = Object.keys(translations).map(Number).sort((a, b) => a - b);
+      for (const p of pages) {
+        if (translations[p]?.content) {
+          pageList.push({
+            docName: currentFileName || 'Tài liệu hiện tại',
+            pageNum: p,
+            content: translations[p].content
+          });
+        }
+      }
+      return pageList;
+    }
+
+    for (const id of docIds) {
+      const docData = sessionDocumentsMap[id];
+      if (!docData) continue;
+      const pages = Object.keys(docData.translations)
+        .map(Number)
+        .filter(p => docData.translations[p]?.content)
+        .sort((a, b) => a - b);
+
+      for (const p of pages) {
+        if (docData.translations[p]?.content) {
+          pageList.push({
+            docName: docData.name,
+            pageNum: p,
+            content: docData.translations[p].content
+          });
+        }
+      }
+    }
+
+    return pageList;
+  };
+
+  const handleSynthesizeKnowledge = async (forceRestart = false) => {
+    if (!translationService.current) return;
+    const allPages = getAllNotebookPagesList();
+    if (allPages.length === 0) {
+      showToast("Vui lòng dịch ít nhất một trang để tổng hợp kiến thức.", 'info');
+      return;
+    }
+
+    setTranslationPanelMode('summary');
+    setNotebookMode('synthesis');
+    setIsSummarizing(true);
+
     if (summarySignalRef.current) {
       summarySignalRef.current.abort();
     }
     summarySignalRef.current = new AbortController();
-    
+
+    let saveKey = fileId || currentFileName;
+    if (selectedNotebookDocIds.size === 1) {
+      saveKey = Array.from(selectedNotebookDocIds)[0] || saveKey;
+    } else if (selectedNotebookDocIds.size > 1) {
+      saveKey = `multi_doc_${Array.from(selectedNotebookDocIds).sort().join('_')}`;
+    }
+
+    // Helper to immediately persist report state to IndexedDB cache & Firestore
+    const persistReportState = (reportContent: string) => {
+      if (!reportContent || !saveKey) return;
+      saveSummaryCache(saveKey, reportContent);
+      if (user && fileId && fileOwnerId && selectedNotebookDocIds.size <= 1) {
+        updateDoc(doc(db, 'users', fileOwnerId, 'documents', fileId), {
+          synthesisSummary: reportContent,
+          updatedAt: serverTimestamp()
+        }).catch(console.error);
+      }
+    };
+
+    let existingSavedText = '';
+    if (!forceRestart && saveKey) {
+      existingSavedText = (await getSummaryCache(saveKey)) || summaryText || '';
+    }
+
     try {
-      const g = (translationService.current as any).summarizeContent(
-        contentToSummarize, 
-        type, 
-        summarySignalRef.current.signal
-      );
-      
-      let fullSummary = "";
-      for await (const chunk of g) {
-        fullSummary += chunk;
-        setSummaryText(fullSummary);
+      // 1. Dynamic Word-Count Chunking Algorithm:
+      // Target ~2,000 words per chunk (~2,500 - 3,500 tokens), ideal for LLM context without 503 proxy overload
+      const TARGET_WORDS_PER_CHUNK = 2000;
+      const MAX_PAGES_PER_CHUNK = 12;
+
+      const dynamicChunks: typeof allPages[] = [];
+      let currentChunk: typeof allPages = [];
+      let currentWordCount = 0;
+
+      for (const p of allPages) {
+        const text = p.content || '';
+        const words = text.trim().split(/\s+/).filter(Boolean).length || 120;
+
+        if (
+          currentChunk.length > 0 &&
+          (currentWordCount + words > TARGET_WORDS_PER_CHUNK || currentChunk.length >= MAX_PAGES_PER_CHUNK)
+        ) {
+          dynamicChunks.push(currentChunk);
+          currentChunk = [];
+          currentWordCount = 0;
+        }
+
+        currentChunk.push(p);
+        currentWordCount += words;
+      }
+
+      if (currentChunk.length > 0) {
+        dynamicChunks.push(currentChunk);
+      }
+
+      const totalChunks = dynamicChunks.length;
+      const chunkSummaries: string[] = [];
+      let resumedCount = 0;
+
+      console.log(`[Notebook Synthesis] Dynamic word-count chunking created ${totalChunks} chunks for ${allPages.length} total pages (~2,500-3,500 tokens/chunk)...`);
+
+      for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+        if (summarySignalRef.current?.signal.aborted) break;
+
+        const chunkPages = dynamicChunks[chunkIdx];
+        const startPg = chunkPages[0].pageNum;
+        const endPg = chunkPages[chunkPages.length - 1].pageNum;
+        const docName = chunkPages[0].docName;
+
+        const currentChunkNum = chunkIdx + 1;
+
+        // Check if this chunk was already completed in existingSavedText
+        let existingChunkBlock = '';
+        if (existingSavedText && !forceRestart) {
+          const blocks = existingSavedText.split(/(?=### 📌 Phân đoạn)/g);
+          const matchedBlock = blocks.find(b => 
+            (b.includes(`Phân đoạn ${currentChunkNum}/`) || b.includes(`Phân đoạn ${currentChunkNum} `)) &&
+            (b.includes(`Trang ${startPg}`) || b.includes(`Trang ${startPg}–${endPg}`) || b.includes(`Trang ${startPg}-${endPg}`))
+          );
+          if (matchedBlock && matchedBlock.trim().length > 50) {
+            existingChunkBlock = matchedBlock.trim();
+          }
+        }
+
+        if (existingChunkBlock && !forceRestart) {
+          console.log(`[Notebook Synthesis] Resume: Chunk ${currentChunkNum}/${totalChunks} (${docName}: Trang ${startPg}-${endPg}) already completed. Skipping.`);
+          chunkSummaries.push(existingChunkBlock);
+          resumedCount++;
+          continue;
+        }
+
+        const chunkWords = chunkPages.reduce((acc, p) => acc + (p.content?.trim().split(/\s+/).filter(Boolean).length || 100), 0);
+        const estTokens = Math.round(chunkWords * 1.35);
+
+        const progressPercent = Math.round((currentChunkNum / totalChunks) * 100);
+
+        const statusHeader = resumedCount > 0
+          ? `> ⚡ **Đã khôi phục ${resumedCount} phân đoạn trước đó. Đang phân tích phân đoạn tiếp theo ${currentChunkNum}/${totalChunks} (${progressPercent}%)** — ${docName} (Trang ${startPg}–${endPg}, ~${chunkWords.toLocaleString()} từ)...`
+          : `> 🔄 **Đang phân tích phân đoạn ${currentChunkNum}/${totalChunks} (${progressPercent}%)** — ${docName} (Trang ${startPg}–${endPg}, quy mô ${chunkPages.length} trang, ~${chunkWords.toLocaleString()} từ / ~${estTokens.toLocaleString()} tokens)...`;
+
+        setSummaryText(chunkSummaries.length > 0 ? `${statusHeader}\n\n${chunkSummaries.join('\n\n---\n\n')}` : statusHeader);
+
+        const chunkContext = chunkPages.map(p => `[Tài liệu: ${p.docName} - Trang ${p.pageNum}]\n${p.content}`).join("\n\n");
+        const chunkPrompt = `Hãy phân tích và tóm tắt chi tiết tất cả các thông tin y khoa, chẩn đoán, lâm sàng, thuật ngữ và số liệu quan trọng nhất có trong phân đoạn này (${docName}, Trang ${startPg}-${endPg}). Trích dẫn đầy đủ [Trang X].`;
+
+        let chunkText = "";
+        let success = false;
+        let attempt = 0;
+        const maxChunkAttempts = 2;
+
+        while (attempt < maxChunkAttempts && !success) {
+          if (summarySignalRef.current?.signal.aborted) break;
+          attempt++;
+
+          try {
+            const generator = (translationService.current as any).askNotebookQuestion(
+              chunkContext,
+              chunkPrompt,
+              summarySignalRef.current.signal
+            );
+
+            chunkText = "";
+            for await (const piece of generator) {
+              if (summarySignalRef.current?.signal.aborted) break;
+              chunkText += piece;
+            }
+
+            if (chunkText.trim()) {
+              success = true;
+            }
+          } catch (chunkErr: any) {
+            if (summarySignalRef.current?.signal.aborted || chunkErr.message === "Aborted" || chunkErr.message === "Translation aborted") {
+              break;
+            }
+            console.warn(`[Notebook Synthesis] Chunk ${currentChunkNum} attempt ${attempt} failed:`, chunkErr);
+            if (attempt < maxChunkAttempts) {
+              await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+          }
+        }
+
+        if (summarySignalRef.current?.signal.aborted) break;
+
+        let completedChunkBlock = "";
+        if (success) {
+          completedChunkBlock = `### 📌 Phân đoạn ${currentChunkNum}/${totalChunks} (${docName}: Trang ${startPg}-${endPg})\n\n${chunkText}`;
+        } else {
+          // Sub-chunk fallback
+          console.warn(`[Notebook Synthesis] Chunk ${currentChunkNum} failed after retries. Fallback to 2-page sub-chunks...`);
+          let subChunkCombined = "";
+          for (let subIdx = 0; subIdx < chunkPages.length; subIdx += 2) {
+            if (summarySignalRef.current?.signal.aborted) break;
+            const subPages = chunkPages.slice(subIdx, subIdx + 2);
+            const subStart = subPages[0].pageNum;
+            const subEnd = subPages[subPages.length - 1].pageNum;
+            const subContext = subPages.map(p => `[Tài liệu: ${p.docName} - Trang ${p.pageNum}]\n${p.content}`).join("\n\n");
+            const subPrompt = `Tóm tắt chi tiết các thông tin y khoa quan trọng trong các trang ${subStart}-${subEnd}. Trích dẫn đầy đủ [Trang X].`;
+
+            try {
+              const subGen = (translationService.current as any).askNotebookQuestion(
+                subContext,
+                subPrompt,
+                summarySignalRef.current.signal
+              );
+              let subRes = "";
+              for await (const p of subGen) subRes += p;
+              if (subRes.trim()) subChunkCombined += `\n\n* (Trang ${subStart}-${subEnd}):\n${subRes}`;
+            } catch (subErr) {
+              console.error(`Sub-chunk ${subStart}-${subEnd} failed:`, subErr);
+            }
+          }
+          if (subChunkCombined.trim()) {
+            completedChunkBlock = `### 📌 Phân đoạn ${currentChunkNum}/${totalChunks} (${docName}: Trang ${startPg}-${endPg})\n\n${subChunkCombined}`;
+          }
+        }
+
+        if (completedChunkBlock) {
+          chunkSummaries.push(completedChunkBlock);
+          const currentProgressReport = chunkSummaries.join("\n\n---\n\n");
+          setSummaryText(currentProgressReport);
+          
+          // LƯU LẬP TỨC PHÂN ĐOẠN VỪA LÀM VÀO BỘ NHỚ!
+          persistReportState(currentProgressReport);
+        }
+      }
+
+      if (resumedCount > 0) {
+        showToast(`Đã khôi phục ${resumedCount}/${totalChunks} phân đoạn trước đó và tiếp tục tổng hợp!`, 'success');
+      }
+
+      // 2. REDUCE / MERGE STEP WITH IN-PLACE BATCHING & IMMEDIATE PERSISTENCE
+      if (!summarySignalRef.current?.signal.aborted && chunkSummaries.length > 0) {
+        if (chunkSummaries.length === 1) {
+          setSummaryText(chunkSummaries[0]);
+          persistReportState(chunkSummaries[0]);
+        } else {
+          let currentItems = [...chunkSummaries];
+          const BATCH_SIZE = 3;
+          let tier = 1;
+
+          while (currentItems.length > 1 && !summarySignalRef.current?.signal.aborted) {
+            // If currentItems <= BATCH_SIZE (e.g., 2 or 3 items left), perform final Master synthesis pass
+            if (currentItems.length <= BATCH_SIZE) {
+              let existingMasterReport = "";
+              if (existingSavedText && !forceRestart && existingSavedText.includes("## 📋 CHI TIẾT CÁC PHÂN ĐOẠN TỔNG HỢP")) {
+                const parts = existingSavedText.split("## 📋 CHI TIẾT CÁC PHÂN ĐOẠN TỔNG HỢP");
+                const masterCandidate = parts[0].replace(/^>\s*⚡.*?\n+/gs, "").trim();
+                if (masterCandidate.length > 100 && !masterCandidate.startsWith("### 📌 Phân đoạn")) {
+                  existingMasterReport = masterCandidate;
+                }
+              }
+
+              if (existingMasterReport) {
+                console.log("[Knowledge Synthesis] Resume: Master synthesis report already completed in previous run. Skipping LLM computation.");
+                const fullMasterAndChunksReport = `${existingMasterReport}\n\n==============================\n\n## 📋 CHI TIẾT CÁC PHÂN ĐOẠN TỔNG HỢP\n\n` + chunkSummaries.join('\n\n---\n\n');
+                setSummaryText(fullMasterAndChunksReport);
+                persistReportState(fullMasterAndChunksReport);
+                break;
+              }
+
+              const statusHeader = `> ⚡ **Đang tổng hợp Báo cáo Tri thức Y khoa Toàn diện từ ${currentItems.length} nhóm tóm tắt...**\n\n`;
+              const masterContext = currentItems.join("\n\n==============================\n\n");
+              const reducePrompt = `Dựa vào tổng hợp các phân đoạn trên, hãy hợp nhất và biên soạn thành một Báo cáo Tổng hợp Tri thức Y khoa (Clinical Briefing & Study Guide) toàn diện, chuyên nghiệp bằng Markdown. BẮT BUỘC giữ nguyên toàn bộ trích dẫn trang [Trang X], tổ chức thành các phần rõ ràng: Tổng quan, Chẩn đoán & Lâm sàng, Phác đồ & Thuốc, Các lưu ý quan trọng.`;
+
+              try {
+                const reduceGenerator = (translationService.current as any).askNotebookQuestion(
+                  masterContext,
+                  reducePrompt,
+                  summarySignalRef.current?.signal
+                );
+
+                let finalReport = "";
+                for await (const piece of reduceGenerator) {
+                  if (summarySignalRef.current?.signal.aborted) break;
+                  finalReport += piece;
+                  setSummaryText(
+                    finalReport + `\n\n==============================\n\n## 📋 CHI TIẾT CÁC PHÂN ĐOẠN TỔNG HỢP\n\n` + chunkSummaries.join('\n\n---\n\n')
+                  );
+                }
+
+                if (finalReport.trim()) {
+                  const fullMasterAndChunksReport = `${finalReport}\n\n==============================\n\n## 📋 CHI TIẾT CÁC PHÂN ĐOẠN TỔNG HỢP\n\n` + chunkSummaries.join('\n\n---\n\n');
+                  setSummaryText(fullMasterAndChunksReport);
+                  
+                  // LƯU TOÀN BỘ BÁO CÁO TỔNG HỢP CUỐI CÙNG + PHÂN ĐOẠN!
+                  persistReportState(fullMasterAndChunksReport);
+                }
+              } catch (reduceError: any) {
+                console.warn("[Knowledge Synthesis] Master reduce step failed. Keeping concatenated summaries.", reduceError);
+                const fallbackReport = `${currentItems.join("\n\n---\n\n")}\n\n==============================\n\n## 📋 CHI TIẾT CÁC PHÂN ĐOẠN TỔNG HỢP\n\n` + chunkSummaries.join('\n\n---\n\n');
+                setSummaryText(fallbackReport);
+                persistReportState(fallbackReport);
+                showToast("Hiển thị kết quả tóm tắt phân đoạn.", "info");
+              }
+              break; // Synthesis complete
+            }
+
+            // If currentItems > BATCH_SIZE, perform tier reduction in groups of BATCH_SIZE (3)
+            console.log(`[Knowledge Reduce] Tier ${tier}: Reducing ${currentItems.length} items in groups of ${BATCH_SIZE}...`);
+            const nextItems: string[] = [];
+            const totalBatches = Math.ceil(currentItems.length / BATCH_SIZE);
+
+            for (let bIdx = 0; bIdx < totalBatches; bIdx++) {
+              if (summarySignalRef.current?.signal.aborted) break;
+
+              const startIndex = bIdx * BATCH_SIZE;
+              const batch = currentItems.slice(startIndex, startIndex + BATCH_SIZE);
+
+              // If a single tail item remains at the end of the batch pass, carry it forward
+              if (batch.length === 1) {
+                nextItems.push(batch[0]);
+                continue;
+              }
+
+              // Check if this group report was already completed in existingSavedText
+              let existingGroupBlock = "";
+              if (existingSavedText && !forceRestart) {
+                const groupTitleMarker = `### 📑 Báo cáo Nhóm ${bIdx + 1} (Phân tầng ${tier})`;
+                if (existingSavedText.includes(groupTitleMarker)) {
+                  const startIndexInSaved = existingSavedText.indexOf(groupTitleMarker);
+                  if (startIndexInSaved !== -1) {
+                    const subText = existingSavedText.substring(startIndexInSaved);
+                    const nextMarkers = ["\n\n### 📑 Báo cáo Nhóm", "\n\n### 📌 Phân đoạn", "\n\n==============================", "\n\n---"];
+                    let endPos = subText.length;
+                    for (const marker of nextMarkers) {
+                      const pos = subText.indexOf(marker, groupTitleMarker.length);
+                      if (pos !== -1 && pos < endPos) {
+                        endPos = pos;
+                      }
+                    }
+                    const extractedBlock = subText.substring(0, endPos).trim();
+                    if (extractedBlock.length > 50) {
+                      existingGroupBlock = extractedBlock;
+                    }
+                  }
+                }
+              }
+
+              if (existingGroupBlock && !forceRestart) {
+                console.log(`[Knowledge Reduce] Resume: Group ${bIdx + 1}/${totalBatches} (Tier ${tier}) already exists in saved report. Skipping LLM computation.`);
+                nextItems.push(existingGroupBlock);
+
+                const currentWorkingList = [...nextItems, ...currentItems.slice(startIndex + batch.length)];
+                const statusHeader = `> ⚡ **Đã khôi phục Báo cáo Nhóm ${bIdx + 1}/${totalBatches} (Phân tầng ${tier}) từ bộ nhớ...**\n\n`;
+                const liveReportText = `${statusHeader}${currentWorkingList.join("\n\n---\n\n")}\n\n==============================\n\n## 📋 CHI TIẾT CÁC PHÂN ĐOẠN TỔNG HỢP\n\n` + chunkSummaries.join('\n\n---\n\n');
+
+                setSummaryText(liveReportText);
+                persistReportState(liveReportText);
+                continue;
+              }
+
+              const batchContext = batch.join("\n\n---\n\n");
+              const batchPrompt = `Hãy hợp nhất nội dung ${batch.length} phân đoạn này thành một Báo cáo Nhóm Trung Gian rõ ràng, giữ nguyên toàn bộ trích dẫn trang [Trang X] và thông tin y khoa quan trọng.`;
+
+              const statusHeader = `> ⚡ **Đang tóm tắt Nhóm ${bIdx + 1}/${totalBatches} (Phân tầng ${tier}) — Hợp nhất ${batch.length} phân đoạn thành Báo cáo Nhóm...**\n\n`;
+
+              let batchText = "";
+              let attempts = 0;
+              const maxAttempts = 3;
+
+              while (attempts < maxAttempts && !batchText.trim()) {
+                if (summarySignalRef.current?.signal.aborted) break;
+                attempts++;
+                try {
+                  const groupGen = (translationService.current as any).askNotebookQuestion(
+                    batchContext,
+                    batchPrompt,
+                    summarySignalRef.current?.signal
+                  );
+                  batchText = "";
+                  for await (const piece of groupGen) {
+                    if (summarySignalRef.current?.signal.aborted) break;
+                    batchText += piece;
+                  }
+                } catch (groupErr) {
+                  console.warn(`[Knowledge Reduce] Group batch attempt ${attempts} failed:`, groupErr);
+                  if (attempts < maxAttempts) {
+                    await new Promise(r => setTimeout(r, 1500 * attempts));
+                  }
+                }
+              }
+
+              const groupResult = batchText.trim()
+                ? `### 📑 Báo cáo Nhóm ${bIdx + 1} (Phân tầng ${tier})\n\n${batchText.trim()}`
+                : batch.join("\n\n---\n\n");
+
+              nextItems.push(groupResult);
+
+              // IN-PLACE REPLACEMENT & IMMEDIATE PERSISTENCE ON FILE / CACHE / FIRESTORE
+              const currentWorkingList = [...nextItems, ...currentItems.slice(startIndex + batch.length)];
+              const liveReportText = `${statusHeader}${currentWorkingList.join("\n\n---\n\n")}\n\n==============================\n\n## 📋 CHI TIẾT CÁC PHÂN ĐOẠN TỔNG HỢP\n\n` + chunkSummaries.join('\n\n---\n\n');
+
+              setSummaryText(liveReportText);
+              persistReportState(liveReportText);
+
+              // Pause 1s between LLM calls to prevent rate limits
+              await new Promise(r => setTimeout(r, 1000));
+            }
+
+            currentItems = nextItems;
+            tier++;
+          }
+        }
       }
     } catch (error: any) {
-      if (error.message !== "Summarization aborted" && error.message !== "Aborted") {
-        console.error("Summarization error:", error);
-        showToast(`Lỗi tóm tắt: ${formatErrorMessage(error)}`, 'error');
+      if (error.message !== "Aborted" && error.message !== "Translation aborted") {
+        console.error("Synthesis error:", error);
+        showToast(`Lỗi tổng hợp: ${formatErrorMessage(error)}`, 'error');
       }
     } finally {
       setIsSummarizing(false);
       summarySignalRef.current = null;
+    }
+  };
+
+  const handleNotebookAsk = async (questionText?: string) => {
+    const q = questionText || chatInput;
+    if (!q.trim() || isAskingNotebook || !translationService.current) return;
+
+    const userMsg = q.trim();
+    const docContext = await getNotebookQAContext(userMsg);
+    if (docContext === "Chưa có trang nào được dịch.") {
+      showToast("Vui lòng dịch ít nhất một trang để hỏi đáp với Notebook AI.", 'info');
+      return;
+    }
+
+    const userMsgId = `user_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const assistantMsgId = `assistant_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    setChatInput('');
+    setChatMessages(prev => [...prev, { id: userMsgId, role: 'user', content: userMsg, timestamp: Date.now() }]);
+    setIsAskingNotebook(true);
+
+    setChatMessages(prev => [...prev, { id: assistantMsgId, role: 'assistant', content: '', timestamp: Date.now() }]);
+
+    try {
+      const generator = (translationService.current as any).askNotebookQuestion(docContext, userMsg);
+      let fullAnswer = "";
+      for await (const chunk of generator) {
+        fullAnswer += chunk;
+        setChatMessages(prev => prev.map(m => m.id === assistantMsgId ? { ...m, content: fullAnswer } : m));
+      }
+    } catch (error: any) {
+      console.error("Notebook Q&A error:", error);
+      setChatMessages(prev => prev.map(m => m.id === assistantMsgId ? { ...m, content: `Lỗi: ${formatErrorMessage(error)}` } : m));
+    } finally {
+      setIsAskingNotebook(false);
     }
   };
 
@@ -2403,10 +3010,22 @@ export default function App() {
     setShowExplorer(false);
     setIsLocalOnly(false);
 
-    // Pre-load cached translations if available
+    // Opening document directly: Default Notebook AI Workspace to only this document
+    setIsFullNotebookView(false);
+    setSelectedNotebookDocIds(new Set([fileData.id]));
+
+    // Pre-load cached translations & summary report if available
     getTranslationsCache(fileData.id || fileData.name).then(cached => {
       if (cached && Object.keys(cached).length > 0) {
         setTranslations(cached);
+      }
+    });
+
+    getSummaryCache(fileData.id || fileData.name).then(cachedSummary => {
+      if (cachedSummary) {
+        setSummaryText(cachedSummary);
+      } else {
+        setSummaryText('');
       }
     });
 
@@ -2508,9 +3127,22 @@ export default function App() {
     setIsPdfLoading(true);
     setPdfError(null);
 
+    setIsFullNotebookView(false);
+    if (driveFile.id) {
+      setSelectedNotebookDocIds(new Set([driveFile.id]));
+    }
+
     getTranslationsCache(driveFile.id || driveFile.name).then(cached => {
       if (cached && Object.keys(cached).length > 0) {
         setTranslations(cached);
+      }
+    });
+
+    getSummaryCache(driveFile.id || driveFile.name).then(cachedSummary => {
+      if (cachedSummary) {
+        setSummaryText(cachedSummary);
+      } else {
+        setSummaryText('');
       }
     });
 
@@ -2613,6 +3245,43 @@ export default function App() {
     handleFileSelectFromExplorer(fileData);
   };
 
+  const handleAddToNotebook = async (fileData: FileData) => {
+    try {
+      showToast(`Đang kiểm tra dữ liệu cho "${fileData.name}"...`, 'info');
+      const cached = await getTranslationsCache(fileData.id || fileData.name);
+      const translationsToUse = (cached && Object.keys(cached).length > 0) 
+        ? cached 
+        : (fileId === fileData.id ? translations : {});
+
+      setSessionDocumentsMap(prev => ({
+        ...prev,
+        [fileData.id]: { name: fileData.name, translations: translationsToUse }
+      }));
+      setSelectedNotebookDocIds(prev => {
+        const next = new Set(prev);
+        next.add(fileData.id);
+        return next;
+      });
+
+      // Expand Notebook AI Workspace to 100% full screen automatically
+      setIsFullNotebookView(true);
+      setShowTranslationPanel(true);
+      setTranslationPanelMode('summary');
+      setNotebookMode('synthesis');
+
+      if (!pdfDoc && !isPdfLoading) {
+        handleFileSelectFromExplorer(fileData);
+      } else {
+        setShowExplorer(false);
+      }
+
+      showToast(`Đã mở Notebook AI Workspace (mở rộng 100% màn hình) cho "${fileData.name}"!`, 'success');
+    } catch (e) {
+      console.error("Lỗi khi thêm tài liệu vào Notebook AI:", e);
+      showToast("Không thể thêm tài liệu vào Notebook AI.", 'error');
+    }
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     // Reset input value so the same file can be selected again
@@ -2640,6 +3309,9 @@ export default function App() {
       setFileId(docId);
       setCurrentFileName(selectedFile.name);
 
+      setIsFullNotebookView(false);
+      setSelectedNotebookDocIds(new Set([docId]));
+
       try {
         const arrayBuffer = await selectedFile.arrayBuffer();
         activeFileDataRef.current = null;
@@ -2652,6 +3324,14 @@ export default function App() {
       getTranslationsCache(docId).then(cached => {
         if (cached && Object.keys(cached).length > 0) {
           setTranslations(cached);
+        }
+      });
+
+      getSummaryCache(docId).then(cachedSummary => {
+        if (cachedSummary) {
+          setSummaryText(cachedSummary);
+        } else {
+          setSummaryText('');
         }
       });
 
@@ -4239,6 +4919,7 @@ export default function App() {
               onLocalFileOpen={handleLocalFileOpen}
               onBulkTranslate={handleBulkTranslateFromExplorer}
               onOpenGoogleDrive={() => setShowDrivePickerModal(true)}
+              onAddToNotebook={handleAddToNotebook}
             />
           </div>
         ) : (
@@ -4246,8 +4927,8 @@ export default function App() {
             {/* Left Side: Original PDF */}
             <div className={cn(
               "flex flex-col bg-slate-100 overflow-hidden border-r border-slate-200 transition-all duration-300 ease-in-out relative",
-              isFullScreen ? "w-1/2" : (showTranslationPanel ? "w-full md:w-1/2" : "w-full"),
-              mobileViewMode === 'pdf' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[45%] shrink-0 md:h-full" : "hidden md:flex")
+              isNotebook100FullWidth ? "hidden" : (isFullScreen ? "w-1/2" : (showTranslationPanel ? "w-full md:w-1/2" : "w-full")),
+              isNotebook100FullWidth ? "hidden" : (mobileViewMode === 'pdf' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[45%] shrink-0 md:h-full" : "hidden md:flex"))
             )}>
               <div className="h-11 bg-white border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-sm overflow-x-auto no-scrollbar">
                 <div className="flex items-center gap-3 min-w-max">
@@ -4498,14 +5179,14 @@ export default function App() {
               </div>
             </div>
 
-            {/* Right Side: Translation */}
+            {/* Right Side: Translation / Notebook AI */}
             <motion.div 
               initial={{ x: 300, opacity: 0 }}
               animate={{ x: 0, opacity: 1 }}
               exit={{ x: 300, opacity: 0 }}
               className={cn(
-                "flex flex-col bg-white overflow-hidden transition-all duration-300",
-                isFullScreen ? "flex w-1/2" : (mobileViewMode === 'translation' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0" : (showTranslationPanel ? "hidden md:flex w-1/2" : "hidden")))
+                "flex flex-col bg-white overflow-hidden transition-all duration-300 flex-1",
+                isNotebook100FullWidth ? "flex w-full min-w-full" : (isFullScreen ? "flex w-1/2" : (mobileViewMode === 'translation' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0" : (showTranslationPanel ? "hidden md:flex w-1/2" : "hidden"))))
               )}
             >
               <div className="h-11 border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-sm overflow-x-auto no-scrollbar">
@@ -4535,7 +5216,10 @@ export default function App() {
                     </div>
                     <div className="flex items-center gap-1 p-1 bg-slate-100/50 rounded-lg border border-slate-200/50">
                       <button 
-                        onClick={() => setTranslationPanelMode('translation')}
+                        onClick={() => {
+                          setIsFullNotebookView(false);
+                          setTranslationPanelMode('translation');
+                        }}
                         className={cn(
                           "flex items-center gap-1.5 px-2 py-1 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
                           translationPanelMode === 'translation' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
@@ -4545,16 +5229,30 @@ export default function App() {
                         <span>Dịch</span>
                       </button>
                       <button 
-                        onClick={() => setTranslationPanelMode('summary')}
+                        onClick={() => {
+                          setTranslationPanelMode('summary');
+                        }}
                         className={cn(
                           "flex items-center gap-1.5 px-2 py-1 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
                           translationPanelMode === 'summary' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
                         )}
+                        title="Trợ lý Tri thức NotebookLM (Hỏi đáp & Tổng hợp)"
                       >
-                        <ScrollText className="w-3 h-3" />
-                        <span>Tóm tắt</span>
+                        <Bot className="w-3 h-3 text-indigo-500" />
+                        <span>Notebook AI</span>
                       </button>
                     </div>
+
+                    {isFullNotebookView && selectedNotebookDocIds.size <= 1 && (
+                      <button 
+                        onClick={() => setIsFullNotebookView(false)}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 transition-all border border-indigo-100 shadow-sm cursor-pointer"
+                        title="Thu nhỏ và mở lại cửa sổ xem PDF (Chia đôi màn hình)"
+                      >
+                        <BookOpen className="w-3 h-3" />
+                        <span>Hiện cửa sổ PDF</span>
+                      </button>
+                    )}
                   </div>
                   
                   <div className="h-4 w-px bg-slate-200" />
@@ -4653,72 +5351,33 @@ export default function App() {
                   ) : (
                     <div className="flex items-center gap-1.5 bg-slate-100/50 p-1 rounded-2xl border border-slate-200/50">
                       <button 
-                        onClick={() => handleSummarize('page')}
-                        disabled={isSummarizing}
+                        onClick={() => {
+                          setNotebookMode('synthesis');
+                        }}
                         className={cn(
-                          "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 md:gap-2",
-                          isSummarizing 
-                            ? "text-slate-400 opacity-50" 
-                            : "bg-white text-indigo-600 shadow-sm hover:bg-indigo-50"
+                          "px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5",
+                          notebookMode === 'synthesis' 
+                            ? "bg-indigo-600 text-white shadow-md shadow-indigo-100" 
+                            : "bg-white text-slate-600 hover:bg-indigo-50"
                         )}
-                        title="Tóm tắt trang hiện tại"
+                        title="Tổng hợp tri thức & Báo cáo y khoa toàn diện"
                       >
-                        {isSummarizing ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <FileSearch className="w-3.5 h-3.5" />
-                        )}
-                        <span className="hidden sm:inline">Trang</span>
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Tổng hợp tri thức</span>
                       </button>
 
-                      <div className="flex items-center gap-1 px-1 bg-white/60 rounded-lg border border-slate-200 shadow-inner group transition-all focus-within:ring-2 focus-within:ring-indigo-100">
-                        <input 
-                          type="number" 
-                          min={1} 
-                          max={numPages} 
-                          value={summaryRange.from} 
-                          onChange={(e) => setSummaryRange(prev => ({ ...prev, from: parseInt(e.target.value) || 1 }))}
-                          className="w-7 md:w-8 text-[10px] font-black bg-transparent border-none p-0 text-center text-slate-600 focus:ring-0"
-                          title="Trang bắt đầu"
-                        />
-                        <span className="text-[10px] font-black text-slate-400">→</span>
-                        <input 
-                          type="number" 
-                          min={1} 
-                          max={numPages} 
-                          value={summaryRange.to} 
-                          onChange={(e) => setSummaryRange(prev => ({ ...prev, to: parseInt(e.target.value) || 1 }))}
-                          className="w-7 md:w-8 text-[10px] font-black bg-transparent border-none p-0 text-center text-slate-600 focus:ring-0"
-                          title="Trang kết thúc"
-                        />
-                        <button 
-                          onClick={() => handleSummarize('chapter')}
-                          disabled={isSummarizing}
-                          className={cn(
-                            "ml-1 p-1.5 rounded-lg transition-all",
-                            isSummarizing 
-                              ? "text-slate-300" 
-                              : "text-indigo-600 hover:bg-indigo-50 active:scale-90"
-                          )}
-                          title="Tóm tắt khoảng tùy chọn"
-                        >
-                          <Layout className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                      
                       <button 
-                        onClick={() => handleSummarize('document')}
-                        disabled={isSummarizing}
+                        onClick={() => setNotebookMode('chat')}
                         className={cn(
-                          "px-2 md:px-3 py-1.5 rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 md:gap-2",
-                          isSummarizing 
-                            ? "text-slate-400 opacity-50" 
-                            : "bg-white text-indigo-600 shadow-sm hover:bg-indigo-50"
+                          "px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5",
+                          notebookMode === 'chat' 
+                            ? "bg-indigo-600 text-white shadow-md shadow-indigo-100" 
+                            : "bg-white text-slate-600 hover:bg-indigo-50"
                         )}
-                        title="Tóm tắt toàn bộ tài liệu"
+                        title="Hỏi đáp thông minh với tài liệu (Q&A)"
                       >
-                        <BookOpen className="w-3.5 h-3.5" />
-                        <span className="hidden sm:inline">Tài liệu</span>
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>Hỏi đáp (Q&A)</span>
                       </button>
                     </div>
                   )}
@@ -4870,39 +5529,240 @@ export default function App() {
                       animate={{ opacity: 1, y: 0 }}
                       className="h-full flex flex-col"
                     >
-                      {!summaryText && !isSummarizing ? (
-                        <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center">
-                          <ScrollText className="w-12 h-12 mb-4 opacity-20" />
-                          <p className="text-sm font-medium">Chưa có tóm tắt.</p>
-                          <p className="text-xs">Chọn chế độ tóm tắt để bắt đầu.</p>
+                      {/* Multi-Document Notebook Sources Manager Banner */}
+                      <div className="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-3 mb-4 flex flex-col gap-2 shrink-0">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <BookOpen className="w-4 h-4 text-indigo-600" />
+                            <span className="text-xs font-bold text-indigo-900">Nguồn tài liệu Notebook ({selectedNotebookDocIds.size} tài liệu chọn)</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {fileId && currentFileName && !sessionDocumentsMap[fileId] && Object.keys(translations).length > 0 && (
+                              <button
+                                onClick={() => {
+                                  setSessionDocumentsMap(prev => ({
+                                    ...prev,
+                                    [fileId]: { name: currentFileName, translations: { ...translations } }
+                                  }));
+                                  setSelectedNotebookDocIds(prev => {
+                                    const next = new Set(prev);
+                                    next.add(fileId);
+                                    return next;
+                                  });
+                                  showToast(`Đã thêm "${currentFileName}" vào Notebook AI!`, 'success');
+                                }}
+                                className="px-2 py-1 bg-indigo-600 text-white hover:bg-indigo-700 rounded-lg text-[10px] font-bold transition-all shadow-sm flex items-center gap-1 cursor-pointer"
+                              >
+                                <Plus className="w-3 h-3" />
+                                Thêm tài liệu đang xem
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setShowExplorer(true)}
+                              className="px-2 py-1 bg-white text-indigo-600 hover:bg-indigo-50 border border-indigo-200 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer"
+                              title="Mở Quản lý tài liệu để chọn thêm file vào Notebook AI"
+                            >
+                              <Folder className="w-3 h-3" />
+                              Chọn từ Quản lý
+                            </button>
+                          </div>
+                        </div>
+
+                        {Object.keys(sessionDocumentsMap).length === 0 ? (
+                          <p className="text-[11px] text-slate-500 italic">Chưa có tài liệu nào trong Notebook. Hãy mở Quản lý tài liệu và chọn "Thêm vào Notebook AI" để bắt đầu.</p>
+                        ) : (
+                          <div className="flex flex-wrap gap-1.5 pt-1">
+                            {Object.entries(sessionDocumentsMap).map(([id, doc]) => {
+                              const isSelected = selectedNotebookDocIds.has(id);
+                              return (
+                                <div
+                                  key={id}
+                                  className={cn(
+                                    "px-2.5 py-1 rounded-xl text-[11px] font-semibold transition-all flex items-center gap-1.5 border",
+                                    isSelected 
+                                      ? "bg-indigo-600 text-white border-indigo-700 shadow-sm" 
+                                      : "bg-white text-slate-600 border-slate-200 hover:border-indigo-200"
+                                  )}
+                                >
+                                  <button
+                                    onClick={() => {
+                                      setSelectedNotebookDocIds(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(id)) {
+                                          if (next.size > 1) next.delete(id);
+                                        } else {
+                                          next.add(id);
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                    className="flex items-center gap-1 cursor-pointer truncate max-w-[180px]"
+                                    title={isSelected ? "Đã chọn nguồn này" : "Bấm để chọn nguồn này"}
+                                  >
+                                    <span className="truncate">{doc.name}</span>
+                                    {isSelected && <Check className="w-3 h-3 shrink-0" />}
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleRemoveNotebookDoc(id);
+                                    }}
+                                    className="p-1 hover:bg-rose-500/20 rounded-full transition-colors shrink-0 cursor-pointer ml-0.5"
+                                    title="Xóa tài liệu khỏi Notebook AI"
+                                  >
+                                    <Trash2 className={cn("w-3 h-3", isSelected ? "text-indigo-200 hover:text-white" : "text-slate-400 hover:text-rose-600")} />
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {notebookMode === 'synthesis' ? (
+                        <div className="flex-1 overflow-auto flex flex-col">
+                          {!summaryText && !isSummarizing ? (
+                            <div className="h-full flex flex-col items-center justify-center text-slate-400 text-center p-8">
+                              <Bot className="w-12 h-12 mb-4 text-indigo-300 animate-bounce" />
+                              <p className="text-sm font-bold text-slate-700">Chưa có Báo cáo Tổng hợp Tri thức.</p>
+                              <p className="text-xs text-slate-400 mb-4">Nhấn nút bên dưới để Notebook AI phân tích và tổng hợp các tài liệu đã chọn.</p>
+                              <button
+                                onClick={() => handleSynthesizeKnowledge(false)}
+                                className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-200 flex items-center gap-2 cursor-pointer"
+                              >
+                                <Play className="w-4 h-4 fill-current" />
+                                <span>Tổng hợp tri thức ngay</span>
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col gap-3 h-full flex-1 min-h-0">
+                              <div className="flex items-center justify-between pb-2 border-b border-slate-100 flex-wrap gap-2 shrink-0">
+                                <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">Trợ lý Quản lý & Tổng hợp Tri thức</span>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => handleSynthesizeKnowledge(false)}
+                                    disabled={isSummarizing}
+                                    className="px-3 py-1.5 bg-indigo-600 text-white hover:bg-indigo-700 rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                    title="Tiếp tục tổng hợp các phân đoạn chưa hoàn thành"
+                                  >
+                                    {isSummarizing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3 h-3 fill-current" />}
+                                    <span>{isSummarizing ? "Đang xử lý..." : "Tiếp tục tổng hợp"}</span>
+                                  </button>
+
+                                  <button
+                                    onClick={() => handleSynthesizeKnowledge(true)}
+                                    disabled={isSummarizing}
+                                    className="px-3 py-1.5 bg-slate-100 text-slate-600 hover:bg-rose-50 hover:text-rose-600 rounded-xl text-xs font-bold transition-all border border-slate-200 cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                                    title="Xóa dữ liệu cũ và chạy tổng hợp mới từ đầu"
+                                  >
+                                    <RefreshCcw className="w-3.5 h-3.5" />
+                                    <span>Chạy lại từ đầu</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="flex-1 min-h-0 overflow-hidden">
+                                <SynthesisReportViewer
+                                  summaryText={summaryText}
+                                  isSummarizing={isSummarizing}
+                                  fontSize={fontSize}
+                                  fontFamily={fontFamily}
+                                  customMarkdownComponents={customMarkdownComponents}
+                                  onSynthesize={handleSynthesizeKnowledge}
+                                />
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
-                        <div 
-                          className="markdown-body select-text pb-60 md:pb-0"
-                          style={{ 
-                            fontSize: `${fontSize}px`,
-                            fontFamily: fontFamily === 'Inter' ? 'var(--font-sans)' : 
-                                       fontFamily === 'JetBrains Mono' ? 'var(--font-mono)' : 
-                                       fontFamily === 'Playfair Display' ? 'var(--font-display)' :
-                                       fontFamily === 'Cormorant Garamond' ? 'var(--font-serif)' :
-                                       fontFamily
-                          }}
-                        >
-                          {isSummarizing && !summaryText && (
-                            <div className="flex flex-col items-center justify-center py-20 gap-4">
-                              <Loader2 className="w-10 h-10 text-indigo-600 animate-spin" />
-                              <p className="text-xs font-bold text-slate-500 animate-pulse uppercase tracking-wider">Đang khởi tạo tóm tắt...</p>
-                            </div>
-                          )}
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
-                            {summaryText}
-                          </ReactMarkdown>
-                          {isSummarizing && summaryText && (
-                            <div className="mt-4 flex items-center gap-2 text-indigo-600 font-bold text-xs animate-pulse">
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                              <span>Đang tóm tắt nội dung...</span>
-                            </div>
-                          )}
+                        // Notebook Q&A Chat Mode
+                        <div className="flex-1 flex flex-col h-full overflow-hidden">
+                          <div className="flex-1 overflow-auto space-y-4 pr-2 pb-4">
+                            {chatMessages.length === 0 ? (
+                              <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-400">
+                                <MessageCircle className="w-12 h-12 mb-3 text-indigo-300 opacity-60" />
+                                <p className="text-sm font-bold text-slate-700 mb-1">Hỏi đáp thông minh với Notebook AI</p>
+                                <p className="text-xs text-slate-500 max-w-md mb-6">
+                                  Đặt câu hỏi bất kỳ về các tài liệu đã chọn. Trợ lý AI sẽ trích dẫn chính xác số trang nguồn để bạn dễ dàng tra cứu.
+                                </p>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg text-left">
+                                  {[
+                                    "Tóm tắt các điểm chính của tài liệu này",
+                                    "Phân tích ca bệnh lâm sàng trong tài liệu",
+                                    "Các chỉ số chẩn đoán quan trọng là gì?",
+                                    "Giải thích các thuật ngữ chuyên ngành có trong bài"
+                                  ].map((suggestion, idx) => (
+                                    <button
+                                      key={idx}
+                                      onClick={() => handleNotebookAsk(suggestion)}
+                                      className="p-3 bg-indigo-50/50 hover:bg-indigo-100/60 border border-indigo-100/80 rounded-xl text-xs font-medium text-indigo-700 transition-all text-left flex items-center justify-between group cursor-pointer"
+                                    >
+                                      <span>{suggestion}</span>
+                                      <ChevronRight className="w-3.5 h-3.5 text-indigo-400 group-hover:translate-x-0.5 transition-transform" />
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              chatMessages.map((msg, idx) => (
+                                <div 
+                                  key={msg.id || `${msg.timestamp}-${idx}`}
+                                  className={cn(
+                                    "flex gap-3 p-4 rounded-2xl max-w-full min-w-0 overflow-hidden",
+                                    msg.role === 'user' ? "bg-slate-50 border border-slate-200/80 ml-8" : "bg-indigo-50/40 border border-indigo-100/80 mr-8"
+                                  )}
+                                >
+                                  <div className={cn(
+                                    "w-7 h-7 rounded-xl flex items-center justify-center shrink-0 font-bold text-xs",
+                                    msg.role === 'user' ? "bg-slate-700 text-white" : "bg-indigo-600 text-white shadow-sm"
+                                  )}>
+                                    {msg.role === 'user' ? "U" : <Bot className="w-4 h-4" />}
+                                  </div>
+                                  <div className="flex-1 min-w-0 overflow-hidden break-words">
+                                    <div className="text-[10px] font-bold text-slate-400 mb-1">
+                                      {msg.role === 'user' ? "Bạn" : "Notebook AI Assistant"}
+                                    </div>
+                                    <div 
+                                      className="markdown-body select-text text-sm text-slate-700 max-w-full min-w-0 overflow-hidden break-words"
+                                      style={{ fontSize: `${fontSize}px` }}
+                                    >
+                                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={customMarkdownComponents}>
+                                        {cleanMarkdownLatexMath(msg.content || (isAskingNotebook ? "Đang suy nghĩ và tra cứu tài liệu..." : ""))}
+                                      </ReactMarkdown>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+
+                          {/* Chat Input Bar */}
+                          <div className="pt-3 border-t border-slate-100 bg-white">
+                            <form 
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                handleNotebookAsk();
+                              }}
+                              className="flex items-center gap-2 bg-slate-50 p-2 rounded-2xl border border-slate-200 focus-within:ring-2 focus-within:ring-indigo-200 transition-all"
+                            >
+                              <input 
+                                type="text"
+                                value={chatInput}
+                                onChange={(e) => setChatInput(e.target.value)}
+                                placeholder="Hỏi Notebook AI về tài liệu y khoa..."
+                                disabled={isAskingNotebook}
+                                className="flex-1 bg-transparent border-none text-xs text-slate-700 focus:ring-0 px-2 py-1 outline-none"
+                              />
+                              <button
+                                type="submit"
+                                disabled={!chatInput.trim() || isAskingNotebook}
+                                className="p-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-40 disabled:hover:bg-indigo-600 transition-all shadow-sm flex items-center justify-center cursor-pointer"
+                                title="Gửi câu hỏi"
+                              >
+                                {isAskingNotebook ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                              </button>
+                            </form>
+                          </div>
                         </div>
                       )}
                     </motion.div>
