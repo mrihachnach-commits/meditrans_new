@@ -170,17 +170,19 @@ export class GeminiService implements TranslationService {
 
   public mapModelForGoogle(modelName?: string): string {
     const clean = (modelName || '').toLowerCase().trim();
-    // NEVER send deprecated models (gemini-1.5-*, gemini-2.0-*) to Google v1beta
-    if (clean.includes('pro')) {
-      return 'gemini-2.5-pro';
+    if (!clean || clean === 'gemini' || clean === 'shopaikey' || clean === 'openai') {
+      return 'gemini-3.6-flash';
     }
-    if (clean.includes('flash-lite') || clean.includes('lite')) {
-      return 'gemini-2.5-flash-lite';
+    // If it is already an active modern Google Generative AI model name
+    if (clean === 'gemini-3.6-flash' || clean === 'gemini-3-flash-preview' || clean === 'gemini-flash-latest') {
+      return clean;
     }
-    if (clean.includes('2.5-flash') || clean.includes('flash') || !clean || clean === 'gemini' || clean === 'shopaikey' || clean === 'openai') {
-      return 'gemini-2.5-flash';
+    // Deep / Pro modes
+    if (clean.includes('3.6') || clean.includes('pro') || clean.includes('deep')) {
+      return 'gemini-3.6-flash';
     }
-    return 'gemini-2.5-flash';
+    // Default to active modern flash model
+    return 'gemini-3.6-flash';
   }
 
   private getProxyBaseUrl(): string {
@@ -190,22 +192,6 @@ export class GeminiService implements TranslationService {
       cleanBaseUrl = `${cleanBaseUrl}/chat/completions`;
     }
     return cleanBaseUrl;
-  }
-
-  private sanitizeBase64(input: string | undefined | null): string {
-    if (!input || typeof input !== 'string') return '';
-    let clean = input.trim();
-    if (!clean) return '';
-    if (clean.includes(',')) {
-      clean = clean.split(',')[1] || '';
-    }
-    return clean.replace(/\s+/g, '');
-  }
-
-  private formatOpenAIImage(input: string | undefined | null): string | null {
-    const raw = this.sanitizeBase64(input);
-    if (!raw) return null;
-    return `data:image/jpeg;base64,${raw}`;
   }
 
   private async *callOpenAIStream(
@@ -224,27 +210,20 @@ export class GeminiService implements TranslationService {
       messages.push({ role: "system", content: systemInstruction });
     }
 
-    const imageUrl = this.formatOpenAIImage(imageBase64);
-    if (imageUrl) {
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: { 
-              url: imageUrl,
-              detail: "high"
-            }
-          },
-          { type: "text", text: prompt }
-        ]
-      });
-    } else {
-      messages.push({
-        role: "user",
-        content: prompt
+    const userContent: any[] = [];
+    if (imageBase64) {
+      const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
+      userContent.push({
+        type: "image_url",
+        image_url: { 
+          url: formattedImage,
+          detail: "high"
+        }
       });
     }
+    userContent.push({ type: "text", text: prompt });
+
+    messages.push({ role: "user", content: userContent });
 
     const body: any = {
       model: mappedModel,
@@ -338,27 +317,20 @@ export class GeminiService implements TranslationService {
       messages.push({ role: "system", content: systemInstruction });
     }
 
-    const imageUrl = this.formatOpenAIImage(imageBase64);
-    if (imageUrl) {
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: { 
-              url: imageUrl,
-              detail: "high"
-            }
-          },
-          { type: "text", text: prompt }
-        ]
-      });
-    } else {
-      messages.push({
-        role: "user",
-        content: prompt
+    const userContent: any[] = [];
+    if (imageBase64) {
+      const formattedImage = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64.split(',')[1] || imageBase64}`;
+      userContent.push({
+        type: "image_url",
+        image_url: { 
+          url: formattedImage,
+          detail: "high"
+        }
       });
     }
+    userContent.push({ type: "text", text: prompt });
+
+    messages.push({ role: "user", content: userContent });
 
     const body: any = {
       model: mappedModel,
@@ -405,8 +377,8 @@ export class GeminiService implements TranslationService {
         const ai = new GoogleGenerativeAI(cleanKey);
         const candidates = Array.from(new Set([
           this.mapModelForGoogle(this.modelName),
-          'gemini-2.5-flash',
-          'gemini-2.5-flash-lite',
+          'gemini-3.6-flash',
+          'gemini-3-flash-preview',
           'gemini-flash-latest'
         ]));
         
@@ -462,9 +434,8 @@ export class GeminiService implements TranslationService {
         const ai = new GoogleGenerativeAI(cleanKey);
         const candidates = Array.from(new Set([
           this.mapModelForGoogle(this.modelName),
-          'gemini-2.5-flash',
-          'gemini-2.5-flash-lite',
-          'gemini-flash-latest'
+          'gemini-3.6-flash',
+          'gemini-3-flash-preview'
         ]));
         for (const modelCandidate of candidates) {
           try {
@@ -534,40 +505,24 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
    - DỊCH TẤT CẢ TỪ VIẾT TẮT VÀ THUẬT NGỮ TRONG HÌNH: (A), (B), "Pathology:..." -> "**Bệnh học:...**", DM, DBT, Simple cyst, carcinoma, DCIS, arrows, obscured, circumscribed, equal density mass...
    - BẮT BUỘC CHÈN ĐOẠN DỊCH CHÚ THÍCH HÌNH VÀO ĐÚNG VỊ TRÍ DƯỚI MỖI BỨC ẢNH. TUYỆT ĐỐI KHÔNG BỎ QUA BẤT KỲ CHÚ THÍCH HÌNH NÀO.
 
-2. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
+2. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
    - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
-   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\\n\\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
-   - BẮT BUỘC phân chia các đoạn văn, tiêu đề chính bằng dấu xuống dòng kép (\\n\\n) rõ ràng.
+   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\n\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
+   - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\n\n) rõ ràng.
 
-3. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BIỂU:
+3. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
    - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 
 4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
 
-5. XỬ LÝ BỐ CỘT ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.
+5. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
 
-6. QUY TẮC ĐỊNH DẠNG SỐ LIỆU VÀ PHÉP TOÁN: TUYỆT ĐỐI KHÔNG DÙNG cú pháp LaTeX math ($ ... $, $$ ... $$, \\le, \\ge, \\%, \\lt, \\gt). Viết bằng ký tự Unicode thường: '>', '<', '≥', '≤', '%', 'từ > 0% đến ≤ 2%'.
-
-7. QUY TẮC BẢO TỒN NGUYÊN VẸN CẤU TRÚC PHÂN CẤP VÀ THỤT ĐẦU DÒNG (NESTED BULLETS & INDENTATION HIERARCHY):
-   - TÀI LIỆU Y KHOA RẤT NHIỀU CÂY CHẨN ĐOÁN / DANH SÁCH LỒNG NHAU (Thể bệnh -> Biến chứng -> Phương tiện hình ảnh: Siêu âm, CT, MRI -> Dấu hiệu hình ảnh cụ thể).
-   - TUYỆT ĐỐI KHÔNG ĐƯỢC LÀM PHẲNG (DO NOT FLATTEN): Không được biến các mục con, mục lồng nhau thành các dấu gạch đầu dòng cùng cấp ở ngoài cùng.
-   - BẮT BUỘC DÙNG ĐÚNG CÚ PHÁP MARKDOWN DANH SÁCH LỒNG NHAU (NESTED LISTS) VỚI ĐỘ THỤT DÒNG TƯƠNG ỨNG VỚI BẢN GỐC:
-     * Cấp 1 (mục cha ngoài cùng): Dùng '- ' (Ví dụ: '- Các thể và biến chứng (Types and complications)')
-     * Cấp 2 (thụt vào 1 cấp): Dùng 2 dấu cách trước dấu gạch nối: '  - ' (Ví dụ: '  - Viêm tụy thể kẽ phù nề (Interstitial edematous)')
-     * Cấp 3 (thụt vào 2 cấp): Dùng 4 dấu cách trước dấu gạch nối: '    - ' (Ví dụ: '    - Ổ tụ dịch quanh tụy cấp tính: dưới 4 tuần', '    - Siêu âm:', '    - CT:', '    - MRI:')
-     * Cấp 4 (thụt vào 3 cấp - chi tiết dấu hiệu): Dùng 6 dấu cách trước dấu gạch nối: '      - ' (Ví dụ: '      - Khối giảm âm với tăng âm thành sau (Hình e4.5)')
-   - KHÔNG chèn dòng trống kép (\\n\\n) giữa các cấp con trong cùng một nhánh danh sách vì sẽ làm vỡ quan hệ thụt lề Markdown.
-   - Luôn duy trì chặt chẽ mối liên hệ cha - con giữa các mục để người đọc/bác sĩ nhận biết chính xác dấu hiệu nào thuộc về phương tiện chẩn đoán nào.`;
-
-    const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ẢNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
+    const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
 YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
 - Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
 - NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
-- BẢO TỒN NGUYÊN VẸN CẤU TRÚC PHÂN CẤP THỤT ĐẦU DÒNG (NESTED BULLETS & HIERARCHY):
-  + Nếu tài liệu gốc có các bậc thụt lề (mục cha -> mục con -> mục cháu -> phương tiện Siêu âm/CT/MRI -> đặc điểm chi tiết), TUYỆT ĐỐI KHÔNG LÀM PHẲNG thành một danh sách cùng hàng!
-  + Bắt buộc thụt lề Markdown chuẩn: Cấp 1 ('- '), Cấp 2 ('  - '), Cấp 3 ('    - '), Cấp 4 ('      - '). Giữ nguyên tính liên kết của cây phân loại y khoa.
 - DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
   + "Figure 1 – ..." -> "**Hình 1 – ...**"
   + "Figure 2 – ..." -> "**Hình 2 – ...**"
@@ -576,7 +531,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
   + Dùng tiêu đề Markdown (###) cho các tiêu đề chính/phần.
   + Các mục đánh số (1., 2., 3...) và chữ cái (a., b., c., d...) PHẢI nằm trên dòng riêng, in đậm rõ ràng, phân tách bằng xuống dòng kép (\\n\\n).
   + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |).
-  + Phân tách rõ ràng giữa các đoạn văn chính bằng xuống dòng kép (\\n\\n).`;
+  + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
 
     const MAX_RETRIES = 6;
     let retryCount = 0;
@@ -625,6 +580,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
             throw new Error("Translation aborted");
           }
           const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
+          const isServerErr = error.message?.includes("500") || error.message?.includes("502") || error.message?.includes("503") || error.message?.includes("504") || error.message?.toLowerCase().includes("fetch");
           
           if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
             retryCount++;
@@ -640,54 +596,26 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
       // Handle Standard Google Gemini Key (AIzaSy...)
       try {
         const fetchStartTime = Date.now();
-        const primaryGoogleModel = this.mapModelForGoogle(requestModel);
-        const candidates = Array.from(new Set([
-          primaryGoogleModel,
-          'gemini-2.5-flash',
-          'gemini-2.5-flash-lite',
-          'gemini-flash-latest'
-        ]));
-
-        let response: any = null;
-        let chosenCandidate = primaryGoogleModel;
-        let lastGoogleErr: any = null;
-
-        for (const candidate of candidates) {
-          try {
-            const genModel = ai.getGenerativeModel({ 
-              model: candidate,
-              systemInstruction: systemInstruction,
-              generationConfig: {
-                temperature: 0,
-              }
-            });
-
-            response = await genModel.generateContentStream([
-              {
-                inlineData: {
-                  mimeType: "image/jpeg",
-                  data: this.sanitizeBase64(imageBuffer),
-                },
-              },
-              prompt,
-            ]);
-            chosenCandidate = candidate;
-            break;
-          } catch (modelErr: any) {
-            lastGoogleErr = modelErr;
-            if (modelErr?.message?.includes('404') || modelErr?.message?.toLowerCase().includes('not found') || modelErr?.message?.toLowerCase().includes('not supported')) {
-              console.warn(`[MediTrans] Google stream model candidate ${candidate} 404/not supported, trying fallback...`);
-              continue;
-            }
-            throw modelErr;
+        const googleModel = this.mapModelForGoogle(requestModel);
+        const genModel = ai.getGenerativeModel({ 
+          model: googleModel,
+          systemInstruction: systemInstruction,
+          generationConfig: {
+            temperature: 0,
           }
-        }
+        });
 
-        if (!response) {
-          throw lastGoogleErr || new Error("Không thể kết nối với mô hình Google Gemini khả dụng.");
-        }
+        const response = await genModel.generateContentStream([
+          {
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: imageBuffer.split(",")[1] || imageBuffer,
+            },
+          },
+          prompt,
+        ]);
 
-        console.log(`[MediTrans] API request sent. Model: ${chosenCandidate}. Wait time for stream start...`);
+        console.log(`[MediTrans] API request sent. Model: ${requestModel}. Wait time for stream start...`);
         let fullText = "";
         let chunkCount = 0;
         for await (const chunk of response.stream) {
@@ -719,7 +647,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
           throw new Error("Model returned no text.");
         }
         
-        console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s via ${chosenCandidate}`);
+        console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
         break;
 
       } catch (error: any) {
@@ -785,40 +713,24 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
    - DỊCH TẤT CẢ TỪ VIẾT TẮT VÀ THUẬT NGỮ TRONG HÌNH: (A), (B), "Pathology:..." -> "**Bệnh học:...**", DM, DBT, Simple cyst, carcinoma, DCIS, arrows, obscured, circumscribed, equal density mass...
    - BẮT BUỘC CHÈN ĐOẠN DỊCH CHÚ THÍCH HÌNH VÀO ĐÚNG VỊ TRÍ DƯỚI MỖI BỨC ẢNH. TUYỆT ĐỐI KHÔNG BỎ QUA BẤT KỲ CHÚ THÍCH HÌNH NÀO.
 
-2. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
+2. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
    - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
-   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\\n\\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
-   - BẮT BUỘC phân chia các đoạn văn, tiêu đề chính bằng dấu xuống dòng kép (\\n\\n) rõ ràng.
+   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\n\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
+   - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\n\n) rõ ràng.
 
-3. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BIỂU:
+3. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
    - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 
 4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
 
-5. XỬ LÝ BỐ CỘT ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.
+5. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
 
-6. QUY TẮC ĐỊNH DẠNG SỐ LIỆU VÀ PHÉP TOÁN: TUYỆT ĐỐI KHÔNG DÙNG cú pháp LaTeX math ($ ... $, $$ ... $$, \\le, \\ge, \\%, \\lt, \\gt). Viết bằng ký tự Unicode thường: '>', '<', '≥', '≤', '%', 'từ > 0% đến ≤ 2%'.
-
-7. QUY TẮC BẢO TỒN NGUYÊN VẸN CẤU TRÚC PHÂN CẤP VÀ THỤT ĐẦU DÒNG (NESTED BULLETS & INDENTATION HIERARCHY):
-   - TÀI LIỆU Y KHOA RẤT NHIỀU CÂY CHẨN ĐOÁN / DANH SÁCH LỒNG NHAU (Thể bệnh -> Biến chứng -> Phương tiện hình ảnh: Siêu âm, CT, MRI -> Dấu hiệu hình ảnh cụ thể).
-   - TUYỆT ĐỐI KHÔNG ĐƯỢC LÀM PHẲNG (DO NOT FLATTEN): Không được biến các mục con, mục lồng nhau thành các dấu gạch đầu dòng cùng cấp ở ngoài cùng.
-   - BẮT BUỘC DÙNG ĐÚNG CÚ PHÁP MARKDOWN DANH SÁCH LỒNG NHAU (NESTED LISTS) VỚI ĐỘ THỤT DÒNG TƯƠNG ỨNG VỚI BẢN GỐC:
-     * Cấp 1 (mục cha ngoài cùng): Dùng '- ' (Ví dụ: '- Các thể và biến chứng (Types and complications)')
-     * Cấp 2 (thụt vào 1 cấp): Dùng 2 dấu cách trước dấu gạch nối: '  - ' (Ví dụ: '  - Viêm tụy thể kẽ phù nề (Interstitial edematous)')
-     * Cấp 3 (thụt vào 2 cấp): Dùng 4 dấu cách trước dấu gạch nối: '    - ' (Ví dụ: '    - Ổ tụ dịch quanh tụy cấp tính: dưới 4 tuần', '    - Siêu âm:', '    - CT:', '    - MRI:')
-     * Cấp 4 (thụt vào 3 cấp - chi tiết dấu hiệu): Dùng 6 dấu cách trước dấu gạch nối: '      - ' (Ví dụ: '      - Khối giảm âm với tăng âm thành sau (Hình e4.5)')
-   - KHÔNG chèn dòng trống kép (\\n\\n) giữa các cấp con trong cùng một nhánh danh sách vì sẽ làm vỡ quan hệ thụt lề Markdown.
-   - Luôn duy trì chặt chẽ mối liên hệ cha - con giữa các mục để người đọc/bác sĩ nhận biết chính xác dấu hiệu nào thuộc về phương tiện chẩn đoán nào.`;
-
-      const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ẢNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
+      const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
 YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
 - Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
 - NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
-- BẢO TỒN NGUYÊN VẸN CẤU TRÚC PHÂN CẤP THỤT ĐẦU DÒNG (NESTED BULLETS & HIERARCHY):
-  + Nếu tài liệu gốc có các bậc thụt lề (mục cha -> mục con -> mục cháu -> phương tiện Siêu âm/CT/MRI -> đặc điểm chi tiết), TUYỆT ĐỐI KHÔNG LÀM PHẲNG thành một danh sách cùng hàng!
-  + Bắt buộc thụt lề Markdown chuẩn: Cấp 1 ('- '), Cấp 2 ('  - '), Cấp 3 ('    - '), Cấp 4 ('      - '). Giữ nguyên tính liên kết của cây phân loại y khoa.
 - DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
   + "Figure 1 – ..." -> "**Hình 1 – ...**"
   + "Figure 2 – ..." -> "**Hình 2 – ...**"
@@ -827,7 +739,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
   + Dùng tiêu đề Markdown (###) cho các tiêu đề chính/phần.
   + Các mục đánh số (1., 2., 3...) và chữ cái (a., b., c., d...) PHẢI nằm trên dòng riêng, in đậm rõ ràng, phân tách bằng xuống dòng kép (\\n\\n).
   + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |).
-  + Phân tách rõ ràng giữa các đoạn văn chính bằng xuống dòng kép (\\n\\n).`;
+  + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
 
       const isProxy = this.isCurrentKeyProxy(key);
 
@@ -851,50 +763,23 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
       }
 
       try {
-        const primaryGoogleModel = this.mapModelForGoogle(requestModel);
-        const candidates = Array.from(new Set([
-          primaryGoogleModel,
-          'gemini-2.5-flash',
-          'gemini-2.5-flash-lite',
-          'gemini-flash-latest'
-        ]));
+        const googleModel = this.mapModelForGoogle(requestModel);
+        const genModel = ai.getGenerativeModel({ 
+          model: googleModel,
+          systemInstruction: systemInstruction,
+          generationConfig: { temperature: 0 }
+        });
 
-        let result: any = null;
-        let chosenCandidate = primaryGoogleModel;
-        let lastGoogleErr: any = null;
-
-        for (const candidate of candidates) {
-          try {
-            const genModel = ai.getGenerativeModel({ 
-              model: candidate,
-              systemInstruction: systemInstruction,
-              generationConfig: { temperature: 0 }
-            });
-
-            result = await genModel.generateContent([
-              { inlineData: { mimeType: "image/jpeg", data: this.sanitizeBase64(imageBuffer) } },
-              prompt
-            ]);
-            chosenCandidate = candidate;
-            break;
-          } catch (modelErr: any) {
-            lastGoogleErr = modelErr;
-            if (modelErr?.message?.includes('404') || modelErr?.message?.toLowerCase().includes('not found') || modelErr?.message?.toLowerCase().includes('not supported')) {
-              console.warn(`[MediTrans] Google non-stream model candidate ${candidate} 404/not supported, trying fallback...`);
-              continue;
-            }
-            throw modelErr;
-          }
-        }
-
-        if (!result) {
-          throw lastGoogleErr || new Error("Không thể kết nối với mô hình Google Gemini.");
-        }
+        const result = await genModel.generateContent([
+          { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] || imageBuffer } },
+          prompt
+        ]);
 
         const response = await result.response;
         let text = response.text() || "";
         const resultText = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
-        console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s via ${chosenCandidate}`);
+        console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
+        return resultText;
       } catch (error: any) {
         if (signal?.aborted) throw new Error("Translation aborted");
         
@@ -990,7 +875,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
       });
       const result = await genModel.generateContent([
         prompt, 
-        { inlineData: { mimeType: "image/jpeg", data: this.sanitizeBase64(imageBuffer) } }
+        { inlineData: { mimeType: "image/jpeg", data: imageBuffer.split(",")[1] || imageBuffer } }
       ]);
       const response = await result.response;
       return response.text()?.trim() || "";
@@ -1027,88 +912,6 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         if (chunk.text()) yield chunk.text();
       }
     } catch (error: any) { throw error; }
-  }
-
-  async *askNotebookQuestion(documentContext: string, question: string, signal?: AbortSignal): AsyncGenerator<string> {
-    const systemInstruction = `BẠN LÀ TRỢ LÝ TRI THỨC Y KHOA CAO CẤP (NOTEBOOKLM AI ASSISTANT). 
-NHIỆM VỤ: Trả lời câu hỏi và tổng hợp kiến thức y khoa dựa trên QUY TRÌNH TRA CỨU ĐA TẦNG KẾT HỢP (HYBRID TWO-PASS RETRIEVAL PROTOCOL).
-
-QUY TRÌNH XỬ LÝ ĐA TẦNG (HYBRID TWO-PASS RETRIEVAL PROTOCOL):
-1. BƯỚC 1 - ĐỊNH VỊ TRI THỨC (PASS 1): Tra cứu '📘 NGỮ CẢNH CẤU TRÚC: BÁO CÁO TRI THỨC TỔNG HỢP & BÁO CÁO NHÓM' để định vị chủ đề, bức tranh toàn cảnh và trích dẫn số trang nguồn [Trang X].
-2. BƯỚC 2 - ĐỐI CHIẾU NGUYÊN VĂN (PASS 2): Kiểm tra chéo với '🎯 BẢN DỊCH CHI TIẾT CÁC TRANG' (nếu có trong ngữ cảnh) để đảm bảo chính xác 100% đến từng con số, liều lượng, thuật ngữ y khoa và ca lâm sàng nguyên bản.
-3. TRÍCH DẪN NGUỒN CHUẨN XÁC: Luôn đính kèm trích dẫn trang nguồn (VD: [Trang 3], [Trang 5–8]) trong câu trả lời.
-4. ĐỊNH DẠNG MARKDOWN Y KHOA CHUYÊN NGHIỆP: Trình bày mạch lạc bằng tiêu đề, danh sách in đậm, bảng biểu nếu cần.
-5. TRẢ LỜI TRỰC TIẾP: Tuyệt đối không lặp lại câu hỏi của người dùng. Vào thẳng nội dung tư vấn y khoa chuyên môn.
-6. QUY TẮC ĐỊNH DẠNG SỐ LIỆU VÀ PHÉP TOÁN: TUYỆT ĐỐI KHÔNG DÙNG cú pháp LaTeX math ($ ... $, $$ ... $$, \le, \ge, \%, \lt, \gt). Viết bằng ký tự Unicode thường: '>', '<', '≥', '≤', '%', 'từ > 0% đến ≤ 2%'.`;
-
-    const prompt = `TÀI LIỆU NGUỒN:\n${documentContext}\n\nCÂU HỎI / YÊU CẦU TỪ NGƯỜI DÙNG: ${question}`;
-
-    const isSingleKey = this.apiKeys.length <= 1;
-    const MAX_RETRIES = isSingleKey ? 1 : 5;
-    let retryCount = 0;
-
-    while (retryCount <= MAX_RETRIES) {
-      if (signal?.aborted) throw new Error("Translation aborted");
-
-      let ai, key: string;
-      try {
-        ({ ai, key } = await this.acquireKeyAndInstance());
-      } catch (e: any) {
-        throw new Error("Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.");
-      }
-
-      const isProxy = this.isCurrentKeyProxy(key);
-
-      try {
-        if (isProxy) {
-          let fullText = "";
-          for await (const chunkText of this.callOpenAIStream(key, this.modelName, systemInstruction, prompt, "", signal)) {
-            if (signal?.aborted) break;
-            fullText += chunkText;
-            yield chunkText;
-          }
-          GeminiService.lastSuccessfulKey = key;
-          if (fullText) return;
-        } else {
-          const googleModel = this.mapModelForGoogle(this.modelName);
-          const genModel = ai.getGenerativeModel({ 
-            model: googleModel,
-            systemInstruction: systemInstruction,
-            generationConfig: { temperature: 0.2 }
-          });
-          const response = await genModel.generateContentStream(prompt);
-          let fullText = "";
-          for await (const chunk of response.stream) {
-            if (signal?.aborted) throw new Error("Aborted");
-            const txt = chunk.text();
-            if (txt) {
-              fullText += txt;
-              yield txt;
-            }
-          }
-          GeminiService.lastSuccessfulKey = key;
-          if (fullText) return;
-        }
-      } catch (error: any) {
-        if (signal?.aborted || error.message === "Aborted" || error.message === "Translation aborted") {
-          throw new Error("Translation aborted");
-        }
-        const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
-        const isServerErr = error.message?.includes("500") || error.message?.includes("502") || error.message?.includes("503") || error.message?.includes("504") || error.message?.toLowerCase().includes("fetch") || error.message?.toLowerCase().includes("overloaded") || error.message?.includes("404");
-
-        if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota || isServerErr)) {
-          retryCount++;
-          const delay = isSingleKey 
-            ? Math.min(2000, 500 * retryCount)
-            : Math.min(6000, Math.pow(1.5, retryCount) * 800 + Math.random() * 400);
-          console.warn(`[NotebookAI] Retrying after error (attempt ${retryCount}/${MAX_RETRIES}) after ${delay.toFixed(0)}ms...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-        throw error;
-      }
-      break;
-    }
   }
 }
 

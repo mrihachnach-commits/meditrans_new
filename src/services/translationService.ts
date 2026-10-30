@@ -12,7 +12,6 @@ export interface TranslationService {
   translateMedicalPage(options: TranslationOptions): Promise<string>;
   hasApiKey(): Promise<boolean>;
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
-  askNotebookQuestion?(documentContext: string, question: string, signal?: AbortSignal): AsyncGenerator<string>;
   testSingleKeyTranslation(apiKey: string, sampleText: string): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }>;
 }
 
