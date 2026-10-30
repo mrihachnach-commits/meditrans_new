@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { cleanMarkdownLatexMath } from '../utils/textSanitizer';
+import { cleanMarkdownLatexMath, sanitizeMarkdownText } from '../utils/textSanitizer';
 import { 
   FileText, 
   Layers, 
@@ -346,7 +346,7 @@ export function SynthesisReportViewer({
 
                 <div className="markdown-body max-w-full overflow-hidden" style={fontStyle}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={customMarkdownComponents}>
-                    {cleanMarkdownLatexMath(parsed.masterReport)}
+                    {sanitizeMarkdownText(parsed.masterReport)}
                   </ReactMarkdown>
                 </div>
               </div>
@@ -428,7 +428,7 @@ export function SynthesisReportViewer({
                         {isExpanded && (
                           <div className="p-5 markdown-body" style={fontStyle}>
                             <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={customMarkdownComponents}>
-                              {cleanMarkdownLatexMath(group.content)}
+                              {sanitizeMarkdownText(group.content)}
                             </ReactMarkdown>
                           </div>
                         )}
@@ -509,7 +509,7 @@ export function SynthesisReportViewer({
                         {isExpanded && (
                           <div className="p-5 markdown-body" style={fontStyle}>
                             <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={customMarkdownComponents}>
-                              {cleanMarkdownLatexMath(chunk.content)}
+                              {sanitizeMarkdownText(chunk.content)}
                             </ReactMarkdown>
                           </div>
                         )}
@@ -526,7 +526,7 @@ export function SynthesisReportViewer({
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
             <div className="markdown-body max-w-full overflow-hidden" style={fontStyle}>
               <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={customMarkdownComponents}>
-                {cleanMarkdownLatexMath(summaryText)}
+                {sanitizeMarkdownText(summaryText)}
               </ReactMarkdown>
             </div>
           </div>

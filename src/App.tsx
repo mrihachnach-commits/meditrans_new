@@ -17,7 +17,7 @@ import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveT
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { SynthesisReportViewer } from './components/SynthesisReportViewer';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
-import { cleanMarkdownLatexMath } from './utils/textSanitizer';
+import { cleanMarkdownLatexMath, sanitizeMarkdownText } from './utils/textSanitizer';
 
 const PDFJS_VERSION = '3.11.174';
 const PDFJS_WORKER_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
@@ -262,6 +262,15 @@ const customMarkdownComponents = {
     <div className="overflow-x-auto max-w-full my-2 rounded-xl bg-slate-800 p-3 text-slate-100 font-mono text-xs">
       <pre {...props} />
     </div>
+  ),
+  ul: ({ node, ...props }: any) => (
+    <ul className="list-disc pl-6 my-2 space-y-1 text-slate-700" {...props} />
+  ),
+  ol: ({ node, ...props }: any) => (
+    <ol className="list-decimal pl-6 my-2 space-y-1 text-slate-700" {...props} />
+  ),
+  li: ({ node, ...props }: any) => (
+    <li className="leading-relaxed pl-1 marker:text-indigo-500" {...props} />
   )
 };
 
@@ -280,8 +289,8 @@ const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSi
     let text = content.replace(/&lt;br\s*\/?&gt;/gi, '<br/>');
     // Replace sequences of 4 or more dots (possibly with spaces) with a clean ' ... '
     text = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
-    // Clean raw LaTeX math expressions ($...$, \le, \ge, \%, \lt, \gt)
-    text = cleanMarkdownLatexMath(text);
+    // Clean raw LaTeX math expressions and normalize nested bullet indentation hierarchy
+    text = sanitizeMarkdownText(text);
     return text;
   }, [content]);
 
@@ -401,9 +410,10 @@ export default function App() {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
   const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
-    const saved = localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine;
+    const saved = localStorage.getItem('mediTrans_selectedEngine') as string;
     if (saved === 'gemini-3-flash-preview') return 'gemini-3.6-flash';
-    return saved || 'gemini-2.5-flash-lite';
+    if (!saved || saved.includes('1.5') || saved.includes('2.0')) return 'gemini-2.5-flash-lite';
+    return (saved as TranslationEngine) || 'gemini-2.5-flash-lite';
   });
 
   const [customBaseUrl, setCustomBaseUrl] = useState<string>(() => {
@@ -411,11 +421,15 @@ export default function App() {
   });
 
   const [customOpenAIModelNormal, setCustomOpenAIModelNormal] = useState<string>(() => {
-    return localStorage.getItem('mediTrans_customOpenAIModelNormal') || localStorage.getItem('mediTrans_customOpenAIModel') || '';
+    const saved = localStorage.getItem('mediTrans_customOpenAIModelNormal') || localStorage.getItem('mediTrans_customOpenAIModel') || '';
+    if (saved.includes('1.5') || saved.includes('2.0')) return 'gemini-2.5-flash-lite';
+    return saved;
   });
 
   const [customOpenAIModelDeep, setCustomOpenAIModelDeep] = useState<string>(() => {
-    return localStorage.getItem('mediTrans_customOpenAIModelDeep') || '';
+    const saved = localStorage.getItem('mediTrans_customOpenAIModelDeep') || '';
+    if (saved.includes('1.5') || saved.includes('2.0')) return 'gemini-2.5-pro';
+    return saved;
   });
 
   useEffect(() => {
@@ -5727,7 +5741,7 @@ export default function App() {
                                       style={{ fontSize: `${fontSize}px` }}
                                     >
                                       <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={customMarkdownComponents}>
-                                        {cleanMarkdownLatexMath(msg.content || (isAskingNotebook ? "Đang suy nghĩ và tra cứu tài liệu..." : ""))}
+                                        {sanitizeMarkdownText(msg.content || (isAskingNotebook ? "Đang suy nghĩ và tra cứu tài liệu..." : ""))}
                                       </ReactMarkdown>
                                     </div>
                                   </div>
@@ -7231,11 +7245,9 @@ export default function App() {
                     >
                       <option value="">⚙️ Mặc định (gemini-2.5-flash-lite)</option>
                       <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                      <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                       <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
                       <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
-                      <option value="gemini-3.1-flash-lite-preview">gemini-3.1-flash-lite-preview</option>
-                      <option value="gemini-1.5-flash">gemini-1.5-flash</option>
-                      <option value="gemini-2.0-flash">gemini-2.0-flash</option>
                       <option value="gpt-4o-mini">gpt-4o-mini</option>
                       <option value="claude-3-5-haiku">claude-3-5-haiku</option>
                     </select>
@@ -7273,10 +7285,10 @@ export default function App() {
                     >
                       <option value="">⚙️ Mặc định (Theo Dịch Thường)</option>
                       <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                      <option value="gemini-2.5-pro">gemini-2.5-pro</option>
                       <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                      <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
                       <option value="gemini-3.6-flash">gemini-3.6-flash</option>
-                      <option value="gemini-1.5-pro">gemini-1.5-pro</option>
+                      <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
                       <option value="gpt-4o">gpt-4o</option>
                       <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
                     </select>
