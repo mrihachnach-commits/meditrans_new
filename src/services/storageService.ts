@@ -176,3 +176,29 @@ export async function getTranslationsCache(docKey: string): Promise<any> {
     return {};
   }
 }
+
+export async function saveSummaryCache(docKey: string, summaryText: string): Promise<void> {
+  if (!docKey) return;
+  try {
+    const db = await openDB();
+    const tx = db.transaction('translations', 'readwrite');
+    tx.objectStore('translations').put({ summaryText }, `${docKey}_summaryText`);
+  } catch (e) {
+    console.warn('Failed to save summary cache:', e);
+  }
+}
+
+export async function getSummaryCache(docKey: string): Promise<string | null> {
+  if (!docKey) return null;
+  try {
+    const db = await openDB();
+    const tx = db.transaction('translations', 'readonly');
+    const req = tx.objectStore('translations').get(`${docKey}_summaryText`);
+    return new Promise((resolve) => {
+      req.onsuccess = () => resolve(req.result?.summaryText || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch (e) {
+    return null;
+  }
+}

@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import { TranslationService, TranslationOptions } from "./translationService";
+import { cleanLatex } from "../utils/textFormatting";
 
 export class GeminiService implements TranslationService {
   private apiKeys: string[] = [];
@@ -505,23 +506,48 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
    - DỊCH TẤT CẢ TỪ VIẾT TẮT VÀ THUẬT NGỮ TRONG HÌNH: (A), (B), "Pathology:..." -> "**Bệnh học:...**", DM, DBT, Simple cyst, carcinoma, DCIS, arrows, obscured, circumscribed, equal density mass...
    - BẮT BUỘC CHÈN ĐOẠN DỊCH CHÚ THÍCH HÌNH VÀO ĐÚNG VỊ TRÍ DƯỚI MỖI BỨC ẢNH. TUYỆT ĐỐI KHÔNG BỎ QUA BẤT KỲ CHÚ THÍCH HÌNH NÀO.
 
-2. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
-   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
-   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\n\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
-   - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\n\n) rõ ràng.
+2. QUY TẮC BẮT BUỘC VỀ TOÁN HỌC & SO SÁNH (TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ):
+   - TUYỆT ĐỐI KHÔNG dùng mã LaTeX thô như $> 50%$, $< 95%$, ($> 0%$ đến $\\le 2%$), \\pm, \\times, \\ge, \\le, \\approx, \\neq, \\mu\\text{m}.
+   - BẮT BUỘC viết trực tiếp bằng văn bản thông thường và ký tự Unicode chuẩn: dùng '>', '<', '≤', '≥', '±', '×', '≈', '%', 'µm', '°C'.
+   - Ví dụ đúng: '> 50% đến < 95%', '(> 0% đến ≤ 2%)', 'kích thước ≤ 2 cm', '± 5%', 'p < 0.05'.
+   - Tuyệt đối không để sót các ký tự '$' hay các lệnh gạch chéo ngược '\\' của LaTeX.
 
-3. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
+3. QUY TẮC CẤU TRÚC PHÂN CẤP & GẠCH ĐẦU DÒNG (NESTED LISTS & BULLET HIERARCHY):
+   - GIỮ NGUYÊN 100% CẤU TRÚC PHÂN CẤP TỪ TÀI LIỆU GỐC:
+     Khi tài liệu gốc có các mục lớn, mục con lồng nhau (như Thể và biến chứng -> Tên tổn thương -> Chi tiết / Phương tiện Siêu âm, CT, MRI...): BẮT BUỘC dùng cú pháp Markdown thụt lề chuẩn (dùng đúng 2 hoặc 4 dấu cách thụt lề cho mỗi cấp lồng nhau):
+       * Cấp 1 (Mục chính): - **Các thể và biến chứng**:
+       * Cấp 2 (Tổn thương cụ thể):   - **Ổ dịch quanh tụy cấp tính**: dưới 4 tuần.
+       * Cấp 3 (Đặc điểm):     - Ổ dịch không có vỏ bao.
+       * Cấp 3 (Siêu âm):     - **Siêu âm**: Tổn thương giảm âm...
+       * Cấp 3 (CT):     - **CT**: Ổ dịch giảm tỷ trọng đồng nhất...
+       * Cấp 3 (MRI):     - **MRI**: Tổn thương giảm tín hiệu trên T1...
+       * Cấp 2 (Tổn thương tiếp theo):   - **Nang giả tụy**: trên 4 tuần.
+       * Cấp 3 (Đặc điểm):     - Ổ dịch có vỏ bao.
+       * Cấp 3 (Siêu âm):     - **Siêu âm**: Khối trống âm đơn thùy...
+       * Cấp 3 (CT):     - **CT**: Tổn thương giảm tỷ trọng đồng nhất...
+   - TUYỆT ĐỐI KHÔNG ép tất cả các mục thành một danh sách phẳng cùng một cấp (Flat list toàn bộ chấm tròn).
+   - TUYỆT ĐỐI KHÔNG gộp các tiêu đề mục khác cấp vào cùng một dòng.
+   - Tên phương tiện (Siêu âm, CT, MRI, X-quang) BẮT BUỘC in đậm: **Siêu âm**:, **CT**:, **MRI**:.
+
+4. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
+   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
+   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\\n\\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
+   - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\\n\\n) rõ ràng.
+
+5. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
    - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 
-4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
+6. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
 
-5. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
+7. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
 
     const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
 YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
 - Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
+- TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ: Viết trực tiếp ký hiệu toán học / so sánh thông thường (>, <, ≤, ≥, ±, %, µm, °C), ví dụ: '> 50% đến < 95%', '(> 0% đến ≤ 2%)'. Tuyệt đối không dùng dấu $ hay mã LaTeX thô như $\\le$, $\\ge$, $\\pm$.
+- BẢO TỒN CẤU TRÚC PHÂN CẤP GẠCH ĐẦU DÒNG (NESTED LISTS): Dùng đúng 2 hoặc 4 dấu cách thụt lề cho các mục con, nhóm tổn thương và phương tiện chẩn đoán (Siêu âm, CT, MRI). Tuyệt đối không làm phẳng danh sách thành một cấp duy nhất.
 - NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
 - DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
   + "Figure 1 – ..." -> "**Hình 1 – ...**"
@@ -713,23 +739,48 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
    - DỊCH TẤT CẢ TỪ VIẾT TẮT VÀ THUẬT NGỮ TRONG HÌNH: (A), (B), "Pathology:..." -> "**Bệnh học:...**", DM, DBT, Simple cyst, carcinoma, DCIS, arrows, obscured, circumscribed, equal density mass...
    - BẮT BUỘC CHÈN ĐOẠN DỊCH CHÚ THÍCH HÌNH VÀO ĐÚNG VỊ TRÍ DƯỚI MỖI BỨC ẢNH. TUYỆT ĐỐI KHÔNG BỎ QUA BẤT KỲ CHÚ THÍCH HÌNH NÀO.
 
-2. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
-   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
-   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\n\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
-   - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\n\n) rõ ràng.
+2. QUY TẮC BẮT BUỘC VỀ TOÁN HỌC & SO SÁNH (TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ):
+   - TUYỆT ĐỐI KHÔNG dùng mã LaTeX thô như $> 50%$, $< 95%$, ($> 0%$ đến $\\le 2%$), \\pm, \\times, \\ge, \\le, \\approx, \\neq, \\mu\\text{m}.
+   - BẮT BUỘC viết trực tiếp bằng văn bản thông thường và ký tự Unicode chuẩn: dùng '>', '<', '≤', '≥', '±', '×', '≈', '%', 'µm', '°C'.
+   - Ví dụ đúng: '> 50% đến < 95%', '(> 0% đến ≤ 2%)', 'kích thước ≤ 2 cm', '± 5%', 'p < 0.05'.
+   - Tuyệt đối không để sót các ký tự '$' hay các lệnh gạch chéo ngược '\\' của LaTeX.
 
-3. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
+3. QUY TẮC CẤU TRÚC PHÂN CẤP & GẠCH ĐẦU DÒNG (NESTED LISTS & BULLET HIERARCHY):
+   - GIỮ NGUYÊN 100% CẤU TRÚC PHÂN CẤP TỪ TÀI LIỆU GỐC:
+     Khi tài liệu gốc có các mục lớn, mục con lồng nhau (như Thể và biến chứng -> Tên tổn thương -> Chi tiết / Phương tiện Siêu âm, CT, MRI...): BẮT BUỘC dùng cú pháp Markdown thụt lề chuẩn (dùng đúng 2 hoặc 4 dấu cách thụt lề cho mỗi cấp lồng nhau):
+       * Cấp 1 (Mục chính): - **Các thể và biến chứng**:
+       * Cấp 2 (Tổn thương cụ thể):   - **Ổ dịch quanh tụy cấp tính**: dưới 4 tuần.
+       * Cấp 3 (Đặc điểm):     - Ổ dịch không có vỏ bao.
+       * Cấp 3 (Siêu âm):     - **Siêu âm**: Tổn thương giảm âm...
+       * Cấp 3 (CT):     - **CT**: Ổ dịch giảm tỷ trọng đồng nhất...
+       * Cấp 3 (MRI):     - **MRI**: Tổn thương giảm tín hiệu trên T1...
+       * Cấp 2 (Tổn thương tiếp theo):   - **Nang giả tụy**: trên 4 tuần.
+       * Cấp 3 (Đặc điểm):     - Ổ dịch có vỏ bao.
+       * Cấp 3 (Siêu âm):     - **Siêu âm**: Khối trống âm đơn thùy...
+       * Cấp 3 (CT):     - **CT**: Tổn thương giảm tỷ trọng đồng nhất...
+   - TUYỆT ĐỐI KHÔNG ép tất cả các mục thành một danh sách phẳng cùng một cấp (Flat list toàn bộ chấm tròn).
+   - TUYỆT ĐỐI KHÔNG gộp các tiêu đề mục khác cấp vào cùng một dòng.
+   - Tên phương tiện (Siêu âm, CT, MRI, X-quang) BẮT BUỘC in đậm: **Siêu âm**:, **CT**:, **MRI**:.
+
+4. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
+   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
+   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\\n\\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
+   - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\\n\\n) rõ ràng.
+
+5. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
    - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 
-4. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
+6. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
 
-5. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
+7. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
 
       const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
 YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
 - Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
+- TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ: Viết trực tiếp ký hiệu toán học / so sánh thông thường (>, <, ≤, ≥, ±, %, µm, °C), ví dụ: '> 50% đến < 95%', '(> 0% đến ≤ 2%)'. Tuyệt đối không dùng dấu $ hay mã LaTeX thô như $\\le$, $\\ge$, $\\pm$.
+- BẢO TỒN CẤU TRÚC PHÂN CẤP GẠCH ĐẦU DÒNG (NESTED LISTS): Dùng đúng 2 hoặc 4 dấu cách thụt lề cho các mục con, nhóm tổn thương và phương tiện chẩn đoán (Siêu âm, CT, MRI). Tuyệt đối không làm phẳng danh sách thành một cấp duy nhất.
 - NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
 - DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
   + "Figure 1 – ..." -> "**Hình 1 – ...**"

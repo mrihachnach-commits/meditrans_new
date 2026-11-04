@@ -93,6 +93,7 @@ import { saveAs } from 'file-saver';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { TranslationEngine, TranslationService } from './services/translationService';
+import { prepareMedicalContent, cleanLatex } from './utils/textFormatting';
 import { 
   auth, 
   firebaseConfig,
@@ -254,11 +255,7 @@ const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSi
 }) => {
   const processedContent = useMemo(() => {
     if (!content) return '';
-    // Normalize escaped HTML br tags (&lt;br&gt; or &lt;br/&gt;) to real <br/>
-    let text = content.replace(/&lt;br\s*\/?&gt;/gi, '<br/>');
-    // Replace sequences of 4 or more dots (possibly with spaces) with a clean ' ... '
-    text = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
-    return text;
+    return prepareMedicalContent(content);
   }, [content]);
 
   const fontStyle = useMemo(() => {
@@ -2047,11 +2044,16 @@ export default function App() {
           ]
         }));
 
-        const lines = content.split('\n');
+        const preparedContent = prepareMedicalContent(content);
+        const lines = preparedContent.split('\n');
         const pageParagraphs = lines.map(line => {
-          let text = line.trim();
-          if (!text) return new Paragraph({ spacing: { after: 120 }, children: [new TextRun("")] });
+          if (!line.trim()) return new Paragraph({ spacing: { after: 120 }, children: [new TextRun("")] });
 
+          // Calculate indentation level
+          const leadingSpaces = line.match(/^[ \t]*/)?.[0]?.replace(/\t/g, '  ').length || 0;
+          const indentLevel = Math.min(3, Math.floor(leadingSpaces / 2));
+
+          let text = line.trim();
           let isHeading = false;
           let headingLevel: any = undefined;
 
@@ -2075,16 +2077,19 @@ export default function App() {
             isBullet = true;
           }
 
+          const isBold = text.includes('**') || isHeading;
+          const cleanText = text.replace(/\*\*/g, '');
+
           return new Paragraph({
             heading: isHeading ? headingLevel : undefined,
-            bullet: isBullet ? { level: 0 } : undefined,
+            bullet: isBullet ? { level: indentLevel } : undefined,
             spacing: { after: 120 },
             children: [
               new TextRun({
-                text: text,
+                text: cleanText,
                 size: isHeading ? 28 : 24,
                 font: "Times New Roman",
-                bold: isHeading
+                bold: isBold
               })
             ]
           });
@@ -4895,7 +4900,7 @@ export default function App() {
                             </div>
                           )}
                           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
-                            {summaryText}
+                            {prepareMedicalContent(summaryText)}
                           </ReactMarkdown>
                           {isSummarizing && summaryText && (
                             <div className="mt-4 flex items-center gap-2 text-indigo-600 font-bold text-xs animate-pulse">

@@ -26,13 +26,56 @@
   @apply mb-4 last:mb-0;
 }
 
-.markdown-body ul, .markdown-body ol {
-  @apply mb-4 last:mb-0;
+.markdown-body ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.markdown-body ul ul {
+  list-style-type: circle;
+  padding-left: 1.5rem;
+  margin-top: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.markdown-body ul ul ul {
+  list-style-type: square;
+  padding-left: 1.5rem;
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.markdown-body ul ul ul ul {
+  list-style-type: '- ';
+  padding-left: 1.5rem;
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.markdown-body ol ol {
+  list-style-type: lower-alpha;
+  padding-left: 1.5rem;
+}
+
+.markdown-body ol ol ol {
+  list-style-type: lower-roman;
+  padding-left: 1.5rem;
 }
 
 .markdown-body li {
-  @apply mb-1;
+  margin-bottom: 0.35rem;
+  line-height: 1.6;
 }
+
 
 .markdown-body h1, .markdown-body h2, .markdown-body h3 {
   @apply mt-8 mb-4 first:mt-0;

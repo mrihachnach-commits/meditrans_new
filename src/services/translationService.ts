@@ -12,10 +12,18 @@ export interface TranslationService {
   translateMedicalPage(options: TranslationOptions): Promise<string>;
   hasApiKey(): Promise<boolean>;
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
+  askNotebookQuestion?(documentContext: string, question: string, signal?: AbortSignal): AsyncGenerator<string>;
   testSingleKeyTranslation(apiKey: string, sampleText: string): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }>;
 }
 
-export type TranslationEngine = 'gemini-3.6-flash' | 'gemini-3-flash-preview' | 'gemini-2.5-flash-lite';
+export type TranslationEngine = 
+  | 'gemini-3.5-flash'
+  | 'gemini-3.1-flash-lite'
+  | 'gemini-3.8-flash'
+  | 'gemini-3.6-flash' 
+  | 'gemini-3-flash-preview' 
+  | 'gemini-2.5-flash-lite'
+  | string;
 
 export interface EngineConfig {
   apiKey?: string;
