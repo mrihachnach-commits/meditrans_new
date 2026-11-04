@@ -534,13 +534,22 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
    - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\\n\\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
    - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\\n\\n) rõ ràng.
 
-5. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
-   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
+5. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BIỂU (CRITICAL - TABLES):
+   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH.
+   - BẮT BUỘC dùng cú pháp Markdown chuẩn cho bảng:
+     * Dòng đầu là tiêu đề hoặc nội dung hàng 1: | Cột 1 | Cột 2 | Cột 3 | ... |
+     * Dòng thứ hai là phân cách: |---|---|---|...| (BẮT BUỘC có gạch đứng '|' ở cả đầu và cuối dòng, có đủ số cột tương ứng).
+     * Các dòng tiếp theo là dữ liệu: | Ô 1 | Ô 2 | Ô 3 | ... |
+     * TUYỆT ĐỐI KHÔNG viết thiếu gạch đứng '|' ở đầu hoặc cuối dòng. TUYỆT ĐỐI KHÔNG viết dạng '--|---|---' thiếu gạch đứng '|'.
+     * BẮT BUỘC mỗi hàng của bảng phải nằm trên MỘT DÒNG RIÊNG BIỆT (xuống dòng \\n sau mỗi hàng). TUYỆT ĐỐI KHÔNG dính liền các hàng bảng vào cùng một dòng.
+     * BẮT BUỘC có một dòng trống (\\n\\n) trước và sau mỗi bảng để Markdown hiển thị bảng chuẩn đẹp.
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 
 6. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
 
-7. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
+7. XỬ LÝ BỐ CỤC ĐA CỘT & KHỐI TỪ VIẾT TẮT (TWO-COLUMN & ABBREVIATIONS):
+   - KHỐI TỪ VIẾT TẮT (ABBREVIATIONS): Khi trang có khung hoặc danh sách các từ viết tắt độc lập (như RV, SA, SCCT, SMT, VSD...): BẮT BUỘC trình bày riêng biệt thành danh sách viết tắt (VD: - **RV**: Tâm thất phải (Right ventricle)...) hoặc Bảng từ viết tắt riêng. TUYỆT ĐỐI KHÔNG đọc ngang hàng ghép các từ viết tắt của cột này với câu văn của cột bên cạnh thành một bảng hỗn tạp!
+   - THỨ TỰ ĐỌC 2 CỘT: Đọc theo luồng logic tự nhiên của bài viết y khoa: Đọc trọn vẹn khối văn bản tiếp nối từ trang trước hoặc cột trái trước khi chuyển sang các phần mục mới (như 10.1 Giới thiệu, 10.2 Giải phẫu động mạch vành). TUYỆT ĐỐI KHÔNG đọc ngang hàng cắt ngang giữa 2 cột khác nhau.`;
 
     const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
@@ -548,6 +557,8 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
 - Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
 - TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ: Viết trực tiếp ký hiệu toán học / so sánh thông thường (>, <, ≤, ≥, ±, %, µm, °C), ví dụ: '> 50% đến < 95%', '(> 0% đến ≤ 2%)'. Tuyệt đối không dùng dấu $ hay mã LaTeX thô như $\\le$, $\\ge$, $\\pm$.
 - BẢO TỒN CẤU TRÚC PHÂN CẤP GẠCH ĐẦU DÒNG (NESTED LISTS): Dùng đúng 2 hoặc 4 dấu cách thụt lề cho các mục con, nhóm tổn thương và phương tiện chẩn đoán (Siêu âm, CT, MRI). Tuyệt đối không làm phẳng danh sách thành một cấp duy nhất.
+- BẢNG BIỂU MARKDOWN CHUẨN: Bắt buộc mọi hàng bảng phải có gạch đứng '|' ở đầu và cuối dòng (| Cột 1 | Cột 2 |), dòng phân cách phải là '|---|---|', mỗi hàng nằm trên một dòng riêng biệt, có dòng trống trước và sau bảng.
+- KHỐI TỪ VIẾT TẮT: Trình bày riêng danh sách từ viết tắt (RV, SA, SCCT...), tuyệt đối không ghép ngang từ viết tắt với câu văn cột bên cạnh.
 - NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
 - DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
   + "Figure 1 – ..." -> "**Hình 1 – ...**"
@@ -767,13 +778,22 @@ QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH N�
    - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\\n\\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
    - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\\n\\n) rõ ràng.
 
-5. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BỂU:
-   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH (| Cột 1 | Cột 2 | Cột 3 | ... |).
+5. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BIỂU (CRITICAL - TABLES):
+   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH.
+   - BẮT BUỘC dùng cú pháp Markdown chuẩn cho bảng:
+     * Dòng đầu là tiêu đề hoặc nội dung hàng 1: | Cột 1 | Cột 2 | Cột 3 | ... |
+     * Dòng thứ hai là phân cách: |---|---|---|...| (BẮT BUỘC có gạch đứng '|' ở cả đầu và cuối dòng, có đủ số cột tương ứng).
+     * Các dòng tiếp theo là dữ liệu: | Ô 1 | Ô 2 | Ô 3 | ... |
+     * TUYỆT ĐỐI KHÔNG viết thiếu gạch đứng '|' ở đầu hoặc cuối dòng. TUYỆT ĐỐI KHÔNG viết dạng '--|---|---' thiếu gạch đứng '|'.
+     * BẮT BUỘC mỗi hàng của bảng phải nằm trên MỘT DÒNG RIÊNG BIỆT (xuống dòng \\n sau mỗi hàng). TUYỆT ĐỐI KHÔNG dính liền các hàng bảng vào cùng một dòng.
+     * BẮT BUỘC có một dòng trống (\\n\\n) trước và sau mỗi bảng để Markdown hiển thị bảng chuẩn đẹp.
    - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
 
 6. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
 
-7. XỬ LÝ BỐ CỤC ĐA CỘT (TWO-COLUMN / MULTI-COLUMN LAYOUT): Khi trang tài liệu có 2 cột văn bản (cột trái và cột phải), hãy nhận diện chính xác luồng đọc liền mạch từ cột trái sang cột phải, kết nối các câu văn và đoạn văn hoàn chỉnh theo đúng ngữ nghĩa y khoa, KHÔNG ngắt đoạn tùy tiện giữa chừng hay đẩy đoạn dịch xuống dưới sai vị trí.`;
+7. XỬ LÝ BỐ CỤC ĐA CỘT & KHỐI TỪ VIẾT TẮT (TWO-COLUMN & ABBREVIATIONS):
+   - KHỐI TỪ VIẾT TẮT (ABBREVIATIONS): Khi trang có khung hoặc danh sách các từ viết tắt độc lập (như RV, SA, SCCT, SMT, VSD...): BẮT BUỘC trình bày riêng biệt thành danh sách viết tắt (VD: - **RV**: Tâm thất phải (Right ventricle)...) hoặc Bảng từ viết tắt riêng. TUYỆT ĐỐI KHÔNG đọc ngang hàng ghép các từ viết tắt của cột này với câu văn của cột bên cạnh thành một bảng hỗn tạp!
+   - THỨ TỰ ĐỌC 2 CỘT: Đọc theo luồng logic tự nhiên của bài viết y khoa: Đọc trọn vẹn khối văn bản tiếp nối từ trang trước hoặc cột trái trước khi chuyển sang các phần mục mới (như 10.1 Giới thiệu, 10.2 Giải phẫu động mạch vành). TUYỆT ĐỐI KHÔNG đọc ngang hàng cắt ngang giữa 2 cột khác nhau.`;
 
       const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
 
@@ -781,6 +801,8 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
 - Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
 - TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ: Viết trực tiếp ký hiệu toán học / so sánh thông thường (>, <, ≤, ≥, ±, %, µm, °C), ví dụ: '> 50% đến < 95%', '(> 0% đến ≤ 2%)'. Tuyệt đối không dùng dấu $ hay mã LaTeX thô như $\\le$, $\\ge$, $\\pm$.
 - BẢO TỒN CẤU TRÚC PHÂN CẤP GẠCH ĐẦU DÒNG (NESTED LISTS): Dùng đúng 2 hoặc 4 dấu cách thụt lề cho các mục con, nhóm tổn thương và phương tiện chẩn đoán (Siêu âm, CT, MRI). Tuyệt đối không làm phẳng danh sách thành một cấp duy nhất.
+- BẢNG BIỂU MARKDOWN CHUẨN: Bắt buộc mọi hàng bảng phải có gạch đứng '|' ở đầu và cuối dòng (| Cột 1 | Cột 2 |), dòng phân cách phải là '|---|---|', mỗi hàng nằm trên một dòng riêng biệt, có dòng trống trước và sau bảng.
+- KHỐI TỪ VIẾT TẮT: Trình bày riêng danh sách từ viết tắt (RV, SA, SCCT...), tuyệt đối không ghép ngang từ viết tắt với câu văn cột bên cạnh.
 - NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
 - DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
   + "Figure 1 – ..." -> "**Hình 1 – ...**"

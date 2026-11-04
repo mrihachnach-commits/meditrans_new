@@ -1,5 +1,6 @@
 /**
- * Utility functions for medical text formatting, LaTeX cleanup, and Markdown list hierarchy normalization.
+ * Utility functions for medical text formatting, LaTeX cleanup, Markdown list hierarchy normalization,
+ * and robust table parsing/repair.
  */
 
 /**
@@ -103,9 +104,98 @@ export function cleanLatex(input: string): string {
 }
 
 /**
+ * Repairs malformed Markdown tables.
+ * Fixes tables where:
+ * 1. The separator line `--|---|---` was merged with a bullet or with data cells on the same line.
+ * 2. Table rows were concatenated without newlines (`... (pCx) 3 | dRCA ... 4 | R-PDA`).
+ * 3. Leading and trailing pipes `|` were missing.
+ * 4. Ensures blank lines before and after tables so Markdown parser recognizes them.
+ */
+export function repairMangledMarkdownTables(text: string): string {
+  if (!text) return '';
+
+  let res = text;
+
+  // 1. Separate table separator when merged with bullets or text:
+  // e.g. "• --|---|---|--- 2 | Động mạch..." => "\n|---|---|---|---|\n2 | Động mạch..."
+  res = res.replace(/^[ \t]*(?:[•◦▪▫–—\-*+]\s+)?((?:-+:?\|)+-+:?)[ \t]*(.*)$/gm, (_match, sep, rest) => {
+    let cleanSep = sep.trim();
+    if (!cleanSep.startsWith('|')) cleanSep = `|${cleanSep}`;
+    if (!cleanSep.endsWith('|')) cleanSep = `${cleanSep}|`;
+
+    if (!rest || !rest.trim()) {
+      return `\n${cleanSep}\n`;
+    }
+    return `\n${cleanSep}\n${rest.trim()}`;
+  });
+
+  // 2. Separate concatenated table rows:
+  // Detect row indicators like " 2 | ", " 3 | ", " 4 | ", " 10 | ", " 11 | "
+  res = res.replace(/([^\n|]+)\s+(\d+\s*\|)/g, '$1\n$2');
+  // Detect acronyms starting next row cell, e.g. " SA | ", " SCCT | ", " SMT | ", " VSD | ", " RV | ", " LAD | "
+  res = res.replace(/([^\n|]+)\s+((?:SA|SCCT|SMT|VSD|RV|LV|RA|LA|LAD|LCx|RCA)\s*\|)/g, '$1\n$2');
+
+  // 3. Ensure table rows have leading and trailing pipes, and proper spacing
+  const rawLines = res.split('\n');
+  const fixedLines: string[] = [];
+  let inTable = false;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+    const trimmed = line.trim();
+
+    // Check if line is a table separator:
+    const isSep = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/.test(trimmed);
+    const pipeCount = (trimmed.match(/\|/g) || []).length;
+    const isRow = pipeCount >= 1 && !trimmed.startsWith('#') && !isSep;
+
+    if (isSep) {
+      if (!inTable) {
+        fixedLines.push('');
+        inTable = true;
+      }
+      let cleanSep = trimmed.startsWith('|') ? trimmed : `| ${trimmed}`;
+      if (!cleanSep.endsWith('|')) cleanSep = `${cleanSep} |`;
+      fixedLines.push(cleanSep);
+      continue;
+    }
+
+    if (isRow) {
+      const prevLine = i > 0 ? rawLines[i - 1].trim() : '';
+      const nextLine = i < rawLines.length - 1 ? rawLines[i + 1].trim() : '';
+      const isNextSep = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/.test(nextLine);
+      const isPrevSep = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/.test(prevLine);
+      const isAdjacentToTable = inTable || isSep || isNextSep || isPrevSep || prevLine.includes('|') || nextLine.includes('|');
+
+      if (isAdjacentToTable) {
+        if (!inTable && isNextSep) {
+          fixedLines.push('');
+          inTable = true;
+        }
+        let cleanRow = trimmed.replace(/^[•◦▪▫–—\-*+]\s+/, '');
+        if (!cleanRow.startsWith('|')) cleanRow = `| ${cleanRow}`;
+        if (!cleanRow.endsWith('|')) cleanRow = `${cleanRow} |`;
+        fixedLines.push(cleanRow);
+        continue;
+      }
+    }
+
+    if (inTable && !isRow && !isSep) {
+      fixedLines.push('');
+      inTable = false;
+    }
+
+    fixedLines.push(line);
+  }
+
+  return fixedLines.join('\n');
+}
+
+/**
  * Normalizes lists and hierarchical indentation from raw text / OCR / AI output.
  * Ensures that nested items (bullet levels, dashes, sub-items, imaging modalities)
  * are accurately converted into indented Markdown sub-lists matching the original document structure.
+ * CRITICAL: Completely skips table separators and table rows so they are NEVER mangled.
  */
 export function normalizeMarkdownLists(input: string): string {
   if (!input) return '';
@@ -136,6 +226,30 @@ export function normalizeMarkdownLists(input: string): string {
 
     if (!content.trim()) {
       resultLines.push('');
+      continue;
+    }
+
+    // 1. CRITICAL: Check if line is a table separator line:
+    // e.g. "|---|---|", "---|---|---", "--|---|---|---", "|:---|:---|", etc.
+    const isTableSeparator = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/.test(content);
+    if (isTableSeparator) {
+      // Must NOT be treated as a bullet item!
+      let cleanSep = content.trim();
+      if (!cleanSep.startsWith('|')) cleanSep = `| ${cleanSep}`;
+      if (!cleanSep.endsWith('|')) cleanSep = `${cleanSep} |`;
+      resultLines.push(cleanSep);
+      continue;
+    }
+
+    // 2. CRITICAL: Check if line is a table row (starts/ends with pipe or has multiple pipes):
+    const pipeCount = (content.match(/\|/g) || []).length;
+    const isTableRow = pipeCount >= 2 || (pipeCount === 1 && /^\s*\||\|\s*$/.test(content));
+    if (isTableRow && !content.startsWith('#')) {
+      // Must NOT be treated as a bullet item!
+      let cleanRow = content.trim().replace(/^[•◦▪▫–—\-*+]\s+/, '');
+      if (!cleanRow.startsWith('|')) cleanRow = `| ${cleanRow}`;
+      if (!cleanRow.endsWith('|')) cleanRow = `${cleanRow} |`;
+      resultLines.push(cleanRow);
       continue;
     }
 
@@ -222,16 +336,19 @@ export function prepareMedicalContent(content: string): string {
   // Step 1: Clean raw LaTeX math expressions ($> 50%$, $\le 2%$, $\pm 5\%$, etc.)
   let text = cleanLatex(content);
 
-  // Step 2: Normalize escaped HTML br tags (&lt;br&gt; or &lt;br/&gt;) to real <br/>
+  // Step 2: Repair mangled Markdown tables before list processing
+  text = repairMangledMarkdownTables(text);
+
+  // Step 3: Normalize escaped HTML br tags (&lt;br&gt; or &lt;br/&gt;) to real <br/>
   text = text.replace(/&lt;br\s*\/?&gt;/gi, '<br/>');
 
-  // Step 3: Replace sequences of 4 or more dots with a clean ' ... '
+  // Step 4: Replace sequences of 4 or more dots with a clean ' ... '
   text = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
 
-  // Step 4: Normalize list indentation and bullet hierarchy
+  // Step 5: Normalize list indentation and bullet hierarchy
   text = normalizeMarkdownLists(text);
 
-  // Step 5: Protect comparison operators (< and >) so rehype-raw doesn't swallow them as invalid HTML tags
+  // Step 6: Protect comparison operators (< and >) so rehype-raw doesn't swallow them as invalid HTML tags
   text = text.replace(/<(?!\/?(?:br|p|b|i|strong|em|sub|sup|table|thead|tbody|tr|td|th|ul|ol|li|span|div|code|pre)\b)/gi, '&lt;');
 
   return text;
