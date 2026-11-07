@@ -10,14 +10,16 @@ import listUsersHandler from "./api/admin/list-users";
 import deleteUserHandler from "./api/admin/delete-user";
 import changePasswordHandler from "./api/admin/change-password";
 import driveDownloadHandler from "./api/drive/download";
-import layoutTranslateHandler from "./api/translate/layout";
+import aiChatHandler from "./api/ai/chat";
 import indexHandler from "./api/index";
 
 const PORT = 3000;
 
 async function start() {
   const app = express();
-  app.use(express.json());
+  // Ảnh trang (base64) có thể nặng vài MB — giới hạn mặc định 100KB của express.json() quá nhỏ.
+  // Vercel tự giới hạn ~4.5MB cho serverless function nên giá trị này chủ yếu dành cho AI Studio / chạy local.
+  app.use(express.json({ limit: "12mb" }));
 
   // Manually map routes for local development
   app.get("/api/ping", pingHandler);
@@ -27,7 +29,7 @@ async function start() {
   app.post("/api/admin/delete-user", deleteUserHandler);
   app.post("/api/admin/change-password", changePasswordHandler);
   app.get("/api/drive/download", driveDownloadHandler);
-  app.post("/api/translate/layout", layoutTranslateHandler);
+  app.post("/api/ai/chat", aiChatHandler);
   app.get("/api", indexHandler);
   app.get("/api/index", indexHandler);
 

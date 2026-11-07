@@ -14,6 +14,7 @@ export interface TranslationService {
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
   askNotebookQuestion?(documentContext: string, question: string, signal?: AbortSignal): AsyncGenerator<string>;
   testSingleKeyTranslation(apiKey: string, sampleText: string): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }>;
+  translateLayoutBlocks?(blocks: { id: string; text: string }[], signal?: AbortSignal): Promise<Record<string, string>>;
 }
 
 export type TranslationEngine = 

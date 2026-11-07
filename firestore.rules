@@ -11,8 +11,6 @@ service cloud.firestore {
     // ===============================================================
 
     function isSignedIn() {
-      // Relaxing email_verified requirement as many users in this environment 
-      // may not have verified emails immediately or are using providers that don't auto-verify.
       return request.auth != null;
     }
 
@@ -55,7 +53,6 @@ service cloud.firestore {
 
     function isValidUser(data) {
       let userEmail = (request.auth != null && 'email' in request.auth.token && request.auth.token.email is string) ? request.auth.token.email.lower() : '';
-      // Invariant: If not admin, you can only set your own UID/Email
       return (isAdmin() || (data.uid == request.auth.uid && (data.get('email', null) == null || data.email.lower() == userEmail))) &&
              (data.get('role', 'user') in ['user', 'admin']) &&
              (data.get('displayName', null) == null || (data.displayName is string && data.displayName.size() <= 100)) &&
@@ -111,6 +108,14 @@ service cloud.firestore {
              (data.updatedAt is timestamp || data.updatedAt is string);
     }
 
+    // Bản dịch giữ định dạng: lưu cặp {s: câu gốc, v: câu dịch} của từng khối chữ trên trang
+    function isValidLayoutPage(data) {
+      return data.keys().hasAll(['pairs', 'updatedAt']) &&
+             data.pairs is list && data.pairs.size() <= 3000 &&
+             (data.updatedAt is timestamp || data.updatedAt is string) &&
+             (data.get('version', 1) is number);
+    }
+
     function isValidSummary(data) {
       return data.keys().hasAll(['content', 'type', 'createdAt']) &&
              data.content is string && data.content.size() <= 1048576 &&
@@ -137,8 +142,21 @@ service cloud.firestore {
     match /users/{userId} {
       allow list: if isAdmin();
       allow get: if isOwner(userId) || isAdmin();
-      allow create: if (isOwner(userId) || isAdmin()) && isValidUser(incoming()) && isValidUserResource(incoming());
-      allow update: if (isOwner(userId) && isValidUser(incoming())) || isAdmin();
+      allow create: if isAdmin() || (
+        isOwner(userId) && 
+        isValidUser(incoming()) && 
+        isValidUserResource(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().get('role', 'user') == 'user' &&
+        incoming().get('level', 1) == 1 &&
+        (!('levelExpiresAt' in incoming()) || incoming().levelExpiresAt == null) &&
+        incoming().get('isBlocked', false) == false
+      );
+      allow update: if isAdmin() || (
+        isOwner(userId) && 
+        isValidUser(incoming()) && 
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL'])
+      );
       allow delete: if isAdmin();
       
       match /folders/{folderId} {
@@ -160,9 +178,15 @@ service cloud.firestore {
           allow write: if (isOwner(userId) || isAdmin()) && isValidTranslation(incoming());
         }
 
+        match /layoutPages/{pageNum} {
+          allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isAdmin();
+          allow create, update: if (isOwner(userId) && isValidLayoutPage(incoming())) || isAdmin();
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+
         match /summaries/{summaryId} {
           allow read: if isOwner(userId) || isSharedWithMe(get(/databases/$(database)/documents/users/$(userId)/documents/$(docId)).data) || isAdmin();
-          allow write: if (isOwner(userId) || isAdmin()) && isValidSummary(incoming());
+          allow write: if (isOwner(userId) && isValidSummary(incoming())) || isAdmin();
         }
       }
     }
@@ -176,8 +200,7 @@ service cloud.firestore {
     }
 
     match /systemShopAiKeys/{keyId} {
-      allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow read, write: if isAdmin();
     }
 
     match /blacklist/{email} {
@@ -194,11 +217,12 @@ service cloud.firestore {
 
     // System/Debug
     match /test_connection/{docId} {
-      allow read, write: if isSignedIn();
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
     }
     match /test/{docId} {
       allow read: if docId == 'connection' || isSignedIn();
-      allow write: if isSignedIn();
+      allow write: if isAdmin();
     }
   }
 }

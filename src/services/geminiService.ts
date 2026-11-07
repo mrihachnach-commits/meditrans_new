@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import { TranslationService, TranslationOptions } from "./translationService";
 import { cleanLatex } from "../utils/textFormatting";
+import { auth } from "../firebase";
 
 export class GeminiService implements TranslationService {
   private apiKeys: string[] = [];
@@ -36,6 +37,7 @@ export class GeminiService implements TranslationService {
   public static isProxyKey(key: string, engineOrModel?: string): boolean {
     if (!key) return false;
     const clean = key.trim();
+    if (clean === 'system_proxy') return true;
     const eng = (engineOrModel || '').toLowerCase();
     if (clean.startsWith('sk-') || clean.startsWith('sh-') || clean.startsWith('sai-')) return true;
     if (eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy')) return true;
@@ -234,19 +236,35 @@ export class GeminiService implements TranslationService {
       messages
     };
 
-    console.log(`[MediTrans] Calling ShopAIKey/Proxy Stream (${cleanBaseUrl}) using model: ${mappedModel}`);
+    let requestUrl = cleanBaseUrl;
+    let authHeaderValue = `Bearer ${key.trim()}`;
 
-    const response = await fetch(cleanBaseUrl, {
+    if (key.trim() === 'system_proxy') {
+      requestUrl = '/api/ai/chat';
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        throw new Error("Vui lòng đăng nhập để sử dụng Key hệ thống.");
+      }
+      const token = await currentUser.getIdToken();
+      authHeaderValue = `Bearer ${token}`;
+    }
+
+    console.log(`[MediTrans] Calling Stream (${requestUrl}) using model: ${mappedModel}`);
+
+    const response = await fetch(requestUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${key.trim()}`
+        "Authorization": authHeaderValue
       },
       body: JSON.stringify(body),
       signal
     });
 
     if (!response.ok) {
+      if (response.status === 403 && key.trim() === 'system_proxy') {
+        throw new Error("Tài khoản của bạn chưa đủ Level 2 hoặc đã hết hạn.");
+      }
       const errText = await response.text();
       throw new Error(`ShopAIKey/Proxy Error (${response.status}): ${errText}`);
     }
@@ -341,19 +359,35 @@ export class GeminiService implements TranslationService {
       messages
     };
 
-    console.log(`[MediTrans] Calling ShopAIKey/Proxy Non-Stream (${cleanBaseUrl}) using model: ${mappedModel}`);
+    let requestUrl = cleanBaseUrl;
+    let authHeaderValue = `Bearer ${key.trim()}`;
 
-    const response = await fetch(cleanBaseUrl, {
+    if (key.trim() === 'system_proxy') {
+      requestUrl = '/api/ai/chat';
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        throw new Error("Vui lòng đăng nhập để sử dụng Key hệ thống.");
+      }
+      const token = await currentUser.getIdToken();
+      authHeaderValue = `Bearer ${token}`;
+    }
+
+    console.log(`[MediTrans] Calling Non-Stream (${requestUrl}) using model: ${mappedModel}`);
+
+    const response = await fetch(requestUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${key.trim()}`
+        "Authorization": authHeaderValue
       },
       body: JSON.stringify(body),
       signal
     });
 
     if (!response.ok) {
+      if (response.status === 403 && key.trim() === 'system_proxy') {
+        throw new Error("Tài khoản của bạn chưa đủ Level 2 hoặc đã hết hạn.");
+      }
       const errText = await response.text();
       throw new Error(`ShopAIKey/Proxy Error (${response.status}): ${errText}`);
     }
@@ -365,6 +399,9 @@ export class GeminiService implements TranslationService {
   public async testSingleKeyTranslation(key: string, sampleText: string = "Hello world! Testing translation AI."): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }> {
     if (!key || !key.trim()) return { success: false, error: "API Key trống" };
     const cleanKey = key.trim();
+    if (cleanKey === 'system_proxy' || cleanKey.startsWith('system_')) {
+      return { success: true, resultText: "Key hệ thống sẵn sàng", latencyMs: 0 };
+    }
     const startTime = Date.now();
     const prompt = `Dịch câu sau sang tiếng Việt ngắn gọn: "${sampleText}"`;
     const systemInstruction = "Bạn là dịch giả y khoa. Dịch chính xác và ngắn gọn.";
@@ -411,6 +448,9 @@ export class GeminiService implements TranslationService {
   public async testSingleKey(key: string): Promise<boolean> {
     if (!key || !key.trim()) return false;
     const cleanKey = key.trim();
+    if (cleanKey === 'system_proxy' || cleanKey.startsWith('system_')) {
+      return true;
+    }
     if (this.isCurrentKeyProxy(cleanKey)) {
       try {
         const cleanBaseUrl = this.getProxyBaseUrl();
@@ -486,6 +526,25 @@ export class GeminiService implements TranslationService {
     }
   }
 
+  /**
+   * Prompt dịch trang (dùng chung cho stream & non-stream).
+   * Viết bằng tiếng Anh, ngắn gọn: tiếng Việt có dấu tốn 2–3 lần token so với tiếng Anh,
+   * prompt cũ (~7.700 ký tự, lặp 2 lần) tốn ~3.000+ token/trang — nhiều hơn cả ảnh trang.
+   * Giữ nguyên mọi quy tắc trình bày; đầu ra vẫn 100% tiếng Việt.
+   */
+  public static buildPagePrompt(pageNumber: number): { systemInstruction: string; prompt: string } {
+    const systemInstruction = `You are an expert English→Vietnamese medical translator. Translate the page image into Vietnamese Markdown.
+Rules:
+1. Output 100% Vietnamese. Translate every heading, paragraph, list item, table cell, figure/table caption and in-figure label (Figure n → **Hình n**, Table n → **Bảng n**, Pathology → **Bệnh học**). Never skip a caption. Keep drug/gene names, abbreviations (CT, MRI, DBT, HbA1c…), numbers and units.
+2. No preamble, notes or code fences. Omit running headers, footers and page numbers.
+3. Reading order: multi-column pages column by column (left first, top→bottom); never mix lines across columns. Text continued from the previous page comes first.
+4. Markdown: #/##/### for titles and section headings; blank line between blocks; section labels like "1." or "a." on their own line in bold; keep nested list hierarchy with 2-space indents (never flatten); bold imaging modality labels (**Siêu âm**:, **CT**:, **MRI**:).
+5. Tables: GFM with the original number of columns, leading and trailing pipes, |---| separator row, one row per line, blank line before and after.
+6. Symbols as plain Unicode (> < ≤ ≥ ± × ≈ µm °C %), never LaTeX or $.
+7. Abbreviation boxes: separate list "- **RV**: Thất phải (Right ventricle)"; never pair them with text from the neighbouring column.`;
+    return { systemInstruction, prompt: `Page ${pageNumber}. Translate the whole page.` };
+  }
+
   async *translateMedicalPageStream(options: TranslationOptions): AsyncGenerator<string> {
     const { imageBuffer, pageNumber, signal, model } = options;
     const requestModel = model || this.modelName;
@@ -497,78 +556,7 @@ export class GeminiService implements TranslationService {
       throw new Error("Translation aborted");
     }
 
-    const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT). 
-QUY TẮC SỐ 1: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. TUYỆT ĐỐI KHÔNG GIỮ NGUYÊN BẤT KỲ CÂU, ĐOẠN VĂN HAY TIÊU ĐỀ NÀO BẰNG TIẾNG ANH GỐC.
-
-QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH NÀO (CRITICAL - FIGURE CAPTIONS & IMAGE LABELS):
-1. QUÉT KỸ 100% BỀ MẶT TRANG, ĐẶC BIỆT LÀ CÁC DÒNG CHỮ CHÚ THÍCH DƯỚI HOẶC BÊN CẠNH CÁC HÌNH ẢNH (Figure 1, Figure 2, Figure 3, A, B, v.v.):
-   - DỊCH CHÚ THÍCH HÌNH: Dịch "Figure 1 – ..." -> "**Hình 1 – ...**", "Figure 2 – ..." -> "**Hình 2 – ...**"
-   - DỊCH TẤT CẢ TỪ VIẾT TẮT VÀ THUẬT NGỮ TRONG HÌNH: (A), (B), "Pathology:..." -> "**Bệnh học:...**", DM, DBT, Simple cyst, carcinoma, DCIS, arrows, obscured, circumscribed, equal density mass...
-   - BẮT BUỘC CHÈN ĐOẠN DỊCH CHÚ THÍCH HÌNH VÀO ĐÚNG VỊ TRÍ DƯỚI MỖI BỨC ẢNH. TUYỆT ĐỐI KHÔNG BỎ QUA BẤT KỲ CHÚ THÍCH HÌNH NÀO.
-
-2. QUY TẮC BẮT BUỘC VỀ TOÁN HỌC & SO SÁNH (TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ):
-   - TUYỆT ĐỐI KHÔNG dùng mã LaTeX thô như $> 50%$, $< 95%$, ($> 0%$ đến $\\le 2%$), \\pm, \\times, \\ge, \\le, \\approx, \\neq, \\mu\\text{m}.
-   - BẮT BUỘC viết trực tiếp bằng văn bản thông thường và ký tự Unicode chuẩn: dùng '>', '<', '≤', '≥', '±', '×', '≈', '%', 'µm', '°C'.
-   - Ví dụ đúng: '> 50% đến < 95%', '(> 0% đến ≤ 2%)', 'kích thước ≤ 2 cm', '± 5%', 'p < 0.05'.
-   - Tuyệt đối không để sót các ký tự '$' hay các lệnh gạch chéo ngược '\\' của LaTeX.
-
-3. QUY TẮC CẤU TRÚC PHÂN CẤP & GẠCH ĐẦU DÒNG (NESTED LISTS & BULLET HIERARCHY):
-   - GIỮ NGUYÊN 100% CẤU TRÚC PHÂN CẤP TỪ TÀI LIỆU GỐC:
-     Khi tài liệu gốc có các mục lớn, mục con lồng nhau (như Thể và biến chứng -> Tên tổn thương -> Chi tiết / Phương tiện Siêu âm, CT, MRI...): BẮT BUỘC dùng cú pháp Markdown thụt lề chuẩn (dùng đúng 2 hoặc 4 dấu cách thụt lề cho mỗi cấp lồng nhau):
-       * Cấp 1 (Mục chính): - **Các thể và biến chứng**:
-       * Cấp 2 (Tổn thương cụ thể):   - **Ổ dịch quanh tụy cấp tính**: dưới 4 tuần.
-       * Cấp 3 (Đặc điểm):     - Ổ dịch không có vỏ bao.
-       * Cấp 3 (Siêu âm):     - **Siêu âm**: Tổn thương giảm âm...
-       * Cấp 3 (CT):     - **CT**: Ổ dịch giảm tỷ trọng đồng nhất...
-       * Cấp 3 (MRI):     - **MRI**: Tổn thương giảm tín hiệu trên T1...
-       * Cấp 2 (Tổn thương tiếp theo):   - **Nang giả tụy**: trên 4 tuần.
-       * Cấp 3 (Đặc điểm):     - Ổ dịch có vỏ bao.
-       * Cấp 3 (Siêu âm):     - **Siêu âm**: Khối trống âm đơn thùy...
-       * Cấp 3 (CT):     - **CT**: Tổn thương giảm tỷ trọng đồng nhất...
-   - TUYỆT ĐỐI KHÔNG ép tất cả các mục thành một danh sách phẳng cùng một cấp (Flat list toàn bộ chấm tròn).
-   - TUYỆT ĐỐI KHÔNG gộp các tiêu đề mục khác cấp vào cùng một dòng.
-   - Tên phương tiện (Siêu âm, CT, MRI, X-quang) BẮT BUỘC in đậm: **Siêu âm**:, **CT**:, **MRI**:.
-
-4. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
-   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
-   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\\n\\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
-   - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\\n\\n) rõ ràng.
-
-5. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BIỂU (CRITICAL - TABLES):
-   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH.
-   - BẮT BUỘC dùng cú pháp Markdown chuẩn cho bảng:
-     * Dòng đầu là tiêu đề hoặc nội dung hàng 1: | Cột 1 | Cột 2 | Cột 3 | ... |
-     * Dòng thứ hai là phân cách: |---|---|---|...| (BẮT BUỘC có gạch đứng '|' ở cả đầu và cuối dòng, có đủ số cột tương ứng).
-     * Các dòng tiếp theo là dữ liệu: | Ô 1 | Ô 2 | Ô 3 | ... |
-     * TUYỆT ĐỐI KHÔNG viết thiếu gạch đứng '|' ở đầu hoặc cuối dòng. TUYỆT ĐỐI KHÔNG viết dạng '--|---|---' thiếu gạch đứng '|'.
-     * BẮT BUỘC mỗi hàng của bảng phải nằm trên MỘT DÒNG RIÊNG BIỆT (xuống dòng \\n sau mỗi hàng). TUYỆT ĐỐI KHÔNG dính liền các hàng bảng vào cùng một dòng.
-     * BẮT BUỘC có một dòng trống (\\n\\n) trước và sau mỗi bảng để Markdown hiển thị bảng chuẩn đẹp.
-   - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
-
-6. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
-
-7. XỬ LÝ BỐ CỤC ĐA CỘT & KHỐI TỪ VIẾT TẮT (TWO-COLUMN & ABBREVIATIONS):
-   - KHỐI TỪ VIẾT TẮT (ABBREVIATIONS): Khi trang có khung hoặc danh sách các từ viết tắt độc lập (như RV, SA, SCCT, SMT, VSD...): BẮT BUỘC trình bày riêng biệt thành danh sách viết tắt (VD: - **RV**: Tâm thất phải (Right ventricle)...) hoặc Bảng từ viết tắt riêng. TUYỆT ĐỐI KHÔNG đọc ngang hàng ghép các từ viết tắt của cột này với câu văn của cột bên cạnh thành một bảng hỗn tạp!
-   - THỨ TỰ ĐỌC 2 CỘT: Đọc theo luồng logic tự nhiên của bài viết y khoa: Đọc trọn vẹn khối văn bản tiếp nối từ trang trước hoặc cột trái trước khi chuyển sang các phần mục mới (như 10.1 Giới thiệu, 10.2 Giải phẫu động mạch vành). TUYỆT ĐỐI KHÔNG đọc ngang hàng cắt ngang giữa 2 cột khác nhau.`;
-
-    const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
-
-YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
-- Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
-- TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ: Viết trực tiếp ký hiệu toán học / so sánh thông thường (>, <, ≤, ≥, ±, %, µm, °C), ví dụ: '> 50% đến < 95%', '(> 0% đến ≤ 2%)'. Tuyệt đối không dùng dấu $ hay mã LaTeX thô như $\\le$, $\\ge$, $\\pm$.
-- BẢO TỒN CẤU TRÚC PHÂN CẤP GẠCH ĐẦU DÒNG (NESTED LISTS): Dùng đúng 2 hoặc 4 dấu cách thụt lề cho các mục con, nhóm tổn thương và phương tiện chẩn đoán (Siêu âm, CT, MRI). Tuyệt đối không làm phẳng danh sách thành một cấp duy nhất.
-- BẢNG BIỂU MARKDOWN CHUẨN: Bắt buộc mọi hàng bảng phải có gạch đứng '|' ở đầu và cuối dòng (| Cột 1 | Cột 2 |), dòng phân cách phải là '|---|---|', mỗi hàng nằm trên một dòng riêng biệt, có dòng trống trước và sau bảng.
-- KHỐI TỪ VIẾT TẮT: Trình bày riêng danh sách từ viết tắt (RV, SA, SCCT...), tuyệt đối không ghép ngang từ viết tắt với câu văn cột bên cạnh.
-- NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
-- DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
-  + "Figure 1 – ..." -> "**Hình 1 – ...**"
-  + "Figure 2 – ..." -> "**Hình 2 – ...**"
-  + Dịch đầy đủ nội dung mô tả hình (A, B, DM, DBT, Pathology, v.v.).
-- YÊU CẦU ĐỊNH DẠNG MARKDOWN CỰC KỲ NGUYÊN TẮC:
-  + Dùng tiêu đề Markdown (###) cho các tiêu đề chính/phần.
-  + Các mục đánh số (1., 2., 3...) và chữ cái (a., b., c., d...) PHẢI nằm trên dòng riêng, in đậm rõ ràng, phân tách bằng xuống dòng kép (\\n\\n).
-  + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |).
-  + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
+    const { systemInstruction, prompt } = GeminiService.buildPagePrompt(pageNumber);
 
     const MAX_RETRIES = 6;
     let retryCount = 0;
@@ -741,78 +729,7 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
         throw new Error("Không tìm thấy API Key khả dụng.");
       }
 
-      const systemInstruction = `BẠN LÀ CHUYÊN GIA DỊCH THUẬT Y KHOA CAO CẤP (ANH - VIỆT). 
-QUY TẮC SỐ 1: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. TUYỆT ĐỐI KHÔNG GIỮ NGUYÊN BẤT KỲ CÂU, ĐOẠN VĂN HAY TIÊU ĐỀ NÀO BẰNG TIẾNG ANH GỐC.
-
-QUY TẮC BẮT BUỘC KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH ÁNH NÀO (CRITICAL - FIGURE CAPTIONS & IMAGE LABELS):
-1. QUÉT KỸ 100% BỀ MẶT TRANG, ĐẶC BIỆT LÀ CÁC DÒNG CHỮ CHÚ THÍCH DƯỚI HOẶC BÊN CẠNH CÁC HÌNH ẢNH (Figure 1, Figure 2, Figure 3, A, B, v.v.):
-   - DỊCH CHÚ THÍCH HÌNH: Dịch "Figure 1 – ..." -> "**Hình 1 – ...**", "Figure 2 – ..." -> "**Hình 2 – ...**"
-   - DỊCH TẤT CẢ TỪ VIẾT TẮT VÀ THUẬT NGỮ TRONG HÌNH: (A), (B), "Pathology:..." -> "**Bệnh học:...**", DM, DBT, Simple cyst, carcinoma, DCIS, arrows, obscured, circumscribed, equal density mass...
-   - BẮT BUỘC CHÈN ĐOẠN DỊCH CHÚ THÍCH HÌNH VÀO ĐÚNG VỊ TRÍ DƯỚI MỖI BỨC ẢNH. TUYỆT ĐỐI KHÔNG BỎ QUA BẤT KỲ CHÚ THÍCH HÌNH NÀO.
-
-2. QUY TẮC BẮT BUỘC VỀ TOÁN HỌC & SO SÁNH (TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ):
-   - TUYỆT ĐỐI KHÔNG dùng mã LaTeX thô như $> 50%$, $< 95%$, ($> 0%$ đến $\\le 2%$), \\pm, \\times, \\ge, \\le, \\approx, \\neq, \\mu\\text{m}.
-   - BẮT BUỘC viết trực tiếp bằng văn bản thông thường và ký tự Unicode chuẩn: dùng '>', '<', '≤', '≥', '±', '×', '≈', '%', 'µm', '°C'.
-   - Ví dụ đúng: '> 50% đến < 95%', '(> 0% đến ≤ 2%)', 'kích thước ≤ 2 cm', '± 5%', 'p < 0.05'.
-   - Tuyệt đối không để sót các ký tự '$' hay các lệnh gạch chéo ngược '\\' của LaTeX.
-
-3. QUY TẮC CẤU TRÚC PHÂN CẤP & GẠCH ĐẦU DÒNG (NESTED LISTS & BULLET HIERARCHY):
-   - GIỮ NGUYÊN 100% CẤU TRÚC PHÂN CẤP TỪ TÀI LIỆU GỐC:
-     Khi tài liệu gốc có các mục lớn, mục con lồng nhau (như Thể và biến chứng -> Tên tổn thương -> Chi tiết / Phương tiện Siêu âm, CT, MRI...): BẮT BUỘC dùng cú pháp Markdown thụt lề chuẩn (dùng đúng 2 hoặc 4 dấu cách thụt lề cho mỗi cấp lồng nhau):
-       * Cấp 1 (Mục chính): - **Các thể và biến chứng**:
-       * Cấp 2 (Tổn thương cụ thể):   - **Ổ dịch quanh tụy cấp tính**: dưới 4 tuần.
-       * Cấp 3 (Đặc điểm):     - Ổ dịch không có vỏ bao.
-       * Cấp 3 (Siêu âm):     - **Siêu âm**: Tổn thương giảm âm...
-       * Cấp 3 (CT):     - **CT**: Ổ dịch giảm tỷ trọng đồng nhất...
-       * Cấp 3 (MRI):     - **MRI**: Tổn thương giảm tín hiệu trên T1...
-       * Cấp 2 (Tổn thương tiếp theo):   - **Nang giả tụy**: trên 4 tuần.
-       * Cấp 3 (Đặc điểm):     - Ổ dịch có vỏ bao.
-       * Cấp 3 (Siêu âm):     - **Siêu âm**: Khối trống âm đơn thùy...
-       * Cấp 3 (CT):     - **CT**: Tổn thương giảm tỷ trọng đồng nhất...
-   - TUYỆT ĐỐI KHÔNG ép tất cả các mục thành một danh sách phẳng cùng một cấp (Flat list toàn bộ chấm tròn).
-   - TUYỆT ĐỐI KHÔNG gộp các tiêu đề mục khác cấp vào cùng một dòng.
-   - Tên phương tiện (Siêu âm, CT, MRI, X-quang) BẮT BUỘC in đậm: **Siêu âm**:, **CT**:, **MRI**:.
-
-4. TRÌNH BÀY ĐẸP VÀ PHÂN CHIA RÕ RÀNG BẰNG MARKDOWN:
-   - Dùng tiêu đề Markdown (#, ##, ###, ####) cho tiêu đề trang, tên chương, tiêu đề mục lớn/nhỏ (Ví dụ: ### GIỚI THIỆU, ### PHẦN I: ..., ### A. KHỐI U...).
-   - ĐỊNH DẠNG PHÂN CẤP RÕ RÀNG: Các số thứ tự mục (1., 2., 3...) và các chữ cái phân cấp (a., b., c., d...) BẮT BUỘC phải nằm trên DÒNG RIÊNG BIỆT, in đậm (VD: **1. HÌNH DẠNG**, **d. Không đều**), cách nhau bằng xuống dòng kép (\\n\\n). TUYỆT ĐỐI KHÔNG gộp chung dính liền dòng.
-   - BẮT BUỘC phân chia các đoạn văn, tiêu đề và các item bằng dấu xuống dòng kép (\\n\\n) rõ ràng.
-
-5. DỊCH ĐẦY ĐỦ 100% CÁC CỘT VÀ Ô TRONG BẢNG BIỂU (CRITICAL - TABLES):
-   - GIỮ NGUYÊN ĐÚNG SỐ LƯỢNG CỘT CỦA BẢNG GỐC TRONG ẢNH.
-   - BẮT BUỘC dùng cú pháp Markdown chuẩn cho bảng:
-     * Dòng đầu là tiêu đề hoặc nội dung hàng 1: | Cột 1 | Cột 2 | Cột 3 | ... |
-     * Dòng thứ hai là phân cách: |---|---|---|...| (BẮT BUỘC có gạch đứng '|' ở cả đầu và cuối dòng, có đủ số cột tương ứng).
-     * Các dòng tiếp theo là dữ liệu: | Ô 1 | Ô 2 | Ô 3 | ... |
-     * TUYỆT ĐỐI KHÔNG viết thiếu gạch đứng '|' ở đầu hoặc cuối dòng. TUYỆT ĐỐI KHÔNG viết dạng '--|---|---' thiếu gạch đứng '|'.
-     * BẮT BUỘC mỗi hàng của bảng phải nằm trên MỘT DÒNG RIÊNG BIỆT (xuống dòng \\n sau mỗi hàng). TUYỆT ĐỐI KHÔNG dính liền các hàng bảng vào cùng một dòng.
-     * BẮT BUỘC có một dòng trống (\\n\\n) trước và sau mỗi bảng để Markdown hiển thị bảng chuẩn đẹp.
-   - Dịch toàn bộ tiêu đề cột, tiêu đề hàng và từng ô nhỏ trong bảng sang tiếng Việt 100%.
-
-6. KHÔNG LỜI DẪN / KHÔNG CHÚ THÍCH THÊM: Dịch trực tiếp nội dung từ dòng đầu tiên cho tới dòng cuối cùng ở cuối trang.
-
-7. XỬ LÝ BỐ CỤC ĐA CỘT & KHỐI TỪ VIẾT TẮT (TWO-COLUMN & ABBREVIATIONS):
-   - KHỐI TỪ VIẾT TẮT (ABBREVIATIONS): Khi trang có khung hoặc danh sách các từ viết tắt độc lập (như RV, SA, SCCT, SMT, VSD...): BẮT BUỘC trình bày riêng biệt thành danh sách viết tắt (VD: - **RV**: Tâm thất phải (Right ventricle)...) hoặc Bảng từ viết tắt riêng. TUYỆT ĐỐI KHÔNG đọc ngang hàng ghép các từ viết tắt của cột này với câu văn của cột bên cạnh thành một bảng hỗn tạp!
-   - THỨ TỰ ĐỌC 2 CỘT: Đọc theo luồng logic tự nhiên của bài viết y khoa: Đọc trọn vẹn khối văn bản tiếp nối từ trang trước hoặc cột trái trước khi chuyển sang các phần mục mới (như 10.1 Giới thiệu, 10.2 Giải phẫu động mạch vành). TUYỆT ĐỐI KHÔNG đọc ngang hàng cắt ngang giữa 2 cột khác nhau.`;
-
-      const prompt = `[YÊU CẦU BẮT BUỘC TỐI THƯỢNG: BẢN KẾT QUẢ TRẢ VỀ PHẢI HOÀN TOÀN BẰNG TIẾNG VIỆT 100%. BẮT BUỘC DỊCH TẤT CẢ CHÚ THÍCH HÌNH ÁNH DƯỚI HÌNH (FIGURE 1, FIGURE 2, FIGURE A, B, PATHOLOGY...). KHÔNG ĐƯỢC BỎ BẤT KỲ CHÚ THÍCH HÌNH NÀO].
-
-YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VIỆT (Trang ${pageNumber}):
-- Dịch hoàn toàn toàn bộ văn bản, đoạn văn sang tiếng Việt.
-- TUYỆT ĐỐI KHÔNG DÙNG MÃ LATEX THÔ: Viết trực tiếp ký hiệu toán học / so sánh thông thường (>, <, ≤, ≥, ±, %, µm, °C), ví dụ: '> 50% đến < 95%', '(> 0% đến ≤ 2%)'. Tuyệt đối không dùng dấu $ hay mã LaTeX thô như $\\le$, $\\ge$, $\\pm$.
-- BẢO TỒN CẤU TRÚC PHÂN CẤP GẠCH ĐẦU DÒNG (NESTED LISTS): Dùng đúng 2 hoặc 4 dấu cách thụt lề cho các mục con, nhóm tổn thương và phương tiện chẩn đoán (Siêu âm, CT, MRI). Tuyệt đối không làm phẳng danh sách thành một cấp duy nhất.
-- BẢNG BIỂU MARKDOWN CHUẨN: Bắt buộc mọi hàng bảng phải có gạch đứng '|' ở đầu và cuối dòng (| Cột 1 | Cột 2 |), dòng phân cách phải là '|---|---|', mỗi hàng nằm trên một dòng riêng biệt, có dòng trống trước và sau bảng.
-- KHỐI TỪ VIẾT TẮT: Trình bày riêng danh sách từ viết tắt (RV, SA, SCCT...), tuyệt đối không ghép ngang từ viết tắt với câu văn cột bên cạnh.
-- NHẬN DIỆN BỐ CỤC 2 CỘT (TWO-COLUMN): Đọc và dịch tuần tự, liên mạch giữa các cột văn bản, giữ nguyên sự kết nối chặt chẽ của nội dung y khoa, không để bị ngắt quãng hoặc đẩy lệch đoạn dịch xuống dưới.
-- DỊCH CHI TIẾT TẤT CẢ CÁC CHÚ THÍCH HÌNH (FIGURE CAPTIONS):
-  + "Figure 1 – ..." -> "**Hình 1 – ...**"
-  + "Figure 2 – ..." -> "**Hình 2 – ...**"
-  + Dịch đầy đủ nội dung mô tả hình (A, B, DM, DBT, Pathology, v.v.).
-- YÊU CẦU ĐỊNH DẠNG MARKDOWN CỰC KỲ NGUYÊN TẮC:
-  + Dùng tiêu đề Markdown (###) cho các tiêu đề chính/phần.
-  + Các mục đánh số (1., 2., 3...) và chữ cái (a., b., c., d...) PHẢI nằm trên dòng riêng, in đậm rõ ràng, phân tách bằng xuống dòng kép (\\n\\n).
-  + BẮT BUỘC xuất tất cả các bảng biểu dưới dạng Bảng Markdown có ĐỦ SỐ CỘT NHƯ BẢNG GỐC (| Cột 1 | Cột 2 | Cột 3 | ... |).
-  + Phân tách rõ ràng giữa các đoạn văn và mục bằng xuống dòng kép (\\n\\n).`;
+      const { systemInstruction, prompt } = GeminiService.buildPagePrompt(pageNumber);
 
       const isProxy = this.isCurrentKeyProxy(key);
 
@@ -986,5 +903,85 @@ YÊU CẦU DỊCH THUẬT VÀ TRÌNH BÀY MARKDOWN ĐẸP 100% SANG TIẾNG VI�
       }
     } catch (error: any) { throw error; }
   }
+  /**
+   * Dịch giữ định dạng: dịch danh sách khối chữ (đã trích từ PDF) sang tiếng Việt.
+   * Trả về map id → bản dịch. Khối nào model bỏ sót sẽ không có trong map (giữ nguyên chữ gốc).
+   */
+  async translateLayoutBlocks(
+    blocks: { id: string; text: string }[],
+    signal?: AbortSignal
+  ): Promise<Record<string, string>> {
+    if (!blocks.length) return {};
+
+    const systemInstruction = `English→Vietnamese medical translator. Input: JSON text blocks extracted from one PDF page (reading order). Translate each block into natural, accurate Vietnamese medical language, consistent across blocks; it will be redrawn in the same box, so keep it concise and add nothing.
+Keep unchanged: numbers, units, symbols (± ≤ ≥ × µ °), drug/gene names, abbreviations, superscripts (¹²³), person names, journal names, URLs, DOIs, emails. Reference-list entries: return unchanged.
+Some blocks mark differently-styled words (bold/colored) with tags like <1>Right Ventricle</1>: put the same tag pair around the corresponding Vietnamese words (e.g. <1>Tâm thất phải</1>); keep every tag, add no new ones.
+Figure n → Hình n, Table n → Bảng n. ALL-CAPS headings stay ALL-CAPS. No Markdown, no LaTeX, no line breaks.
+Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
+
+    const prompt = `${JSON.stringify(blocks.map(b => ({ id: b.id, text: b.text })))}`;
+
+    const parse = (raw: string): Record<string, string> => {
+      let txt = (raw || '').replace(/```json|```/gi, '').trim();
+      const start = txt.indexOf('{');
+      const end = txt.lastIndexOf('}');
+      if (start >= 0 && end > start) txt = txt.slice(start, end + 1);
+      const data = JSON.parse(txt);
+      const arr: any[] = Array.isArray(data) ? data : (data.t || data.translations || []);
+      const out: Record<string, string> = {};
+      for (const item of arr) {
+        const id = String(item?.id ?? '');
+        const v = item?.v ?? item?.text ?? item?.translation;
+        if (id && typeof v === 'string' && v.trim()) out[id] = cleanLatex(v).replace(/\*\*/g, '').replace(/\s*\n\s*/g, ' ').trim();
+      }
+      if (Object.keys(out).length === 0) throw new Error('Phản hồi dịch không có khối nào hợp lệ.');
+      return out;
+    };
+
+    const MAX_RETRIES = 5;
+    let retryCount = 0;
+    while (retryCount <= MAX_RETRIES) {
+      if (signal?.aborted) throw new Error('Translation aborted');
+      let ai: any, key: string;
+      try {
+        ({ ai, key } = await this.acquireKeyAndInstance());
+      } catch {
+        throw new Error('Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.');
+      }
+
+      try {
+        let raw = '';
+        if (this.isCurrentKeyProxy(key)) {
+          raw = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, '', signal);
+        } else {
+          const genModel = ai.getGenerativeModel({
+            model: this.mapModelForGoogle(this.modelName),
+            systemInstruction,
+            generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+          });
+          const result = await genModel.generateContent(prompt, signal ? ({ signal } as any) : undefined);
+          raw = (await result.response).text() || '';
+        }
+        const parsed = parse(raw);
+        GeminiService.lastSuccessfulKey = key;
+        return parsed;
+      } catch (error: any) {
+        if (signal?.aborted) throw new Error('Translation aborted');
+        const msg = String(error?.message || '').toLowerCase();
+        // Lỗi phân quyền (Level) không nên thử lại
+        if (msg.includes('level 2') || msg.includes('đăng nhập')) throw error;
+        const isQuota = msg.includes('429') || msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('401');
+        if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
+          retryCount++;
+          const delay = Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Quá số lần thử lại khi dịch khối chữ.');
+  }
 }
+
 

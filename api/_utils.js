@@ -1,12 +1,16 @@
 import { 
   firebaseConfig, 
   getAdminApp, 
+  getAdminFirestore,
   firestoreRest, 
 } from "../lib/firebaseAdmin.js";
 import admin from "firebase-admin";
 
 // In-memory cache for verified tokens
 export const tokenCache = new Map();
+
+export const PRIMARY_ADMIN_EMAILS = ["hoanghiep1296@gmail.com", "mrihachnach@gmail.com"];
+export const PRIMARY_ADMIN_UIDS = ["4cFbfQhPMpgStJXZ9EpAVcd90i33"];
 
 export const checkAdmin = async (req) => {
   try {
@@ -32,17 +36,37 @@ export const checkAdmin = async (req) => {
       const decodedToken = cached.decodedToken;
       const userEmail = (decodedToken.email || "").toLowerCase();
       const userUid = decodedToken.uid;
+      const isEmailVerified = Boolean(decodedToken.email_verified || decodedToken.emailVerified);
       
-      const primaryAdmins = ["hoanghiep1296@gmail.com", "mrihachnach@gmail.com", "admin@gmail.com", "hoctap853@gmail.com"];
-      const isPrimaryAdmin = (userEmail !== "" && primaryAdmins.includes(userEmail)) || (userUid === "4cFbfQhPMpgStJXZ9EpAVcd90i33");
-      
+      const isPrimaryAdmin = (userEmail !== "" && PRIMARY_ADMIN_EMAILS.includes(userEmail) && isEmailVerified) || (PRIMARY_ADMIN_UIDS.includes(userUid));
       if (isPrimaryAdmin) {
         req.user = decodedToken;
         return decodedToken;
       }
 
-      const userDoc = await firestoreRest.getDoc("users", userUid, idToken);
-      if (userDoc.exists && userDoc.data.role === "admin") {
+      // Check role in DB
+      let roleIsAdmin = false;
+      const adminApp = getAdminApp();
+      if (adminApp && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+        try {
+          const dbId = firebaseConfig.firestoreDatabaseId || 'ai-studio-274cca7a-128b-4f84-92a2-6b79856d515b';
+          const adminDb = getAdminFirestore(adminApp, dbId);
+          const snap = await adminDb.collection("users").doc(userUid).get();
+          if (snap.exists && snap.data()?.role === "admin") {
+            roleIsAdmin = true;
+          }
+        } catch (e) {
+          console.warn("[checkAdmin cache] Admin Firestore lookup error:", e.message);
+        }
+      }
+      if (!roleIsAdmin) {
+        const userDoc = await firestoreRest.getDoc("users", userUid, idToken);
+        if (userDoc.exists && userDoc.data.role === "admin") {
+          roleIsAdmin = true;
+        }
+      }
+
+      if (roleIsAdmin) {
         req.user = decodedToken;
         return decodedToken;
       }
@@ -88,16 +112,35 @@ export const checkAdmin = async (req) => {
     
     const userEmail = (decodedToken.email || "").toLowerCase();
     const userUid = decodedToken.uid;
-    const primaryAdmins = ["hoanghiep1296@gmail.com", "mrihachnach@gmail.com", "admin@gmail.com", "hoctap853@gmail.com"];
-    const isPrimaryAdmin = (userEmail !== "" && primaryAdmins.includes(userEmail)) || (userUid === "4cFbfQhPMpgStJXZ9EpAVcd90i33");
+    const isEmailVerified = Boolean(decodedToken.email_verified || decodedToken.emailVerified);
     
+    const isPrimaryAdmin = (userEmail !== "" && PRIMARY_ADMIN_EMAILS.includes(userEmail) && isEmailVerified) || (PRIMARY_ADMIN_UIDS.includes(userUid));
     if (isPrimaryAdmin) {
       req.user = decodedToken;
       return decodedToken;
     }
 
-    const userDoc = await firestoreRest.getDoc("users", userUid, idToken);
-    if (userDoc.exists && userDoc.data.role === "admin") {
+    let roleIsAdmin = false;
+    if (adminApp && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+      try {
+        const dbId = firebaseConfig.firestoreDatabaseId || 'ai-studio-274cca7a-128b-4f84-92a2-6b79856d515b';
+        const adminDb = getAdminFirestore(adminApp, dbId);
+        const snap = await adminDb.collection("users").doc(userUid).get();
+        if (snap.exists && snap.data()?.role === "admin") {
+          roleIsAdmin = true;
+        }
+      } catch (e) {
+        console.warn("[checkAdmin] Admin Firestore lookup error:", e.message);
+      }
+    }
+    if (!roleIsAdmin) {
+      const userDoc = await firestoreRest.getDoc("users", userUid, idToken);
+      if (userDoc.exists && userDoc.data.role === "admin") {
+        roleIsAdmin = true;
+      }
+    }
+
+    if (roleIsAdmin) {
       req.user = decodedToken;
       return decodedToken;
     }

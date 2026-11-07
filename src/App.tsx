@@ -15,6 +15,7 @@ import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
 import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, clearCachedMediTransFolderId, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 import { AdminPanelModal } from './components/AdminPanelModal';
+import { LayoutTranslatePanel } from './components/LayoutTranslatePanel';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
 
 const PDFJS_VERSION = '3.11.174';
@@ -82,7 +83,8 @@ import {
   FileSearch,
   BookOpen,
   Sparkles,
-  Play
+  Play,
+  LayoutTemplate
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -94,6 +96,7 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { TranslationEngine, TranslationService } from './services/translationService';
 import { prepareMedicalContent, cleanLatex } from './utils/textFormatting';
+import { exportTranslationsToWord, exportSummaryToWord } from './utils/wordExporter';
 import { 
   auth, 
   firebaseConfig,
@@ -242,6 +245,28 @@ const optimizeCanvasImage = (canvas: HTMLCanvasElement): string => {
   ctx.fillRect(0, 0, temp.width, temp.height);
   ctx.drawImage(canvas, 0, 0, temp.width, temp.height);
   return temp.toDataURL('image/jpeg', OPTIMIZED_IMAGE_QUALITY);
+};
+
+/** Trang gần như trắng hoàn toàn (trang trống, trang ngăn) → không cần gọi AI. */
+const isCanvasNearlyBlank = (canvas: HTMLCanvasElement): boolean => {
+  try {
+    const W = 96, H = 128;
+    const t = document.createElement('canvas');
+    t.width = W; t.height = H;
+    const c = t.getContext('2d', { willReadFrequently: true });
+    if (!c) return false;
+    c.fillStyle = '#FFFFFF';
+    c.fillRect(0, 0, W, H);
+    c.drawImage(canvas, 0, 0, W, H);
+    const d = c.getImageData(0, 0, W, H).data;
+    let ink = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] < 235 || d[i + 1] < 235 || d[i + 2] < 235) ink++;
+    }
+    return ink / (W * H) < 0.002;
+  } catch {
+    return false;
+  }
 };
 
 // --- COMPONENTS ---
@@ -462,6 +487,10 @@ export default function App() {
   const [newKeyTestResult, setNewKeyTestResult] = useState<{ success?: boolean; resultText?: string; error?: string; latencyMs?: number; loading?: boolean } | null>(null);
 
   const handleTestKey = async (keyId: string, keyValue: string) => {
+    if (keyId === 'system_proxy' || keyId.startsWith('system_')) {
+      showToast("Key hệ thống được bảo mật và quản lý bởi máy chủ.", "info");
+      return;
+    }
     setTestingKeyId(keyId);
     try {
       const res = await translationService.current.testSingleKeyTranslation(keyValue, "Hello world! Testing translation AI.");
@@ -471,7 +500,7 @@ export default function App() {
       }));
       if (res.success && user) {
         const targetKey = userKeys.find(k => k.id === keyId);
-        if (targetKey && !targetKey.isSystem && !keyId.startsWith('system_') && (targetKey.ownerId === user.uid || userRole === 'admin')) {
+        if (targetKey && !targetKey.isSystem && targetKey.id !== 'system_proxy' && !keyId.startsWith('system_') && (targetKey.ownerId === user.uid || userRole === 'admin')) {
           try {
             await updateDoc(doc(db, 'apiKeys', keyId), {
               status: 'active',
@@ -499,6 +528,7 @@ export default function App() {
     try {
       const keysToReset = userKeys.filter(k => 
         !k.isSystem && 
+        k.id !== 'system_proxy' &&
         !k.id.startsWith('system_') && 
         (k.ownerId === user.uid || userRole === 'admin')
       );
@@ -566,7 +596,14 @@ export default function App() {
   const [isUpdatingKeyName, setIsUpdatingKeyName] = useState(false);
   
   // Summarization State
-  const [translationPanelMode, setTranslationPanelMode] = useState<'translation' | 'summary'>('translation');
+  const [translationPanelMode, setTranslationPanelMode] = useState<'translation' | 'summary' | 'layout'>('translation');
+  // Tab "Giữ định dạng" được giữ mounted sau lần mở đầu để việc dịch nhiều trang không bị huỷ khi chuyển tab
+  const [layoutPanelMounted, setLayoutPanelMounted] = useState(false);
+  const [layoutToolbarEl, setLayoutToolbarEl] = useState<HTMLDivElement | null>(null);
+  const [leftPageBox, setLeftPageBox] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    if (translationPanelMode === 'layout') setLayoutPanelMounted(true);
+  }, [translationPanelMode]);
   const [summaryText, setSummaryText] = useState<string>('');
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [isSavingSummary, setIsSavingSummary] = useState(false);
@@ -911,32 +948,27 @@ export default function App() {
       }
     });
 
-    // Add active system ShopAI keys for users
-    if (systemShopAiKeys && systemShopAiKeys.length > 0) {
-      systemShopAiKeys.forEach(sysKey => {
-        if (sysKey.isActive && sysKey.value?.trim()) {
-          const sysId = `system_${sysKey.id}`;
-          if (!combined.find(k => k.id === sysId || k.value === sysKey.value)) {
-            combined.push({
-              id: sysId,
-              name: `[Hệ thống] ${sysKey.name}`,
-              value: sysKey.value,
-              engine: sysKey.engine || 'shopaikey',
-              ownerId: 'system',
-              status: sysKey.status || 'active',
-              isSystem: true
-            });
-          }
-        }
-      });
+    // Add virtual system ShopAIKey proxy choice for Level >= 2 users
+    if (effectiveUserLevel >= 2) {
+      if (!combined.find(k => k.id === 'system_proxy')) {
+        combined.push({
+          id: 'system_proxy',
+          name: '[Hệ thống] ShopAIKey',
+          value: 'system_proxy',
+          engine: 'shopaikey',
+          ownerId: 'system',
+          status: 'active',
+          isSystem: true
+        });
+      }
     }
 
     return combined;
-  }, [ownedKeys, sharedKeys, systemShopAiKeys]);
+  }, [ownedKeys, sharedKeys, effectiveUserLevel]);
 
   const hasValidKeysForFolder = useCallback((folder: 'all' | 'gemini' | 'shopaikey') => {
     // If the vault has keys matching this folder, they are available to use/rotate
-    const folderVaultKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && k.value?.trim());
+    const folderVaultKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && (k.id === 'system_proxy' || k.value?.trim()));
     if (folderVaultKeys.length > 0) return true;
 
     if (folder === 'gemini' || folder === 'all') {
@@ -946,12 +978,11 @@ export default function App() {
     if (folder === 'shopaikey' || folder === 'all') {
       const proxyManual = engineKeys['shopaikey'] || (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_shopAiKey') : '');
       if (proxyManual && proxyManual.trim()) return true;
-      const activeSys = systemShopAiKeys.filter(k => k.isActive && k.value?.trim());
-      if (activeSys.length > 0) return true;
+      if (effectiveUserLevel >= 2) return true;
     }
 
     return false;
-  }, [userKeys, engineKeys, systemShopAiKeys]);
+  }, [userKeys, engineKeys, effectiveUserLevel]);
 
   const toggleAutoTranslate = useCallback(() => {
     if (!autoTranslate) {
@@ -1024,6 +1055,7 @@ export default function App() {
 
       if (user && userKeys.length > 0) {
         const vaultKeysToCheck = userKeys.filter(k => {
+          if (k.id === 'system_proxy' || k.isSystem || k.id.startsWith('system_')) return false;
           const vEng = (k.engine || 'gemini').toLowerCase();
           return vEng === 'gemini' || vEng.includes('gemini') || vEng.includes('shopaikey') || vEng.includes('openai') || k.value?.startsWith('sk-') || k.value?.startsWith('AIzaSy');
         });
@@ -1292,9 +1324,9 @@ export default function App() {
     };
   }, [user, userRole]);
 
-  // Real-time listener for System ShopAIKeys
+  // Real-time listener for System ShopAIKeys (Admin only)
   useEffect(() => {
-    if (!user) {
+    if (!user || userRole !== 'admin') {
       setSystemShopAiKeys([]);
       return;
     }
@@ -1305,7 +1337,7 @@ export default function App() {
       console.warn("System shopAiKeys listener failed:", err);
     });
     return () => unsub();
-  }, [user]);
+  }, [user, userRole]);
 
   // Real-time listener for userKeysMap (Admin view key counts)
   useEffect(() => {
@@ -2020,110 +2052,26 @@ export default function App() {
     const pages = pagesToDownload || [currentPage];
     const availablePages = pages.filter(p => translations[p]?.status === 'success');
     
-    if (availablePages.length === 0) return;
+    if (availablePages.length === 0) {
+      showToast("Chưa có trang nào được dịch để tải về.", "info");
+      return;
+    }
 
     try {
-      const allChildren: Paragraph[] = [];
-      
-      for (const pageNum of availablePages) {
-        const content = translations[pageNum]?.content;
-        if (!content) continue;
-
-        // Add page header
-        allChildren.push(new Paragraph({
-          heading: HeadingLevel.HEADING_1,
-          alignment: "center",
-          spacing: { before: 400, after: 200 },
-          children: [
-            new TextRun({
-              text: `Trang ${pageNum}`,
-              bold: true,
-              color: "4F46E5",
-              size: 32,
-              font: "Times New Roman"
-            })
-          ]
-        }));
-
-        const preparedContent = prepareMedicalContent(content);
-        const lines = preparedContent.split('\n');
-        const pageParagraphs = lines.map(line => {
-          if (!line.trim()) return new Paragraph({ spacing: { after: 120 }, children: [new TextRun("")] });
-
-          // Calculate indentation level
-          const leadingSpaces = line.match(/^[ \t]*/)?.[0]?.replace(/\t/g, '  ').length || 0;
-          const indentLevel = Math.min(3, Math.floor(leadingSpaces / 2));
-
-          let text = line.trim();
-          let isHeading = false;
-          let headingLevel: any = undefined;
-
-          if (text.startsWith('### ')) {
-            text = text.replace('### ', '');
-            isHeading = true;
-            headingLevel = HeadingLevel.HEADING_3;
-          } else if (text.startsWith('## ')) {
-            text = text.replace('## ', '');
-            isHeading = true;
-            headingLevel = HeadingLevel.HEADING_2;
-          } else if (text.startsWith('# ')) {
-            text = text.replace('# ', '');
-            isHeading = true;
-            headingLevel = HeadingLevel.HEADING_1;
-          }
-
-          let isBullet = false;
-          if (text.startsWith('- ') || text.startsWith('* ')) {
-            text = text.substring(2);
-            isBullet = true;
-          }
-
-          const isBold = text.includes('**') || isHeading;
-          const cleanText = text.replace(/\*\*/g, '');
-
-          return new Paragraph({
-            heading: isHeading ? headingLevel : undefined,
-            bullet: isBullet ? { level: indentLevel } : undefined,
-            spacing: { after: 120 },
-            children: [
-              new TextRun({
-                text: cleanText,
-                size: isHeading ? 28 : 24,
-                font: "Times New Roman",
-                bold: isBold
-              })
-            ]
-          });
-        });
-
-        allChildren.push(...pageParagraphs);
-        
-        // Add page break if not the last page
-        if (pageNum !== availablePages[availablePages.length - 1]) {
-          allChildren.push(new Paragraph({
-            children: [new TextRun({ text: "", break: 1 })]
-          }));
-        }
-      }
-
-      const doc = new Document({
-        sections: [{
-          properties: {},
-          children: allChildren,
-        }],
+      showToast("Đang chuẩn bị tệp Word chuyên nghiệp...", "info");
+      await exportTranslationsToWord({
+        currentFileName,
+        availablePages,
+        translations
       });
-
-      const blob = await Packer.toBlob(doc);
-      const fileName = availablePages.length === 1 
-        ? `MediTrans_Trang_${availablePages[0]}.docx` 
-        : `MediTrans_Tong_Hop_${availablePages.length}_Trang.docx`;
-      saveAs(blob, fileName);
-    } catch (error) {
+      showToast("Đã tải xuống tệp Word (.docx) thành công!", "success");
+    } catch (error: any) {
       console.error("Error generating docx:", error);
-      // Fallback to markdown if docx fails (just for the first page if multiple)
+      // Fallback to markdown if docx fails
       const firstPageContent = translations[availablePages[0]]?.content || "";
       const blob = new Blob([firstPageContent], { type: 'text/markdown' });
       saveAs(blob, `MediTrans_Trang_${availablePages[0]}.md`);
+      showToast("Tải bản Word thất bại, đã tải bản Markdown dự phòng.", "info");
     }
   };
 
@@ -2325,58 +2273,17 @@ export default function App() {
     if (!summaryText) return;
     
     try {
-      showToast("Đang chuẩn bị tệp Word...", 'info');
-      
-      const fileNameWithoutExt = (currentFileName || 'document').replace(/\.[^/.]+$/, "");
-      
-      const doc = new Document({
-        sections: [{
-          properties: {},
-          children: [
-            new Paragraph({
-              text: `TÓM TẮT TÀI LIỆU`,
-              heading: HeadingLevel.HEADING_1,
-              spacing: { after: 400 }
-            }),
-            new Paragraph({
-              children: [
-                new TextRun({
-                  text: `Tên tài liệu: ${currentFileName || 'Không rõ'}`,
-                  bold: true
-                })
-              ],
-              spacing: { after: 200 }
-            }),
-            new Paragraph({
-              text: `Ngày tạo: ${new Date().toLocaleString('vi-VN')}`,
-              spacing: { after: 400 }
-            }),
-            ...summaryText.split('\n').map(line => {
-              const trimmed = line.trim();
-              if (!trimmed) return new Paragraph({ text: "" });
+      showToast("Đang chuẩn bị tệp Word tóm tắt...", 'info');
+      const rangeText = summaryRange.from === summaryRange.to
+        ? `Trang ${summaryRange.from}`
+        : `Từ trang ${summaryRange.from} đến trang ${summaryRange.to}`;
 
-              const isHeading = trimmed.startsWith('#');
-              const level = trimmed.match(/^#+/)?.[0].length || 0;
-              const cleanText = trimmed.replace(/^#+\s*/, '').replace(/\*\*/g, '').replace(/\*/g, '');
-
-              return new Paragraph({
-                heading: isHeading ? (level === 1 ? HeadingLevel.HEADING_1 : HeadingLevel.HEADING_2) : undefined,
-                spacing: { before: isHeading ? 200 : 100, after: 100 },
-                children: [
-                   new TextRun({
-                     text: cleanText,
-                     bold: trimmed.includes('**') || isHeading
-                   })
-                ]
-              });
-            })
-          ],
-        }],
+      await exportSummaryToWord({
+        currentFileName,
+        summaryText,
+        summaryRangeText: rangeText
       });
-
-      const blob = await Packer.toBlob(doc);
-      saveAs(blob, `TomTat_${fileNameWithoutExt}.docx`);
-      showToast("Đã bắt đầu tải xuống tóm tắt (.docx)", 'success');
+      showToast("Đã tải xuống bản tóm tắt (.docx) thành công!", 'success');
     } catch (error) {
       console.error("Lỗi khi tải xuống tóm tắt Word:", error);
       showToast("Không thể tải xuống tóm tắt dạng Word", 'error');
@@ -2386,6 +2293,27 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [pdfScrollEl, setPdfScrollEl] = useState<HTMLDivElement | null>(null);
+  const setPdfContainerEl = useCallback((el: HTMLDivElement | null) => {
+    (containerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+    setPdfScrollEl(el);
+  }, []);
+
+  // Kích thước hiển thị của trang PDF bên trái → tab "Giữ định dạng" hiển thị cùng cỡ (phóng to/thu nhỏ đồng bộ)
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return;
+      setLeftPageBox(prev => (prev && Math.abs(prev.w - r.width) < 0.5 && Math.abs(prev.h - r.height) < 0.5) ? prev : { w: r.width, h: r.height });
+    };
+    update();
+    const t = setTimeout(update, 350); // sau hiệu ứng chuyển cảnh
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => { clearTimeout(t); ro.disconnect(); };
+  }, [pdfDoc, currentPage, zoom, isFullScreen, isRendering]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const renderTaskRef = useRef<any>(null);
   const lastRenderedImageRef = useRef<{ page: number, zoom: number, buffer: string } | null>(null);
@@ -3026,12 +2954,15 @@ export default function App() {
     try {
       // 1. Image preparation
       let imageBuffer = "";
+      let sourceCanvas: HTMLCanvasElement | null = null;
       const cached = pageCacheRef.current.get(targetPage);
       
       // Use live canvas if it's the current page, otherwise use cache
       if (targetPage === currentPageRef.current && canvasRef.current && canvasRef.current.width > 0) {
+        sourceCanvas = canvasRef.current;
         imageBuffer = optimizeCanvasImage(canvasRef.current);
       } else if (cached?.canvas && cached.canvas.width > 0) {
+        sourceCanvas = cached.canvas;
         imageBuffer = optimizeCanvasImage(cached.canvas);
       }
       
@@ -3045,12 +2976,18 @@ export default function App() {
         const ctx = tempCanvas.getContext('2d');
         if (ctx) {
           await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+          sourceCanvas = tempCanvas;
           imageBuffer = optimizeCanvasImage(tempCanvas);
         }
         pdfPage.cleanup();
       }
 
       if (!imageBuffer || signal.aborted) return null;
+
+      // Tiết kiệm token: trang trắng không gửi lên AI
+      if (sourceCanvas && isCanvasNearlyBlank(sourceCanvas)) {
+        return '*(Trang trống – không có nội dung cần dịch)*';
+      }
 
       // Extract digital text for cross-referencing acronyms, numbers, and dosages
       let textContentStr = "";
@@ -4443,7 +4380,7 @@ export default function App() {
                   isFullScreen ? "p-0" : "p-4 md:p-8",
                   isPanning ? "cursor-grab select-none touch-none" : "cursor-auto"
                 )} 
-                ref={containerRef}
+                ref={setPdfContainerEl}
                 onMouseDown={handleMouseDown}
                 onTouchStart={handleTouchStart}
               >
@@ -4560,6 +4497,17 @@ export default function App() {
                         <ScrollText className="w-3 h-3" />
                         <span>Tóm tắt</span>
                       </button>
+                      <button 
+                        onClick={() => setTranslationPanelMode('layout')}
+                        className={cn(
+                          "flex items-center gap-1.5 px-2 py-1 rounded-md transition-all text-[10px] font-black uppercase tracking-tight",
+                          translationPanelMode === 'layout' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
+                        )}
+                        title="Dịch giữ nguyên bố cục trang gốc, xuất PDF dạng ảnh"
+                      >
+                        <LayoutTemplate className="w-3 h-3" />
+                        <span>Giữ định dạng</span>
+                      </button>
                     </div>
                   </div>
                   
@@ -4578,6 +4526,7 @@ export default function App() {
 
                   {isTranslating && <div className="h-4 w-px bg-slate-200" />}
 
+                  {translationPanelMode !== 'layout' && (<>
                   <button 
                     onClick={toggleAutoTranslate}
                     className={cn(
@@ -4596,9 +4545,13 @@ export default function App() {
                   </button>
 
                   <div className="h-4 w-px bg-slate-200" />
+                  </>)}
                 </div>
                 
-                <div className="flex items-center gap-1.5 md:gap-3 min-w-max ml-0 md:ml-4 flex-wrap pb-2 md:pb-0">
+                {translationPanelMode === 'layout' && (
+                  <div ref={setLayoutToolbarEl} className="flex items-center gap-1 flex-1 min-w-max justify-end ml-3" />
+                )}
+                <div className={cn("flex items-center gap-1.5 md:gap-3 min-w-max ml-0 md:ml-4 flex-wrap pb-2 md:pb-0", translationPanelMode === 'layout' && "hidden")}>
                   {/* Tải tập tin Word đã dịch */}
                   <button 
                     onClick={() => {
@@ -4618,7 +4571,7 @@ export default function App() {
 
                   <div className="h-4 w-px bg-slate-200 hidden xs:block" />
 
-                  {translationPanelMode === 'translation' ? (
+                  {translationPanelMode === 'layout' ? null : translationPanelMode === 'translation' ? (
                     <div className="flex items-center gap-1.5 md:gap-2">
                       <button 
                         onClick={() => translateCurrentPage(currentPage, true, selectedEngine)}
@@ -4758,7 +4711,7 @@ export default function App() {
                     )}
                   </AnimatePresence>
 
-                  {(translationPanelMode === 'translation' ? translations[currentPage]?.content : summaryText) && (
+                  {translationPanelMode !== 'layout' && (translationPanelMode === 'translation' ? translations[currentPage]?.content : summaryText) && (
                     <div className="flex items-center gap-1.5 ml-auto">
                       <button 
                         onClick={() => handleCopyTranslation(translationPanelMode === 'translation' ? translations[currentPage].content : summaryText, currentPage)}
@@ -4867,7 +4820,29 @@ export default function App() {
                 </div>
               </div>
               
-              <div className="flex-1 overflow-auto p-6 md:p-12 bg-white">
+              <div className={cn("flex-1 bg-white", translationPanelMode === 'layout' ? "p-0 overflow-hidden flex flex-col min-h-0" : "overflow-auto p-6 md:p-12")}>
+                {layoutPanelMounted && pdfDoc && (
+                  <div className={translationPanelMode === 'layout' ? "flex-1 min-h-0 flex flex-col" : "hidden"}>
+                    <LayoutTranslatePanel
+                      key={`${fileId || currentFileName || 'local'}::${numPages}`}
+                      pdfDoc={pdfDoc}
+                      numPages={numPages}
+                      currentPage={currentPage}
+                      docKey={`${fileId || currentFileName || 'local'}::${numPages}`}
+                      fileName={currentFileName || 'tai-lieu.pdf'}
+                      translator={(translationService.current as any)?.translateLayoutBlocks ? (translationService.current as any) : null}
+                      showToast={showToast}
+                      toolbarTarget={translationPanelMode === 'layout' ? layoutToolbarEl : null}
+                      pageBox={leftPageBox}
+                      syncScrollEl={pdfScrollEl}
+                      fullScreen={isFullScreen}
+                      cloud={user && fileId && fileOwnerId && !isLocalOnly
+                        ? { ownerId: fileOwnerId, fileId, canWrite: user.uid === fileOwnerId || userRole === 'admin' }
+                        : null}
+                    />
+                  </div>
+                )}
+                {translationPanelMode !== 'layout' && (
                 <AnimatePresence mode="wait">
                   {translationPanelMode === 'summary' ? (
                     <motion.div 
@@ -5044,6 +5019,7 @@ export default function App() {
                     </motion.div>
                   ))}
                 </AnimatePresence>
+                )}
               </div>
             </motion.div>
           </div>

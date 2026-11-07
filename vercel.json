@@ -1,13 +1,13 @@
 {
+  "functions": {
+    "api/ai/chat.ts": {
+      "maxDuration": 60
+    }
+  },
   "rewrites": [
-    {
-      "source": "/api/tinyvault",
-      "destination": "https://tinyvault.space/api/upload"
-    },
     {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
   ]
 }
-
