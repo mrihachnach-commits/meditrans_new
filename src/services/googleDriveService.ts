@@ -15,10 +15,19 @@ let tokenExpiresAt: number = 0;
 // Cache MediTrans AI folder ID in RAM and localStorage
 let cachedMediTransFolderId: string | null = null;
 
+export function getUserFolderStorageKey(): string {
+  const user = auth.currentUser;
+  return user ? `meditrans_folder_id_${user.uid}` : 'meditrans_folder_id';
+}
+
 export function clearCachedMediTransFolderId() {
   cachedMediTransFolderId = null;
   try {
     localStorage.removeItem('meditrans_folder_id');
+    const user = auth.currentUser;
+    if (user) {
+      localStorage.removeItem(`meditrans_folder_id_${user.uid}`);
+    }
   } catch (e) {}
 }
 
@@ -147,24 +156,53 @@ export interface DriveFileMetadata {
 
 /**
  * Get or create the "MediTrans AI" folder on Google Drive.
- * Caches folder ID in RAM and localStorage to eliminate unnecessary search queries.
+ * Caches folder ID in RAM and user-scoped localStorage to eliminate unnecessary search queries,
+ * and validates folder accessibility against Google Drive API.
  */
 export async function getOrCreateMediTransFolder(token?: string): Promise<string> {
+  const authToken = token || await getGoogleOAuthToken();
+  const folderKey = getUserFolderStorageKey();
+
+  // Helper to verify if a folder ID is valid, accessible, and not in trash
+  const verifyFolder = async (folderId: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?fields=id,trashed`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data && !data.trashed;
+      }
+    } catch (e) {
+      console.warn('[GoogleDriveService] Verify folder check failed:', e);
+    }
+    return false;
+  };
+
   // 1. Check RAM memory cache
   if (cachedMediTransFolderId) {
-    return cachedMediTransFolderId;
+    const isValid = await verifyFolder(cachedMediTransFolderId);
+    if (isValid) {
+      return cachedMediTransFolderId;
+    }
+    cachedMediTransFolderId = null;
   }
 
-  // 2. Check localStorage
+  // 2. Check localStorage with user-scoped key
   try {
-    const savedFolderId = localStorage.getItem('meditrans_folder_id');
+    const savedFolderId = localStorage.getItem(folderKey) || localStorage.getItem('meditrans_folder_id');
     if (savedFolderId) {
-      cachedMediTransFolderId = savedFolderId;
-      return savedFolderId;
+      const isValid = await verifyFolder(savedFolderId);
+      if (isValid) {
+        cachedMediTransFolderId = savedFolderId;
+        try { localStorage.setItem(folderKey, savedFolderId); } catch (e) {}
+        return savedFolderId;
+      } else {
+        clearCachedMediTransFolderId();
+      }
     }
   } catch (e) {}
 
-  const authToken = token || await getGoogleOAuthToken();
   const folderName = 'MediTrans AI';
 
   // 3. Search for existing folder named "MediTrans AI"
@@ -182,12 +220,17 @@ export async function getOrCreateMediTransFolder(token?: string): Promise<string
         const folderId = data.files[0].id;
         cachedMediTransFolderId = folderId;
         try {
-          localStorage.setItem('meditrans_folder_id', folderId);
+          localStorage.setItem(folderKey, folderId);
         } catch (e) {}
         return folderId;
       }
+    } else if (searchRes.status === 401) {
+      cachedToken = null;
+      sessionStorage.removeItem('google_drive_oauth_token');
+      throw new Error("Phiên kết nối Google Drive đã hết hạn. Vui lòng kết nối lại.");
     }
-  } catch (err) {
+  } catch (err: any) {
+    if (err.message?.includes("Phiên kết nối")) throw err;
     console.warn('[GoogleDriveService] Error searching folder:', err);
   }
 
@@ -208,6 +251,11 @@ export async function getOrCreateMediTransFolder(token?: string): Promise<string
   if (!createRes.ok) {
     const errText = await createRes.text().catch(() => '');
     console.error('[GoogleDriveService] Failed to create folder:', createRes.status, errText);
+    if (createRes.status === 401) {
+      cachedToken = null;
+      sessionStorage.removeItem('google_drive_oauth_token');
+      throw new Error("Phiên kết nối Google Drive đã hết hạn. Vui lòng kết nối lại.");
+    }
     throw new Error('Không thể tạo thư mục "MediTrans AI" trên Google Drive');
   }
 
@@ -215,83 +263,113 @@ export async function getOrCreateMediTransFolder(token?: string): Promise<string
   const newFolderId = folderData.id;
   cachedMediTransFolderId = newFolderId;
   try {
-    localStorage.setItem('meditrans_folder_id', newFolderId);
+    localStorage.setItem(folderKey, newFolderId);
   } catch (e) {}
   return newFolderId;
 }
 
 /**
- * Upload a file to Google Drive using multipart upload into "MediTrans AI" folder
+ * Upload a file to Google Drive using multipart upload into "MediTrans AI" folder.
+ * Automatically handles token prompts and folder ID invalidation & retries.
  */
 export async function uploadFileToDrive(
   file: File,
   folderName = 'MediTrans AI'
 ): Promise<DriveFileMetadata> {
-  const token = await getGoogleOAuthToken();
-
-  // Get or create MediTrans AI folder ID on Drive
-  const folderId = await getOrCreateMediTransFolder(token);
-
-  // Create boundary for multipart upload
-  const boundary = 'foo_bar_baz_' + Math.random().toString(36).substring(2);
-  const delimiter = "\r\n--" + boundary + "\r\n";
-  const close_delim = "\r\n--" + boundary + "--";
-
-  const metadata = {
-    name: file.name,
-    mimeType: file.type || 'application/pdf',
-    description: 'Uploaded via MediTrans AI Medical Translator',
-    parents: [folderId]
-  };
-
-  const fileBuffer = await file.arrayBuffer();
-
-  const headerBytes = new TextEncoder().encode(
-    delimiter +
-    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-    JSON.stringify(metadata) +
-    delimiter +
-    'Content-Type: ' + (file.type || 'application/pdf') + '\r\n\r\n'
-  );
-  const fileBytes = new Uint8Array(fileBuffer);
-  const footerBytes = new TextEncoder().encode(close_delim);
-
-  const totalLength = headerBytes.length + fileBytes.length + footerBytes.length;
-  const multipartResponseBody = new Uint8Array(totalLength);
-  multipartResponseBody.set(headerBytes, 0);
-  multipartResponseBody.set(fileBytes, headerBytes.length);
-  multipartResponseBody.set(footerBytes, headerBytes.length + fileBytes.length);
-
-  const response = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,webViewLink',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': `multipart/related; boundary=${boundary}`
-      },
-      body: multipartResponseBody
+  let token: string;
+  try {
+    token = await getGoogleOAuthToken();
+  } catch (err: any) {
+    if (err.message === "CHUA_KET_NOI_DRIVE") {
+      token = await getGoogleOAuthToken(true);
+    } else {
+      throw err;
     }
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => '');
-    console.error('[GoogleDriveService] Upload failed:', response.status, errorText);
-    if (response.status === 401) {
-      cachedToken = null;
-      throw new Error("Phiên đăng nhập Google hết hạn. Vui lòng thử lại.");
-    }
-    throw new Error(`Tải lên Google Drive thất bại (${response.status})`);
   }
 
-  const result = await response.json();
-  return {
-    id: result.id,
-    name: result.name || file.name,
-    mimeType: result.mimeType || file.type,
-    size: result.size ? parseInt(result.size) : file.size,
-    webViewLink: result.webViewLink
+  const performUpload = async (authToken: string, retryCount = 0): Promise<DriveFileMetadata> => {
+    // Get or create MediTrans AI folder ID on Drive
+    const folderId = await getOrCreateMediTransFolder(authToken);
+
+    // Create boundary for multipart upload
+    const boundary = 'foo_bar_baz_' + Math.random().toString(36).substring(2);
+    const delimiter = "\r\n--" + boundary + "\r\n";
+    const close_delim = "\r\n--" + boundary + "--";
+
+    const metadata = {
+      name: file.name,
+      mimeType: file.type || 'application/pdf',
+      description: 'Uploaded via MediTrans AI Medical Translator',
+      parents: [folderId]
+    };
+
+    const fileBuffer = await file.arrayBuffer();
+
+    const headerBytes = new TextEncoder().encode(
+      delimiter +
+      'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+      JSON.stringify(metadata) +
+      delimiter +
+      'Content-Type: ' + (file.type || 'application/pdf') + '\r\n\r\n'
+    );
+    const fileBytes = new Uint8Array(fileBuffer);
+    const footerBytes = new TextEncoder().encode(close_delim);
+
+    const totalLength = headerBytes.length + fileBytes.length + footerBytes.length;
+    const multipartResponseBody = new Uint8Array(totalLength);
+    multipartResponseBody.set(headerBytes, 0);
+    multipartResponseBody.set(fileBytes, headerBytes.length);
+    multipartResponseBody.set(footerBytes, headerBytes.length + fileBytes.length);
+
+    const response = await fetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,webViewLink',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${authToken}`,
+          'Content-Type': `multipart/related; boundary=${boundary}`
+        },
+        body: multipartResponseBody
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      console.error('[GoogleDriveService] Upload failed:', response.status, errorText);
+
+      // Token expired (401)
+      if (response.status === 401) {
+        cachedToken = null;
+        sessionStorage.removeItem('google_drive_oauth_token');
+        if (retryCount === 0) {
+          console.log('[GoogleDriveService] Token expired, requesting interactive auth...');
+          const newToken = await getGoogleOAuthToken(true);
+          return performUpload(newToken, 1);
+        }
+        throw new Error("Phiên đăng nhập Google hết hạn. Vui lòng kết nối lại Google Drive.");
+      }
+
+      // Folder invalid/forbidden (404/403)
+      if ((response.status === 404 || response.status === 403) && retryCount === 0) {
+        console.warn('[GoogleDriveService] Parent folder invalid/forbidden, resetting folder ID and retrying...');
+        clearCachedMediTransFolderId();
+        return performUpload(authToken, 1);
+      }
+
+      throw new Error(`Tải lên Google Drive thất bại (${response.status})`);
+    }
+
+    const result = await response.json();
+    return {
+      id: result.id,
+      name: result.name || file.name,
+      mimeType: result.mimeType || file.type,
+      size: result.size ? parseInt(result.size) : file.size,
+      webViewLink: result.webViewLink
+    };
   };
+
+  return performUpload(token);
 }
 
 /**

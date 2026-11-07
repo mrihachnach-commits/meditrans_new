@@ -12,7 +12,7 @@ import { Logo, LogoWithText } from './components/Logo';
 import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
 import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
-import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, DriveFileMetadata } from './services/googleDriveService';
+import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, clearCachedMediTransFolderId, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
@@ -1091,6 +1091,7 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       setIsAuthReady(true);
+      clearCachedMediTransFolderId();
       
       if (currentUser) {
         // Ensure user profile exists in Firestore
