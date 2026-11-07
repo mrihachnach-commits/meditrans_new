@@ -88,6 +88,7 @@ export const SystemShopAiKeyManager: React.FC<SystemShopAiKeyManagerProps> = ({ 
         engine: newKey.engine || 'shopaikey',
         isActive: newKey.isActive,
         createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
         status: 'active'
       });
       showToast("Đã thêm ShopAIkey hệ thống mới thành công!", "success");
@@ -95,7 +96,7 @@ export const SystemShopAiKeyManager: React.FC<SystemShopAiKeyManagerProps> = ({ 
       setIsAdding(false);
     } catch (e: any) {
       console.error("Failed to add system key:", e);
-      handleFirestoreError(e, OperationType.WRITE, 'systemShopAiKeys');
+      handleFirestoreError(e, OperationType.CREATE, 'systemShopAiKeys');
       showToast("Lỗi thêm ShopAIkey hệ thống: " + e.message, "error");
     }
   };

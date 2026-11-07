@@ -71,10 +71,12 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
     try {
       await addDoc(collection(db, 'apiKeys'), {
         ownerId: user.uid,
+        ownerEmail: user.email || '',
         name,
         value: newKey.value.trim(),
         engine: newKey.engine,
         createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
         status: 'active',
         sharedWith: []
       });
@@ -83,7 +85,7 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
       setIsAdding(false);
     } catch (e: any) {
       console.error("Failed to add key for user:", e);
-      handleFirestoreError(e, OperationType.WRITE, 'apiKeys');
+      handleFirestoreError(e, OperationType.CREATE, 'apiKeys');
       showToast("Không thể thêm key: " + e.message, "error");
     }
   };
@@ -99,7 +101,8 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
         name: editKeyData.name.trim() || 'API Key',
         value: editKeyData.value.trim(),
         engine: editKeyData.engine,
-        status: 'active'
+        status: 'active',
+        updatedAt: serverTimestamp()
       });
       showToast("Đã cập nhật thông tin Key thành công", "success");
       setEditingKeyId(null);
