@@ -42,6 +42,8 @@ interface NormItem {
   italic: boolean;
   serif: boolean;
   color: RGB | null;
+  font: string;      // tên font pdf.js (để hiệu chỉnh theo từng font)
+  hScale: number;    // co/giãn ngang để khớp độ rộng chữ gốc (font hẹp/rộng)
 }
 
 interface Run extends RunStyle { text: string; }
@@ -57,6 +59,10 @@ interface Segment {
   italic: boolean;
   serif: boolean;
   leader?: { num: string };
+  hScale: number;
+  /** Dòng mở đầu một mục danh sách (có ký hiệu/số thứ tự ngay bên trái). */
+  itemStart?: boolean;
+  isLabel?: boolean;
 }
 
 export type BlockAlign = 'left' | 'center' | 'right' | 'justify';
@@ -86,6 +92,8 @@ export interface LayoutBlock {
   leader?: { num: string; right: number };
   /** Mục lục nhiều dòng: mép phải của các dòng trên (để ngắt dòng giống bản gốc). */
   bodyRight?: number;
+  /** Co/giãn ngang khi vẽ để khớp độ rộng font gốc. */
+  hScale: number;
 }
 
 export interface PaintReport {
@@ -145,7 +153,10 @@ function toSuperscript(s: string): string {
   return [...s].map(ch => SUPERSCRIPT_MAP[ch] ?? ch).join('');
 }
 
-const LABEL_RE = /^(\d{1,3}(\.\d{1,3})*\.?|[a-zA-Z][.)]|\(?[ivxIVX]{1,4}[.)]|[•●▪■◦–\-*])$/;
+const BULLET_CHARS = '•●▪■◦○‣►▸➢➤✓✔❖◆◇□▫·∙§\\-–—*o\uF0A7\uF0B7\uF0D8\uF076\uF0FC\uF0A8\uF06E\uF0E0';
+const LABEL_RE = new RegExp(`^(\\d{1,3}(\\.\\d{1,3})*[.)]?|[a-zA-Z][.)]|\\(?[ivxIVX]{1,4}[.)]|[${BULLET_CHARS}])$`);
+/** Ký hiệu đầu dòng dính liền chữ trong cùng một item: "• Breast", "o Conical…" */
+const LEADING_BULLET_RE = new RegExp(`^(\\s*[${BULLET_CHARS}])(\\s+)(?=\\S)`);
 const LEADER_RE = /^([\s\S]*?\S)\s*(?:[.·…]\s*){4,}\s*(\d{1,4}|[ivxlcdm]{1,6})?\s*$/i;
 
 function isTranslatableText(text: string): boolean {
@@ -186,8 +197,23 @@ function regionStats(img: ImageData, x0: number, y0: number, x1: number, y1: num
     }
   }
   let mode = { n: 0, r: 255, g: 255, b: 255 };
-  bins.forEach(e => { if (e.n > mode.n) mode = e; });
-  const bg: RGB = mode.n ? { r: mode.r / mode.n, g: mode.g / mode.n, b: mode.b / mode.n } : { r: 255, g: 255, b: 255 };
+  let modeKey = -1;
+  bins.forEach((e, k) => { if (e.n > mode.n) { mode = e; modeKey = k; } });
+  // Màu nền = màu chính xác xuất hiện nhiều nhất trong nhóm phổ biến (không lấy trung bình → không lệch sắc, không thành mảng xám mờ)
+  const exact = new Map<number, number>();
+  for (let y = ya; y < yb; y += step) {
+    for (let x = xa; x < xb; x += step) {
+      const i = (y * W + x) * 4;
+      if ((((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4)) !== modeKey) continue;
+      const c = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+      exact.set(c, (exact.get(c) || 0) + 1);
+    }
+  }
+  let bestC = -1, bestN = 0;
+  exact.forEach((n, c) => { if (n > bestN) { bestN = n; bestC = c; } });
+  const bg: RGB = bestC >= 0
+    ? { r: (bestC >> 16) & 255, g: (bestC >> 8) & 255, b: bestC & 255 }
+    : mode.n ? { r: mode.r / mode.n, g: mode.g / mode.n, b: mode.b / mode.n } : { r: 255, g: 255, b: 255 };
 
   let near = 0;
   const far: { dist: number; r: number; g: number; b: number }[] = [];
@@ -233,7 +259,7 @@ export function normalizeItems(
     const st = getStyle(it.fontName);
     out.push({
       str: it.str, x: m[4], y: m[5], size, w: Math.max(0, it.width * scale),
-      bold: st.bold, italic: st.italic, serif: st.serif, color: null,
+      bold: st.bold, italic: st.italic, serif: st.serif, color: null, font: it.fontName, hScale: 1,
     });
   }
   return out;
@@ -294,14 +320,112 @@ export function annotateItemColors(ctx: CanvasRenderingContext2D, items: NormIte
     }
   }
   ctx.restore();
+  calibrateFonts(ctx, img, out);
   return out;
+}
+
+/**
+ * Hiệu chỉnh theo từng font, đo trực tiếp trên ảnh trang gốc:
+ *  - Cỡ chữ thật: chiều cao nét chữ hoa/chữ có nét cao so với cỡ ghi trong file (nhiều sách ghi cỡ lớn hơn thực tế).
+ *  - Độ rộng: font gốc hẹp/rộng hơn font thay thế → co/giãn ngang khi vẽ.
+ *  - Độ đậm: mật độ mực cao hơn hẳn mặt bằng trang → chữ đậm (khi tên font không ghi "Bold").
+ */
+function calibrateFonts(ctx: CanvasRenderingContext2D, img: ImageData, items: NormItem[]) {
+  const W = img.width, H = img.height, d = img.data;
+  type Probe = { v?: number; ink: number; letters: number };
+  const probes = new Map<NormItem, Probe>();
+  for (const it of items) {
+    const letters = letterCount(it.str);
+    if (letters < 2 || it.w < 2) continue;
+    const st = regionStats(img, it.x, it.y - 0.75 * it.size, it.x + it.w, it.y + 0.15 * it.size);
+    const bg = st.bg;
+    const isInk = (x: number, y: number) => {
+      const i = (y * W + x) * 4;
+      return Math.abs(d[i] - bg.r) + Math.abs(d[i + 1] - bg.g) + Math.abs(d[i + 2] - bg.b) > 110;
+    };
+    const xa = Math.max(0, Math.floor(it.x + 0.05 * it.w)), xb = Math.min(W, Math.ceil(it.x + 0.95 * it.w));
+    // mật độ mực trong vùng cao chữ thường
+    let ink = 0, tot = 0;
+    const ya = Math.max(0, Math.floor(it.y - 0.5 * it.size)), yb = Math.min(H, Math.ceil(it.y));
+    for (let y = ya; y < yb; y++) for (let x = xa; x < xb; x++) { tot++; if (isInk(x, y)) ink++; }
+    const probe: Probe = { ink: tot ? ink / tot : 0, letters };
+    // chiều cao nét cao nhất liền mạch phía trên đường chân chữ
+    if (/[A-Zbdfhkl0-9]/.test(it.str)) {
+      const gapNeed = Math.max(2, Math.round(0.12 * it.size));
+      let y = Math.floor(it.y - 0.1 * it.size), top = -1, empty = 0;
+      const limit = Math.max(0, Math.floor(it.y - 1.4 * it.size));
+      for (; y >= limit; y--) {
+        let rowInk = false;
+        for (let x = xa; x < xb; x += 1) if (isInk(x, y)) { rowInk = true; break; }
+        if (rowInk) { top = y; empty = 0; } else if (++empty >= gapNeed && top >= 0) break;
+      }
+      if (top >= 0) probe.v = (it.y - top) / ((it.serif ? 0.68 : 0.72) * it.size);
+    }
+    probes.set(it, probe);
+  }
+  // gom theo font
+  const byFont = new Map<string, NormItem[]>();
+  for (const it of probes.keys()) {
+    const k = `${it.font}|${it.bold}|${it.italic}`;
+    (byFont.get(k) || byFont.set(k, []).get(k)!).push(it);
+  }
+  const allInk: number[] = [];
+  probes.forEach(p => { for (let i = 0; i < Math.min(p.letters, 30); i++) allInk.push(p.ink); });
+  const pageInk = median(allInk);
+
+  const fontFix = new Map<string, { v: number; h: number; bold: boolean }>();
+  byFont.forEach((list, k) => {
+    const vs = list.map(it => probes.get(it)!.v).filter((v): v is number => v !== undefined && v > 0.4 && v < 1.6);
+    let v = vs.length >= 2 ? median(vs) : 1;
+    if (Math.abs(v - 1) < 0.08) v = 1;
+    v = Math.min(1.25, Math.max(0.55, v));
+    // độ rộng: chữ gốc so với font thay thế ở cỡ đã hiệu chỉnh
+    const hs: number[] = [];
+    for (const it of list) {
+      if (it.str.length < 4) continue;
+      ctx.font = `${it.italic ? 'italic ' : ''}${it.bold ? '700' : '400'} ${(it.size * v).toFixed(2)}px ${it.serif ? SERIF_STACK : SANS_STACK}`;
+      const mw = ctx.measureText(it.str).width;
+      if (mw > 4) hs.push(it.w / mw);
+    }
+    let h = hs.length ? median(hs) : 1;
+    if (Math.abs(h - 1) < 0.06) h = 1;
+    h = Math.min(1.12, Math.max(0.72, h));
+    const inks = list.map(it => probes.get(it)!.ink);
+    const bold = pageInk > 0 && median(inks) > 1.35 * pageInk && list.reduce((s, it) => s + probes.get(it)!.letters, 0) >= 4;
+    fontFix.set(k, { v, h, bold });
+  });
+  for (const it of items) {
+    const fx = fontFix.get(`${it.font}|${it.bold}|${it.italic}`);
+    if (!fx) continue;
+    it.size *= fx.v;
+    it.hScale = fx.h;
+    if (fx.bold) it.bold = true;
+  }
 }
 
 /* ------------------------------------------------------------------ */
 /* 2. Item → đoạn dòng (segment) → khối                                */
 /* ------------------------------------------------------------------ */
 
-function buildSegments(items: NormItem[]): Segment[] {
+function splitLeadingBullets(items: NormItem[]): NormItem[] {
+  const out: NormItem[] = [];
+  for (const it of items) {
+    const m = it.str.match(LEADING_BULLET_RE);
+    if (!m || it.str.length <= m[0].length) { out.push(it); continue; }
+    const head = m[1].trim();
+    // "o" chỉ là ký hiệu đầu dòng khi theo sau là chữ cái (tránh nhầm với từ thật)
+    if (head === 'o' && !/^\p{L}/u.test(it.str.slice(m[0].length))) { out.push(it); continue; }
+    const total = [...it.str].length;
+    const headLen = [...m[0]].length;
+    const wHead = it.w * (headLen / total);
+    out.push({ ...it, str: head, w: wHead * 0.6 });
+    out.push({ ...it, str: it.str.slice(m[0].length), x: it.x + wHead, w: it.w - wHead });
+  }
+  return out;
+}
+
+function buildSegments(rawItems: NormItem[]): Segment[] {
+  const items = splitLeadingBullets(rawItems);
   const sorted = [...items].sort((a, b) => a.y - b.y || a.x - b.x);
   const rows: NormItem[][] = [];
   for (const it of sorted) {
@@ -330,14 +454,21 @@ function buildSegments(items: NormItem[]): Segment[] {
         const gap = it.x - (prev.x + prev.w);
         const curText = cur.map(c => c.str).join('').trim();
         // Số mục / ký hiệu đầu dòng ("10", "1.2", "•", "a)") đứng tách khỏi chữ → khối riêng
-        const labelBreak = cur.length === 1 && LABEL_RE.test(curText) && gap > 0.25 * mainSize && /\p{L}/u.test(it.str);
+        const labelBreak = cur.length === 1 && LABEL_RE.test(curText) && gap > 0.2 * mainSize && /[\p{L}\p{N}(]/u.test(it.str);
         if (gap > 1.2 * mainSize || labelBreak) flush();
       }
       cur.push(it);
     }
     flush();
   }
-  return attachOrphanSuperscripts(segments);
+  const segs = attachOrphanSuperscripts(segments);
+  for (const sg of segs) sg.isLabel = LABEL_RE.test(sg.text.trim());
+  for (const sg of segs) {
+    if (sg.isLabel) continue;
+    sg.itemStart = segs.some(L => L.isLabel && L !== sg &&
+      Math.abs(L.y - sg.y) < 0.4 * sg.size && L.x1 <= sg.x0 + 1 && sg.x0 - L.x1 < 3 * sg.size);
+  }
+  return segs;
 }
 
 function makeSegment(items: NormItem[]): Segment {
@@ -387,6 +518,7 @@ function makeSegment(items: NormItem[]): Segment {
     bold: weight(i => i.bold) / letters > 0.5,
     italic: weight(i => i.italic) / letters > 0.5,
     serif: weight(i => i.serif) / letters >= 0.5,
+    hScale: median(items.flatMap(i => Array(Math.max(1, Math.min(20, letterCount(i.str)))).fill(i.hScale))),
   };
   detectLeader(seg);
   return seg;
@@ -437,7 +569,7 @@ function attachOrphanSuperscripts(segments: Segment[]): Segment[] {
 
 interface WorkBlock { lines: Segment[]; x0: number; x1: number; size: number; bold: boolean; }
 
-export function buildBlocks(items: NormItem[], pageWidth: number): LayoutBlock[] {
+export function buildBlocks(items: NormItem[], pageWidth: number, pageHeight = pageWidth * 1.414): LayoutBlock[] {
   const segments = buildSegments(items).filter(s => s.text.length > 0);
   segments.sort((a, b) => a.y - b.y || a.x0 - b.x0);
 
@@ -445,7 +577,7 @@ export function buildBlocks(items: NormItem[], pageWidth: number): LayoutBlock[]
   for (const seg of segments) {
     let bestBlock: WorkBlock | null = null;
     let bestGap = Infinity;
-    for (const b of work) {
+    for (const b of seg.itemStart || seg.isLabel ? [] : work) {
       const last = b.lines[b.lines.length - 1];
       if (last.leader) continue; // dòng mục lục có số trang = kết thúc mục
       if (Math.abs(seg.size - b.size) > 0.12 * b.size) continue;
@@ -480,9 +612,27 @@ export function buildBlocks(items: NormItem[], pageWidth: number): LayoutBlock[]
   const blocks = work.map(b => finalizeBlock(b, pageWidth));
   // Khối 1 dòng nằm sát lề phải của vùng nội dung (tiêu đề chạy, số trang…) → căn phải
   const rightEdge = Math.max(...blocks.map(b => b.x1));
+  const inHeaderFooter = (b: LayoutBlock) => b.bottom < pageHeight * 0.1 || b.top > pageHeight * 0.9;
   for (const b of blocks) {
-    if (b.lineCount === 1 && b.align === 'left' && !b.leader &&
+    if (b.lineCount === 1 && b.align === 'left' && !b.leader && inHeaderFooter(b) &&
         b.x0 > pageWidth * 0.4 && Math.abs(b.x1 - rightEdge) < 0.8 * b.size) b.align = 'right';
+  }
+  // Khối 1 dòng nằm giữa trang (tiêu đề chạy, tên chương) → căn giữa
+  for (const b of blocks) {
+    if (b.align === 'left' && b.lineCount === 1 && !b.leader && b.x0 > pageWidth * 0.15 &&
+        Math.abs((b.x0 + b.x1) / 2 - pageWidth / 2) < pageWidth * 0.015) b.align = 'center';
+  }
+  // Cột nhãn căn phải (nhãn hình nằm bên trái ảnh): ≥2 khối ngắn cùng cỡ, chung mép phải, khác mép trái
+  for (const b of blocks) {
+    if (b.align !== 'left' || b.leader || b.lineCount > 3) continue;
+    const similar = (o: LayoutBlock) => o !== b && o.lineCount <= 3 && Math.abs(o.size - b.size) < 0.2 * b.size;
+    const sameRight = blocks.filter(o => similar(o) && Math.abs(o.x1 - b.x1) < 0.4 * b.size);
+    const ragged = sameRight.filter(o => Math.abs(o.x0 - b.x0) > 1.5 * b.size).length;
+    const sameLeft = blocks.filter(o => similar(o) && Math.abs(o.x0 - b.x0) < 0.4 * b.size).length;
+    // Mép phải trùng mép một cột văn bản (đoạn nhiều dòng) → đó là lề cột, không phải cột nhãn căn phải
+    const columnEdge = blocks.some(o => o !== b && o.lineCount >= 2 && Math.abs(o.x1 - b.x1) < 0.6 * b.size &&
+      (o.align === 'justify' || o.lineCount >= 3));
+    if (!columnEdge && sameRight.length >= 2 && ragged >= 1 && sameRight.length > sameLeft) b.align = 'right';
   }
   return orderForReading(blocks, pageWidth);
 }
@@ -554,6 +704,11 @@ function finalizeBlock(b: WorkBlock, pageWidth: number): LayoutBlock {
     const someShorter = lines.some(l => l.x1 - l.x0 < width - 2 * b.size);
     if (allCentered && someShorter) align = 'center';
   }
+  if (align === 'left' && lines.length >= 2) {
+    const allRight = lines.every(l => Math.abs(l.x1 - b.x1) < 0.6 * b.size);
+    const ragged = lines.some(l => l.x0 > b.x0 + 2 * b.size);
+    if (allRight && ragged) align = 'right';
+  }
   if (align === 'left' && lines.length === 1 && b.bold && !last.leader) {
     const center = (b.x0 + b.x1) / 2;
     if (Math.abs(center - pageWidth / 2) < 0.02 * pageWidth && width < 0.8 * pageWidth) align = 'center';
@@ -585,6 +740,7 @@ function finalizeBlock(b: WorkBlock, pageWidth: number): LayoutBlock {
     translatable: isTranslatableText(plain),
     leader: last.leader ? { num: last.leader.num, right: last.x1 } : undefined,
     bodyRight: last.leader && lines.length > 1 ? Math.max(...lines.slice(0, -1).map(l => l.x1)) : undefined,
+    hScale: median(lines.map(l => l.hScale)) || 1,
   };
 }
 
@@ -626,6 +782,7 @@ function parseRich(translated: string, b: LayoutBlock, base: RunStyle): Word[] {
   const re = /<(\d+)>([\s\S]*?)<\/\1>/g;
   let last = 0;
   let m: RegExpExecArray | null;
+  translated = translated.replace(/<\/?(?!\d+>)[a-zA-Z][^>]*>/g, ''); // thẻ HTML lạ AI tự thêm (<i>, <b>, <sup>…)
   const clean = (t: string) => t.replace(/<\/?\d+>/g, '');
   while ((m = re.exec(translated))) {
     if (m.index > last) pieces.push({ text: clean(translated.slice(last, m.index)), style: base });
@@ -674,8 +831,8 @@ interface LaidOut {
   height: number;
 }
 
-function wordWidth(m: Measurer, w: Word, serif: boolean, size: number) {
-  return w.reduce((s, p) => s + m.width(p.text, fontCss(p.style, serif, size)), 0);
+function wordWidth(m: Measurer, w: Word, serif: boolean, size: number, hs = 1) {
+  return w.reduce((s, p) => s + m.width(p.text, fontCss(p.style, serif, size)), 0) * hs;
 }
 
 function layoutWords(
@@ -696,7 +853,8 @@ function layoutWordsInner(
   useBodyRight: boolean,
 ): LaidOut {
   const serif = b.serif;
-  const space = m.width(' ', fontCss(base, serif, size));
+  const hs = b.hScale || 1;
+  const space = m.width(' ', fontCss(base, serif, size)) * hs;
   const scale = size / b.size;
   const lineWidth = (i: number) => {
     const w = width - (i === 0 ? b.firstOffset : b.restOffset) * scale;
@@ -707,7 +865,7 @@ function layoutWordsInner(
   let line: Word[] = [];
   let lw = 0;
   for (const w of words) {
-    const ww = wordWidth(m, w, serif, size);
+    const ww = wordWidth(m, w, serif, size, hs);
     const limit = lineWidth(lines.length);
     if (line.length && lw + space + ww > limit) {
       lines.push(line);
@@ -722,10 +880,10 @@ function layoutWordsInner(
 
   // Dòng mục lục: chừa chỗ cho dấu chấm dẫn + số trang ở dòng cuối
   if (b.leader && lines.length) {
-    const numW = b.leader.num ? m.width(b.leader.num, fontCss(base, serif, size)) : 0;
-    const reserve = numW + m.width(' . . . ', fontCss(base, serif, size));
+    const numW = (b.leader.num ? m.width(b.leader.num, fontCss(base, serif, size)) : 0) * hs;
+    const reserve = numW + m.width(' . . . ', fontCss(base, serif, size)) * hs;
     const lastIdx = lines.length - 1;
-    const lastW = lines[lastIdx].reduce((s, w, i) => s + wordWidth(m, w, serif, size) + (i ? space : 0), 0);
+    const lastW = lines[lastIdx].reduce((s, w, i) => s + wordWidth(m, w, serif, size, hs) + (i ? space : 0), 0);
     if (lastW + reserve > lineWidth(lastIdx) && lines[lastIdx].length > 1) {
       const moved = lines[lastIdx].pop()!;
       lines.push([moved]);
@@ -743,14 +901,19 @@ function drawLaidOut(
   const serif = b.serif;
   const size = lo.size;
   const scale = size / b.size;
-  const space = m.width(' ', fontCss(base, serif, size));
+  const hs = b.hScale || 1;
+  const space = m.width(' ', fontCss(base, serif, size)) * hs;
   ctx.textBaseline = 'alphabetic';
+  const put = (text: string, x: number, y: number) => {
+    if (hs === 1) { ctx.fillText(text, x, y); return; }
+    ctx.save(); ctx.translate(x, y); ctx.scale(hs, 1); ctx.fillText(text, 0, 0); ctx.restore();
+  };
   let y = top + size * 0.93;
   lo.lines.forEach((line, i) => {
     const isLast = i === lo.lines.length - 1;
     const offset = (i === 0 ? b.firstOffset : b.restOffset) * scale;
     const avail = width - offset;
-    const widths = line.map(w => wordWidth(m, w, serif, size));
+    const widths = line.map(w => wordWidth(m, w, serif, size, hs));
     const natural = widths.reduce((s, w) => s + w, 0) + space * Math.max(0, line.length - 1);
     let x = x0 + offset;
     let gap = space;
@@ -767,8 +930,8 @@ function drawLaidOut(
         const font = fontCss(p.style, serif, size);
         ctx.font = font;
         ctx.fillStyle = p.style.color ? rgbCss(p.style.color) : '#1a1a1a';
-        ctx.fillText(p.text, x, y);
-        x += m.width(p.text, font);
+        put(p.text, x, y);
+        x += m.width(p.text, font) * hs;
       }
       if (wi < line.length - 1) x += gap;
     });
@@ -777,13 +940,13 @@ function drawLaidOut(
       ctx.font = font;
       ctx.fillStyle = base.color ? rgbCss(base.color) : '#1a1a1a';
       const right = b.leader.right;
-      const numW = b.leader.num ? m.width(b.leader.num, font) : 0;
-      const dot = m.width('.', font);
-      const step = dot + m.width(' ', font) * 0.6;
+      const numW = (b.leader.num ? m.width(b.leader.num, font) : 0) * hs;
+      const dot = m.width('.', font) * hs;
+      const step = dot + m.width(' ', font) * 0.6 * hs;
       let dx = x + space;
       const stopX = right - numW - (b.leader.num ? space : 0);
-      while (dx + dot <= stopX) { ctx.fillText('.', dx, y); dx += step; }
-      if (b.leader.num) ctx.fillText(b.leader.num, right - numW, y);
+      while (dx + dot <= stopX) { put('.', dx, y); dx += step; }
+      if (b.leader.num) put(b.leader.num, right - numW, y);
     }
     y += lo.lineH;
   });
@@ -833,6 +996,7 @@ interface BlockInfo {
   free: number;
   extLeft: number;
   extRight: number;
+  extLeftAvail: number; // chỗ trống bên trái (dùng khi bên phải hết chỗ)
   base: RunStyle;
   words: Word[];
 }
@@ -850,7 +1014,7 @@ export function paintTranslatedPage(
   const W = ctx.canvas.width, H = ctx.canvas.height;
   const img = ctx.getImageData(0, 0, W, H);
   const m = new Measurer(ctx);
-  const norm = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim();
+  const norm = (t: string) => t.replace(/<\/?[a-zA-Z0-9][^>]*>/g, '').replace(/\s+/g, ' ').trim();
 
   const targets = blocks.filter(b => {
     const t = translations[b.id];
@@ -869,7 +1033,7 @@ export function paintTranslatedPage(
     }
     const free = freeBelow(img, b, stats.bg, limit);
 
-    let extLeft = 0, extRight = 0;
+    let extLeft = 0, extRight = 0, extLeftAvail = 0;
     if (b.lineCount === 1 && !b.leader) {
       let right = W * 0.96, left = W * 0.04;
       const col = blocks.filter(o => o !== b && o.lineCount >= 2 && o.x0 < b.x1 && o.x1 > b.x0);
@@ -889,11 +1053,33 @@ export function paintTranslatedPage(
       } else if (b.align === 'right') {
         extLeft = left < b.x0 ? freeSide(img, b, stats.bg, b.x0 - 0.15 * b.size, left) : 0;
         extRight = 0;
+      } else {
+        extLeftAvail = left < b.x0 ? freeSide(img, b, stats.bg, b.x0 - 0.15 * b.size, left) : 0;
       }
     }
 
     const base: RunStyle = { ...b.baseStyle, color: b.baseStyle.color && !isDark(b.baseStyle.color) ? b.baseStyle.color : (stats.fg ?? b.baseStyle.color) };
-    info.set(b.id, { stats, free, extLeft, extRight, base, words: parseRich(translations[b.id], b, base) });
+    info.set(b.id, { stats, free, extLeft, extRight, extLeftAvail, base, words: parseRich(translations[b.id], b, base) });
+  }
+
+  /* --- Ký hiệu đầu dòng / số thứ tự đi kèm mỗi mục: di chuyển cùng mục khi mục bị đẩy xuống --- */
+  const companion = new Map<string, { L: LayoutBlock; patch: ImageData; x: number; y: number; bg: RGB }>();
+  const companionIds = new Set<string>();
+  for (const b of targets) {
+    let best: LayoutBlock | null = null;
+    for (const L of blocks) {
+      if (L === b || L.lineCount !== 1 || !LABEL_RE.test(L.plain)) continue;
+      if (L.x1 > b.x0 + 1 || b.x0 - L.x1 > 3 * b.size || Math.abs(L.top - b.top) > 0.5 * b.size) continue;
+      if (!best || L.x1 > best.x1) best = L;
+    }
+    if (!best) continue;
+    const x = Math.max(0, Math.floor(best.x0 - 0.1 * best.size));
+    const y = Math.max(0, Math.floor(best.top - 0.05 * best.size));
+    const w = Math.min(W - x, Math.ceil(best.x1 - best.x0 + 0.2 * best.size));
+    const h = Math.min(H - y, Math.ceil(best.bottom - best.top + 0.15 * best.size));
+    if (w <= 0 || h <= 0) continue;
+    companion.set(b.id, { L: best, patch: ctx.getImageData(x, y, w, h), x, y, bg: regionStats(img, x, y, x + w, y + h).bg });
+    companionIds.add(best.id);
   }
 
   /* --- Nhóm chảy: các khối liền nhau trong cùng cột --- */
@@ -911,7 +1097,7 @@ export function paintTranslatedPage(
       if (gap < -0.3 * Math.min(L.size, b.size) || gap > 2.6 * Math.max(L.size, b.size)) continue;
       if (colorDist(li.stats.bg, bi.stats.bg) > 30) continue;
       if (li.free < gap - 0.2 * b.size - 4) continue; // giữa hai khối có hình/đường kẻ
-      const between = blocks.some(o => o !== L && o !== b && o.top >= L.bottom - 1 && o.bottom <= b.top + 1 &&
+      const between = blocks.some(o => o !== L && o !== b && !companionIds.has(o.id) && o.top >= L.bottom - 1 && o.bottom <= b.top + 1 &&
         Math.min(o.x1, b.x1) - Math.max(o.x0, b.x0) > 0);
       if (between) continue;
       g.push(b);
@@ -929,11 +1115,12 @@ export function paintTranslatedPage(
   /* --- Dàn từng nhóm --- */
   // "Bạn cùng hàng": khối khác nằm ngang hàng (số mục, số trang, ô bảng bên cạnh) → không được đẩy dòng xuống
   const hasRowMate = (b: LayoutBlock, g: LayoutBlock[]) => blocks.some(o =>
-    o !== b && !g.includes(o) &&
+    o !== b && !g.includes(o) && !companionIds.has(o.id) &&
     (o.x1 <= b.x0 + 1 || o.x0 >= b.x1 - 1) &&
     Math.abs(o.top - b.top) < 0.6 * Math.min(o.size, b.size));
 
-  const plans: { b: LayoutBlock; lo: LaidOut; top: number; x0: number; width: number }[] = [];
+  const plans: { b: LayoutBlock; lo: LaidOut; top: number; x0: number; width: number; orig: LayoutBlock }[] = [];
+  const rowMate = new Set(targets.filter(b => hasRowMate(b, [b])).map(b => b.id)); // ô bảng, mục có bạn cùng hàng
   for (const g of groups) {
     const lastI = info.get(g[g.length - 1].id)!;
     const availBottom = g[g.length - 1].bottom + lastI.free;
@@ -941,7 +1128,9 @@ export function paintTranslatedPage(
     const cascade = g.length > 1 && !g.some(b => hasRowMate(b, g));
     const widthOf = (b: LayoutBlock) => { const inf = info.get(b.id)!; return Math.max(b.x1 - b.x0 + inf.extLeft + inf.extRight, b.size * 2); };
 
+    let overrides: ({ x0: number; width: number } | null)[] = [];
     const tryFit = (s: number, tight: number) => {
+      overrides = g.map(() => null);
       const los: LaidOut[] = [];
       const tops: number[] = [];
       let y = g[0].top;
@@ -949,7 +1138,24 @@ export function paintTranslatedPage(
       g.forEach((b, i) => {
         const inf = info.get(b.id)!;
         const ratio = Math.min(1.6, Math.max(1.05, (b.leading / b.size) * tight));
-        const lo = layoutWords(m, inf.words, b, inf.base, widthOf(b), b.size * s, ratio);
+        let lo = layoutWords(m, inf.words, b, inf.base, widthOf(b), b.size * s, ratio);
+        overrides[i] = null;
+        if (b.lineCount === 1 && b.align === 'left' && lo.lines.length > 1 && inf.extLeftAvail > b.size && !rowMate.has(b.id)) {
+          // Bên phải hết chỗ → mượn chỗ bên trái, giữ mép phải (giống tiêu đề/nhãn căn phải)
+          const wide = layoutWords(m, inf.words, { ...b, align: 'right' }, inf.base, widthOf(b) + inf.extLeftAvail, b.size * s, ratio);
+          if (wide.lines.length < lo.lines.length) {
+            lo = wide;
+            overrides[i] = { x0: b.x0 - inf.extLeft - inf.extLeftAvail, width: widthOf(b) + inf.extLeftAvail };
+          }
+        }
+        if (b.lineCount === 1 && lo.lines.length > 1 && inf.free < 0.6 * b.size) {
+          // Không còn chỗ bên dưới (tiêu đề trên thanh màu, nhãn sát hình) → thu nhỏ riêng khối này để giữ 1 dòng
+          for (let s2 = s - 0.03; s2 >= 0.6 - 1e-6; s2 -= 0.03) {
+            const ov = overrides[i];
+            const one = layoutWords(m, inf.words, ov ? { ...b, align: 'right' } : b, inf.base, ov ? ov.width : widthOf(b), b.size * s2, ratio);
+            if (one.lines.length === 1) { lo = one; break; }
+          }
+        }
         los.push(lo);
         if (cascade) {
           // Giữ đúng vị trí gốc để dễ đối chiếu; chỉ đẩy xuống khi khối phía trên dài hơn chỗ của nó
@@ -982,9 +1188,14 @@ export function paintTranslatedPage(
     } else if (chosen.s < 0.985) {
       report.shrunkIds.push(...g.map(b => b.id));
     }
+    if (!chosen.los.length) overrides = g.map(() => null);
+    const finalOverrides = overrides.slice();
     g.forEach((b, i) => {
       const inf = info.get(b.id)!;
-      plans.push({ b, lo: chosen!.los[i], top: chosen!.tops[i], x0: b.x0 - inf.extLeft, width: widthOf(b) });
+      const ov = finalOverrides[i];
+      plans.push(ov
+        ? { b: { ...b, align: 'right' }, lo: chosen!.los[i], top: chosen!.tops[i], x0: ov.x0, width: ov.width, orig: b }
+        : { b, lo: chosen!.los[i], top: chosen!.tops[i], x0: b.x0 - inf.extLeft, width: widthOf(b), orig: b });
     });
   }
 
@@ -994,13 +1205,23 @@ export function paintTranslatedPage(
     const g = groupOf.get(b.id)!;
     const idx = g.indexOf(b);
     const padX = 0.15 * b.size;
-    const plan = plans.find(p => p.b === b)!;
+    const plan = plans.find(p => p.orig === b)!;
     let bottom = b.bottom + 0.1 * b.size;
     if (idx < g.length - 1) bottom = Math.max(bottom, g[idx + 1].top);
     bottom = Math.max(bottom, plan.top + plan.lo.height + 0.15 * b.size);
-    ctx.fillStyle = rgbCss(inf.stats.bg, inf.stats.uniform >= 0.45 ? 1 : 0.93);
+    ctx.fillStyle = rgbCss(inf.stats.bg);
     ctx.fillRect(Math.min(b.x0, plan.x0) - padX, b.top - 0.05 * b.size, Math.max(b.x1 - b.x0, plan.width) + 2 * padX, bottom - b.top + 0.05 * b.size);
   }
+
+  /* --- Dời ký hiệu đầu dòng theo mục (sao chép nguyên điểm ảnh gốc) --- */
+  const moves = plans
+    .map(p => ({ c: companion.get(p.b.id), shift: Math.round(p.top - p.b.top) }))
+    .filter((m): m is { c: NonNullable<typeof m.c>; shift: number } => !!m.c && Math.abs(m.shift) >= 1);
+  for (const m of moves) { // lượt 1: xoá hết vị trí cũ
+    ctx.fillStyle = rgbCss(m.c.bg);
+    ctx.fillRect(m.c.x, m.c.y, m.c.patch.width, m.c.patch.height);
+  }
+  for (const m of moves) ctx.putImageData(m.c.patch, m.c.x, m.c.y + m.shift); // lượt 2: đặt vào vị trí mới
 
   /* --- Vẽ --- */
   for (const p of plans) {

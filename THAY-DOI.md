@@ -27,6 +27,48 @@ File mới:
 File sửa: `src/App.tsx` (tab thứ 3 ở khung phải + nút mở nhanh), `src/services/geminiService.ts` (hàm `translateLayoutBlocks`), `src/services/translationService.ts`, `index.html` (font Tinos, Arimo).
 
 
+
+
+### Cập nhật v6 — khớp font gốc, sửa dịch thường
+
+**Giữ định dạng:**
+- **Đo cỡ chữ thật trên ảnh** (chiều cao nét chữ) thay vì tin cỡ ghi trong file — nhiều sách ghi cỡ lớn hơn thực tế → trước đây chữ dịch quá to, phải co cả cột, vùng che tràn ra ngoài thanh tiêu đề (mảng trắng trên thanh xám).
+- **Co ngang theo độ rộng font gốc** (font hẹp/mảnh) → chữ dịch có cùng “dáng” với bản gốc.
+- **Nhận chữ đậm theo mật độ mực** khi tên font không ghi “Bold”.
+- **Màu nền che = màu chính xác** phổ biến nhất (không lấy trung bình) → hết mảng xám mờ trên nền trắng.
+- Lọc thẻ HTML AI tự thêm (`<i>`, `<b>`, `<sup>`…).
+- Tiêu đề 1 dòng không còn chỗ bên dưới (trên thanh màu, sát hình) → ưu tiên mượn chỗ bên trái, nếu không được thì thu nhỏ riêng tiêu đề để giữ 1 dòng, không đè nội dung bên dưới.
+- Trang đã dịch được tự dựng lại theo cách hiệu chỉnh mới (đệm ảnh v6), không tốn token.
+
+**Dịch thường:**
+- Prompt mới: dịch **toàn bộ** (tiêu đề, tiêu đề phụ, nhãn hình…), chỉ bỏ hẳn tiêu đề chạy/dải chương bên lề/số trang; quy định rõ tiêu đề (###), tiêu đề phụ (**in đậm**, không phải gạch đầu dòng), danh sách nhiều cấp; kèm ví dụ ngắn.
+- Chế độ đọc ảnh dùng mức suy nghĩ `low` (đủ cho vừa đọc ảnh vừa dàn trình bày; vẫn rẻ hơn nhiều so với mặc định `high`).
+- **Mới: “Ưu tiên lớp chữ”** (Cài đặt, mặc định bật): trang PDF có chữ thật → dựng sẵn Markdown đúng cấu trúc từ lớp chữ (tiêu đề theo cỡ/đậm, danh sách đúng cấp theo từng cột, mục lục, bỏ tiêu đề chạy/số trang/dải chương) rồi **chỉ gửi chữ** cho AI dịch (`translateMarkdownPageStream`, suy nghĩ `minimal`). Không gửi ảnh → nhanh hơn, ít token hơn, không lỗi đọc nhầm chữ. Trang scan, trang có bảng hoặc trang hình nhiều nhãn rời → tự dùng cách đọc ảnh như cũ. Lỗi giữa chừng → tự chuyển sang đọc ảnh.
+
+### Cập nhật v5 — danh sách gạch đầu dòng, nhãn hình, dịch toàn bộ giữ định dạng, tăng tốc dịch thường
+
+**Giữ định dạng (layoutEngine):**
+- Nhận diện ký hiệu đầu dòng: • ● ▪ ■ ◦ ○ ‣ ► ➢ ✓ ❖ – — * **o** (cấp 2 kiểu Courier) và ký hiệu Wingdings/Symbol; tách ký hiệu dính liền chữ (`• Breast`).
+- **Mỗi mục danh sách là một khối riêng** (trước đây các mục thẳng lề bị gộp thành một đoạn → chữ dính, chồng lên nhau).
+- Khi mục dịch dài hơn và bị đẩy xuống, **ký hiệu/số thứ tự di chuyển theo** (sao chép nguyên điểm ảnh gốc) → không phải thu nhỏ cả cột.
+- Lớp che chữ gốc luôn **đục 100%** (trước đây 93% ở vùng nền không đều → còn bóng chữ tiếng Anh mờ, ví dụ thanh tiêu đề nền xám).
+- **Cột nhãn hình căn phải** (nhãn bên trái ảnh, có đường chỉ dẫn) được nhận diện → bản dịch dài giãn sang trái, không vỡ thành nhiều dòng hẹp.
+- Tiêu đề 1 dòng sát vật cản bên phải: **mượn chỗ bên trái** (giữ mép phải) để nằm gọn 1 dòng. Không áp dụng cho ô bảng.
+- Căn giữa cho tiêu đề chạy giữa trang; quy tắc căn phải “sát lề phải” chỉ còn áp dụng cho dòng đầu/cuối trang.
+
+**Dịch toàn bộ giữ định dạng:**
+- Cài đặt → “Dịch toàn bộ tài liệu” → nút mới **“Dịch toàn bộ giữ định dạng”**: tự chuyển sang tab Giữ định dạng và chạy toàn bộ tài liệu; tiến độ hiện trên nút Dừng (x/N) và trong Cài đặt.
+- Dịch **song song 2–3 trang** (3 khi dùng key hệ thống hoặc có ≥3 key).
+- Trang đã dịch trước đó (kể cả trên máy khác) được dựng lại, không tốn token; trang scan được bỏ qua.
+- Ảnh trang đã dịch được đọc lại từ IndexedDB (lưu trên ổ đĩa) để **không chiếm RAM** với tài liệu hàng nghìn trang; chỉ giữ tối đa 24 ảnh đang mở.
+- Xuất PDF tài liệu lớn tự **chia nhiều file (150 trang/file)**.
+
+**Dịch thường nhanh hơn, ít token hơn:**
+- Gemini 3 mặc định “suy nghĩ” mức CAO trước khi trả lời (tính tiền như token đầu ra, làm chậm). Nay gửi kèm cấu hình: Gemini 3.x Flash → `thinkingLevel: minimal` (không nhận thì lùi về `low`), 3.x Pro → `low`, 2.5 Flash/Flash-Lite → `thinkingBudget: 0`. Nếu model không nhận tham số → tự bỏ và thử lại ngay, không làm hỏng việc dịch.
+- Proxy kiểu OpenAI (ShopAIKey/key hệ thống): gửi `reasoning_effort` cho model Gemini có thinking; proxy không hỗ trợ → tự bỏ. `/api/ai/chat` chuyển tiếp tham số này (chỉ nhận none/minimal/low/medium/high).
+- Giới hạn `maxOutputTokens: 8192` để chặn trường hợp model viết lan man.
+- Áp dụng cho cả dịch trang thường (stream & không stream) và dịch giữ định dạng.
+
 ### Cập nhật v4 — giống bản gốc hơn & giao diện song song
 
 **Dàn trang (layoutEngine):**

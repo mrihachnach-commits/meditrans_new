@@ -13,6 +13,7 @@ import {
   renderPageFromPairs,
   deleteLayoutPages,
   exportLayoutPdf,
+  loadLayoutPage,
   loadLayoutPages,
   parsePageRange,
   saveLayoutPage,
@@ -37,6 +38,9 @@ interface LayoutTranslatePanelProps {
   /** Vùng cuộn của trình xem PDF bên trái → cuộn đồng bộ hai bên. */
   syncScrollEl?: HTMLElement | null;
   fullScreen?: boolean;
+  /** Yêu cầu dịch hàng loạt từ Cài đặt ("Dịch toàn bộ giữ định dạng"). Đổi id để kích hoạt. */
+  bulkRequest?: { id: number; pages: number[] } | null;
+  onBulkStateChange?: (s: { running: boolean; done: number; total: number }) => void;
 }
 
 function friendlyError(err: any): string {
@@ -52,7 +56,7 @@ const iconBtn = 'inline-flex items-center justify-center gap-1 h-7 px-2 rounded-
 
 export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   pdfDoc, numPages, currentPage, docKey, fileName, translator, showToast, cloud,
-  toolbarTarget, pageBox, syncScrollEl, fullScreen,
+  toolbarTarget, pageBox, syncScrollEl, fullScreen, bulkRequest, onBulkStateChange,
 }) => {
   const [results, setResults] = useState<Record<number, LayoutPageResult>>({});
   const [errors, setErrors] = useState<Record<number, string>>({});
@@ -60,6 +64,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const [showRange, setShowRange] = useState(false);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; page: number | null }>({ done: 0, total: 0, page: null });
+  const [inFlight, setInFlight] = useState<number[]>([]);
   const [exporting, setExporting] = useState(false);
   const [loadingCache, setLoadingCache] = useState(true);
   const [autoFollow, setAutoFollow] = useState(false);
@@ -84,6 +89,10 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     if (hit) URL.revokeObjectURL(hit.url);
     const url = URL.createObjectURL(r.blob);
     urlCache.current.set(r.pageNumber, { blob: r.blob, url });
+    if (urlCache.current.size > 24) { // giữ tối đa 24 ảnh đang mở
+      const oldest = urlCache.current.keys().next().value as number;
+      if (oldest !== r.pageNumber) { URL.revokeObjectURL(urlCache.current.get(oldest)!.url); urlCache.current.delete(oldest); }
+    }
     return url;
   }, []);
 
@@ -142,8 +151,9 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     if (!pairs?.length) return null;
     const res = await renderPageFromPairs(pdfDoc, page, pairs);
     await saveLayoutPage(docKey, res);
-    setResults(prev => ({ ...prev, [page]: res }));
-    return res;
+    const stored = (await loadLayoutPage(docKey, page)) || res; // bản trên ổ đĩa → giải phóng RAM
+    setResults(prev => ({ ...prev, [page]: stored }));
+    return stored;
   }, [pdfDoc, docKey]);
 
   useEffect(() => {
@@ -172,36 +182,66 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     setRunning(true);
     setShowRange(false);
 
+    // Dịch song song 2–3 trang (key hệ thống / nhiều key → 3), mỗi key vẫn được giãn nhịp trong GeminiService
+    const keys: string[] = (translator as any).apiKeys || [];
+    const concurrency = todo.length <= 1 ? 1 : (keys.includes('system_proxy') || keys.length >= 3 ? 3 : 2);
+    const queue = [...todo];
     let ok = 0;
-    for (let i = 0; i < todo.length; i++) {
-      const p = todo[i];
-      if (controller.signal.aborted) break;
-      setProgress({ done: i, total: todo.length, page: p });
-      setErrors(prev => { const n = { ...prev }; delete n[p]; return n; });
-      try {
-        if (!force && cloudPairsRef.current[p]?.length) {
-          await rebuildFromCloud(p);
+    let finished = 0;
+    let fatal = false;
+    setProgress({ done: 0, total: todo.length, page: todo[0] });
+    onBulkStateChange?.({ running: true, done: 0, total: todo.length });
+
+    const worker = async () => {
+      while (queue.length && !controller.signal.aborted && !fatal) {
+        const p = queue.shift()!;
+        setInFlight(prev => [...prev, p]);
+        setErrors(prev => { const n = { ...prev }; delete n[p]; return n; });
+        try {
+          if (!force && cloudPairsRef.current[p]?.length) {
+            await rebuildFromCloud(p); // đã có bản dịch lưu trên đám mây → không gọi AI
+          } else {
+            const res = await translatePageWithLayout(pdfDoc, p, translator, controller.signal);
+            await saveLayoutPage(docKey, res);
+            const stored = (await loadLayoutPage(docKey, p)) || res; // bản trên ổ đĩa → giải phóng RAM
+            setResults(prev => ({ ...prev, [p]: stored }));
+            pushToCloud(p, res.pairs);
+          }
           ok++;
-          continue;
+        } catch (err: any) {
+          if (!(controller.signal.aborted || /aborted/i.test(String(err?.message)))) {
+            console.error(`[Layout] Lỗi dịch trang ${p}:`, err);
+            setErrors(prev => ({ ...prev, [p]: friendlyError(err) }));
+            if (/level 2|api key|key khả dụng/i.test(String(err?.message))) fatal = true;
+          }
+        } finally {
+          finished++;
+          setInFlight(prev => prev.filter(x => x !== p));
+          setProgress({ done: finished, total: todo.length, page: p });
+          onBulkStateChange?.({ running: true, done: finished, total: todo.length });
         }
-        const res = await translatePageWithLayout(pdfDoc, p, translator, controller.signal);
-        await saveLayoutPage(docKey, res);
-        setResults(prev => ({ ...prev, [p]: res }));
-        pushToCloud(p, res.pairs);
-        ok++;
-      } catch (err: any) {
-        if (controller.signal.aborted || /aborted/i.test(String(err?.message))) break;
-        console.error(`[Layout] Lỗi dịch trang ${p}:`, err);
-        setErrors(prev => ({ ...prev, [p]: friendlyError(err) }));
-        if (/level 2|api key|key khả dụng/i.test(String(err?.message))) break;
       }
-    }
+    };
+    await Promise.all(Array.from({ length: concurrency }, worker));
+
     setProgress({ done: 0, total: 0, page: null });
+    setInFlight([]);
     setRunning(false);
     abortRef.current = null;
+    onBulkStateChange?.({ running: false, done: finished, total: todo.length });
+    if (fatal) showToast('Dừng dịch: không có API Key khả dụng hoặc tài khoản chưa đủ quyền.', 'error');
     if (controller.signal.aborted) showToast(`Đã dừng. Hoàn thành ${ok} trang.`, 'info');
     else if (todo.length > 1 && ok > 0) showToast(`Đã dịch giữ định dạng ${ok} trang.`, 'success');
-  }, [translator, pdfDoc, docKey, showToast, rebuildFromCloud, pushToCloud]);
+  }, [translator, pdfDoc, docKey, showToast, rebuildFromCloud, pushToCloud, onBulkStateChange]);
+
+  // Yêu cầu "Dịch toàn bộ giữ định dạng" từ Cài đặt
+  const lastBulkId = useRef<number | null>(null);
+  useEffect(() => {
+    if (!bulkRequest || bulkRequest.id === lastBulkId.current || loadingCache || cloudLoading) return;
+    lastBulkId.current = bulkRequest.id;
+    if (abortRef.current) { showToast('Đang có tiến trình dịch giữ định dạng chạy.', 'info'); return; }
+    runPages(bulkRequest.pages);
+  }, [bulkRequest, loadingCache, cloudLoading, runPages, showToast]);
 
   useEffect(() => {
     if (!autoFollow || loadingCache || running) return;
@@ -243,9 +283,17 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         if (r && !r.scanned) pages.push(r);
       }
       if (pages.length === 0) throw new Error('Không có trang hợp lệ để xuất.');
-      const blob = await exportLayoutPdf(pages);
-      saveAs(blob, `${baseName}_ban-dich-giu-dinh-dang.pdf`);
-      showToast(`Đã xuất PDF ${pages.length} trang.`, 'success');
+      // Tài liệu lớn: chia thành nhiều file (150 trang/file) để không tràn bộ nhớ trình duyệt
+      const PART = 150;
+      const parts = Math.ceil(pages.length / PART);
+      for (let i = 0; i < parts; i++) {
+        const slice = pages.slice(i * PART, (i + 1) * PART);
+        const blob = await exportLayoutPdf(slice);
+        const range = `${slice[0].pageNumber}-${slice[slice.length - 1].pageNumber}`;
+        saveAs(blob, parts > 1 ? `${baseName}_ban-dich-giu-dinh-dang_tr${range}.pdf` : `${baseName}_ban-dich-giu-dinh-dang.pdf`);
+        if (parts > 1) await new Promise(r => setTimeout(r, 800));
+      }
+      showToast(parts > 1 ? `Đã xuất ${pages.length} trang thành ${parts} file PDF.` : `Đã xuất PDF ${pages.length} trang.`, 'success');
     } catch (e: any) {
       showToast(`Lỗi xuất PDF: ${e?.message || e}`, 'error');
     } finally {
@@ -285,7 +333,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const current = results[currentPage];
   const currentUrl = urlFor(current);
   const translatedCount = new Set([...Object.keys(results), ...Object.keys(cloudPairs)]).size;
-  const busyHere = (running && progress.page === currentPage) || rebuilding === currentPage;
+  const busyHere = inFlight.includes(currentPage) || rebuilding === currentPage;
   const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
   const hasSaved = !!current || !!cloudPairs[currentPage];
 
@@ -313,7 +361,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       {running ? (
         <button onClick={() => abortRef.current?.abort()} className={`${iconBtn} bg-rose-50 text-rose-600 border border-rose-100 hover:bg-rose-100`} title="Dừng dịch">
           <Square className="w-3 h-3 fill-current" />
-          <span>{progress.total > 1 ? `${progress.done + 1}/${progress.total}` : 'Dừng'}</span>
+          <span>{progress.total > 1 ? `${progress.done}/${progress.total}` : 'Dừng'}</span>
         </button>
       ) : (
         <button onClick={() => runPages([currentPage])} disabled={loadingCache || cloudLoading || hasSaved}

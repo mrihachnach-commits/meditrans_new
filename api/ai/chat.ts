@@ -103,7 +103,7 @@ export default async function handler(req: any, res: any) {
   }
 
   const bodyData = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-  const { model, messages, stream, temperature, max_tokens } = bodyData || {};
+  const { model, messages, stream, temperature, max_tokens, reasoning_effort } = bodyData || {};
 
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: "Danh sách tin nhắn (messages) không hợp lệ." });
@@ -132,7 +132,9 @@ export default async function handler(req: any, res: any) {
     messages,
     stream: Boolean(stream),
     temperature: typeof temperature === 'number' ? temperature : 0.2,
-    ...(typeof max_tokens === 'number' ? { max_tokens } : {})
+    ...(typeof max_tokens === 'number' ? { max_tokens } : {}),
+    // Giảm "suy nghĩ" của model để tiết kiệm token/thời gian (chỉ nhận giá trị hợp lệ)
+    ...(['none', 'minimal', 'low', 'medium', 'high'].includes(reasoning_effort) ? { reasoning_effort } : {})
   };
 
   // 5. Execute Upstream Request with Key Rotation

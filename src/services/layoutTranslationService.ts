@@ -128,7 +128,7 @@ export async function analyzePage(pdfDoc: PDFDocumentProxy, pageNumber: number) 
 
   let items = normalizeItems(rawItems, viewport.transform, styleResolver(page, textContent.styles));
   if (!scanned) items = annotateItemColors(ctx, items);
-  const blocks = scanned ? [] : buildBlocks(items, canvas.width);
+  const blocks = scanned ? [] : buildBlocks(items, canvas.width, canvas.height);
 
   return { page, canvas, ctx, blocks, scanned, widthPt: base.width, heightPt: base.height };
 }
@@ -240,6 +240,121 @@ export async function renderPageFromPairs(
 }
 
 /* ------------------------------------------------------------------ */
+/* Dịch thường theo lớp chữ: dựng Markdown từ bố cục đã phân tích     */
+/* ------------------------------------------------------------------ */
+
+const MD_LABEL_RE = /^(\d{1,3}(\.\d{1,3})*[.)]?|[a-zA-Z][.)]|\(?[ivxIVX]{1,4}[.)]|[•●▪■◦○‣►▸➢➤✓✔❖◆◇□▫·∙§\-–—*o\uF0A7\uF0B7\uF0D8\uF076\uF0FC\uF0A8\uF06E\uF0E0])$/;
+
+export interface PageMarkdown {
+  eligible: boolean;
+  markdown: string;
+  reason?: 'scanned' | 'table' | 'figure' | 'empty';
+}
+
+/** Chữ có thẻ <n> → Markdown (đoạn in đậm/nghiêng giữa câu giữ dạng **…** / *…*). */
+function blockToMarkdownText(b: LayoutBlock): string {
+  let t = b.text.replace(/<(\d+)>([\s\S]*?)<\/\1>/g, (_m, k, inner) => {
+    const st = b.styles[parseInt(k, 10) - 1];
+    if (!st || !inner.trim()) return inner;
+    if (st.bold && !b.baseStyle.bold) return `**${inner}**`;
+    if (st.italic && !b.baseStyle.italic) return `*${inner}*`;
+    return inner;
+  });
+  t = t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim();
+  if (b.leader) t = `${t} … ${b.leader.num}`.trim();
+  return t;
+}
+
+/**
+ * Dựng Markdown chuẩn cấu trúc từ lớp chữ PDF (tiêu đề, tiêu đề phụ, danh sách nhiều cấp, đoạn văn, theo thứ tự cột).
+ * Trang scan hoặc có bảng → không đủ điều kiện (dùng cách gửi ảnh như cũ).
+ */
+export async function buildPageMarkdown(pdfDoc: PDFDocumentProxy, pageNumber: number): Promise<PageMarkdown> {
+  await ensureLayoutFonts();
+  const a = await analyzePage(pdfDoc, pageNumber);
+  try { a.page.cleanup?.(); } catch { /* ignore */ }
+  if (a.scanned) return { eligible: false, markdown: '', reason: 'scanned' };
+  const W = a.canvas.width, H = a.canvas.height;
+  const blocks = a.blocks;
+
+  // Bảng biểu: nhiều khối chữ có ≥2 khối khác nằm ngang hàng → để mô hình đọc ảnh dựng bảng
+  const rowPeers = (b: LayoutBlock) => blocks.filter(o => o !== b && (o.translatable || /\d/.test(o.plain)) &&
+    !MD_LABEL_RE.test(o.plain.trim()) && (o.x1 <= b.x0 + 1 || o.x0 >= b.x1 - 1) &&
+    Math.abs(o.top - b.top) < 0.6 * Math.min(o.size, b.size)).length;
+  const tableish = blocks.filter(b => b.translatable && rowPeers(b) >= 2).length;
+  if (tableish >= 4) return { eligible: false, markdown: '', reason: 'table' };
+
+  const sizes: number[] = [];
+  for (const b of blocks) if (b.translatable) for (let i = 0; i < Math.min(40, b.plain.length); i++) sizes.push(b.size);
+  sizes.sort((x, y) => x - y);
+  const body = sizes[Math.floor(sizes.length / 2)] || 12;
+
+  const furniture = (b: LayoutBlock) =>
+    b.bottom < H * 0.065 || b.top > H * 0.94 ||                                         // sát mép trên/dưới
+    ((b.bottom < H * 0.11 || b.top > H * 0.9) && b.lineCount === 1 && b.size < 0.97 * body) || // tiêu đề chạy chữ nhỏ
+    b.x1 < W * 0.09 || b.x0 > W * 0.91;                                                  // dải chương bên lề
+  const content = blocks.filter(b => b.translatable && !furniture(b));
+  if (content.length === 0) return { eligible: false, markdown: '', reason: 'empty' };
+
+  const labelOf = (b: LayoutBlock) => {
+    let best: LayoutBlock | null = null;
+    for (const L of blocks) {
+      if (L === b || L.lineCount !== 1 || !MD_LABEL_RE.test(L.plain.trim())) continue;
+      if (L.x1 > b.x0 + 1 || b.x0 - L.x1 > 3 * b.size || Math.abs(L.top - b.top) > 0.5 * b.size) continue;
+      if (!best || L.x1 > best.x1) best = L;
+    }
+    return best;
+  };
+
+  // Trang hình nhiều nhãn ngắn rời rạc → để mô hình đọc ảnh (cần nhìn hình mới hiểu nhãn)
+  const shortLabels = content.filter(b => !labelOf(b) && b.lineCount === 1 && b.plain.split(/\s+/).length <= 6 && !b.bold && b.size <= 1.05 * body).length;
+  const paragraphs = content.filter(b => b.lineCount >= 3).length;
+  if (shortLabels >= 5 && shortLabels > content.length * 0.5 && paragraphs <= 1) return { eligible: false, markdown: '', reason: 'figure' };
+
+  // Cấp danh sách theo từng cột: gom vị trí ký hiệu đầu dòng thành cụm; cách nhau > 4 cỡ chữ = sang cột khác
+  const labelXs = blocks.filter(L => L.lineCount === 1 && MD_LABEL_RE.test(L.plain.trim())).map(L => ({ x: L.x0, size: L.size }))
+    .sort((p, q) => p.x - q.x);
+  const clusters: { x: number; col: number; idx: number }[] = [];
+  for (const { x, size } of labelXs) {
+    const last = clusters[clusters.length - 1];
+    if (last && x - last.x < 0.5 * size) continue;
+    if (!last || x - last.x > 4 * size) clusters.push({ x, col: last ? last.col + 1 : 0, idx: 0 });
+    else clusters.push({ x, col: last.col, idx: last.idx + 1 });
+  }
+  const levelOf = (x: number, size: number) => {
+    let best = clusters[0], d = Infinity;
+    for (const c of clusters) { const dd = Math.abs(c.x - x); if (dd < d) { d = dd; best = c; } }
+    return best && d < 1.5 * size ? best.idx : 0;
+  };
+
+  const out: string[] = [];
+  let prevWasItem = false;
+  for (const b of content) {
+    const text = blockToMarkdownText(b);
+    if (!text) continue;
+    const L = labelOf(b);
+    if (L) {
+      const level = levelOf(L.x0, L.size);
+      const lab = L.plain.trim();
+      const marker = /^\d{1,3}[.)]$/.test(lab) ? `${lab.replace(')', '.')}` : /^[a-zA-Z][.)]$|^\(?[ivxIVX]+[.)]$/.test(lab) ? `- ${lab}` : '-';
+      out.push(`${prevWasItem ? '' : '\n'}${'  '.repeat(level)}${marker} ${text}`);
+      prevWasItem = true;
+      continue;
+    }
+    const caps = b.plain === b.plain.toUpperCase() && /\p{Lu}/u.test(b.plain);
+    let line: string;
+    if (b.size >= 1.35 * body) line = `## ${text}`;
+    else if ((b.bold && (b.size >= 1.12 * body || caps)) || (b.lineCount <= 2 && b.size >= 1.12 * body)) line = `### ${text}`;
+    else if (b.bold && b.lineCount === 1 && b.plain.length < 90) line = `**${text.replace(/\*\*/g, '')}**`;
+    else line = text;
+    out.push(`\n${line}`);
+    prevWasItem = false;
+  }
+  const markdown = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return markdown ? { eligible: true, markdown } : { eligible: false, markdown: '', reason: 'empty' };
+}
+
+/* ------------------------------------------------------------------ */
 /* Lưu đệm IndexedDB                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -259,7 +374,7 @@ function openLayoutDB(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v4';
+const ENGINE_VERSION = 'v6';
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 export async function saveLayoutPage(docKey: string, result: LayoutPageResult): Promise<void> {
@@ -273,6 +388,20 @@ export async function saveLayoutPage(docKey: string, result: LayoutPageResult): 
     });
   } catch (e) {
     console.warn('[Layout] Không lưu được đệm trang:', e);
+  }
+}
+
+/** Đọc lại 1 trang từ IndexedDB (ảnh trả về được trình duyệt lưu trên ổ đĩa, không chiếm RAM). */
+export async function loadLayoutPage(docKey: string, page: number): Promise<LayoutPageResult | null> {
+  try {
+    const db = await openLayoutDB();
+    return await new Promise(resolve => {
+      const req = db.transaction(STORE, 'readonly').objectStore(STORE).get(cacheKey(docKey, page));
+      req.onsuccess = () => resolve((req.result as LayoutPageResult) || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
   }
 }
 

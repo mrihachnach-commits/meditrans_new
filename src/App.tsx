@@ -16,6 +16,7 @@ import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken,
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { LayoutTranslatePanel } from './components/LayoutTranslatePanel';
+import { buildPageMarkdown } from './services/layoutTranslationService';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
 
 const PDFJS_VERSION = '3.11.174';
@@ -600,6 +601,15 @@ export default function App() {
   // Tab "Giữ định dạng" được giữ mounted sau lần mở đầu để việc dịch nhiều trang không bị huỷ khi chuyển tab
   const [layoutPanelMounted, setLayoutPanelMounted] = useState(false);
   const [layoutToolbarEl, setLayoutToolbarEl] = useState<HTMLDivElement | null>(null);
+  const [layoutBulkRequest, setLayoutBulkRequest] = useState<{ id: number; pages: number[] } | null>(null);
+  const [layoutBulkState, setLayoutBulkState] = useState<{ running: boolean; done: number; total: number }>({ running: false, done: 0, total: 0 });
+  // Dịch thường ưu tiên lớp chữ (không gửi ảnh) khi trang có chữ thật và không có bảng
+  const [textFirst, setTextFirst] = useState<boolean>(() => localStorage.getItem('mediTrans_textFirst') !== 'false');
+  const textFirstRef = useRef(textFirst);
+  useEffect(() => {
+    textFirstRef.current = textFirst;
+    localStorage.setItem('mediTrans_textFirst', String(textFirst));
+  }, [textFirst]);
   const [leftPageBox, setLeftPageBox] = useState<{ w: number; h: number } | null>(null);
   useEffect(() => {
     if (translationPanelMode === 'layout') setLayoutPanelMounted(true);
@@ -2951,6 +2961,35 @@ export default function App() {
     const currentFileId = fileIdRef.current;
     if (!translationService.current || !pdfDoc) return null;
 
+    // 0. Ưu tiên lớp chữ: dựng Markdown chuẩn cấu trúc từ PDF rồi chỉ dịch chữ (nhanh, ít token, không lỗi đọc ảnh)
+    const svc: any = translationService.current;
+    if (textFirstRef.current && typeof svc.translateMarkdownPageStream === 'function') {
+      let started = false;
+      try {
+        const md = await buildPageMarkdown(pdfDoc, targetPage);
+        if (signal.aborted) return null;
+        if (md.eligible) {
+          let fullContent = '';
+          let lastUpdate = Date.now();
+          for await (const chunk of svc.translateMarkdownPageStream(md.markdown, targetPage, signal, engine || selectedEngine)) {
+            if (signal.aborted) break;
+            started = true;
+            fullContent += chunk;
+            const now = Date.now();
+            if (onProgress && now - lastUpdate > 120) { onProgress(fullContent); lastUpdate = now; }
+          }
+          if (signal.aborted) return null;
+          if (fullContent.trim()) return fullContent;
+        } else {
+          console.log(`[MediTrans] Trang ${targetPage}: dùng ảnh (${md.reason}).`);
+        }
+      } catch (e: any) {
+        if (signal.aborted || e?.name === 'AbortError' || e?.message === 'Translation aborted') return null;
+        if (started) throw e;
+        console.warn(`[MediTrans] Dịch theo lớp chữ thất bại ở trang ${targetPage}, chuyển sang đọc ảnh:`, e);
+      }
+    }
+
     try {
       // 1. Image preparation
       let imageBuffer = "";
@@ -4836,6 +4875,8 @@ export default function App() {
                       pageBox={leftPageBox}
                       syncScrollEl={pdfScrollEl}
                       fullScreen={isFullScreen}
+                      bulkRequest={layoutBulkRequest}
+                      onBulkStateChange={setLayoutBulkState}
                       cloud={user && fileId && fileOwnerId && !isLocalOnly
                         ? { ownerId: fileOwnerId, fileId, canWrite: user.uid === fileOwnerId || userRole === 'admin' }
                         : null}
@@ -5625,6 +5666,19 @@ export default function App() {
                     )}
                   </div>
 
+                  <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50/60 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={textFirst}
+                      onChange={(e) => setTextFirst(e.target.checked)}
+                      className="mt-0.5 accent-indigo-600"
+                    />
+                    <span className="text-[11px] leading-snug text-slate-600">
+                      <span className="font-bold text-slate-800 block">Dịch thường: ưu tiên lớp chữ (nhanh, ít token)</span>
+                      Trang PDF có chữ thật được dựng sẵn cấu trúc (tiêu đề, danh sách nhiều cấp, thứ tự cột) rồi chỉ gửi chữ cho AI dịch, không gửi ảnh. Trang scan, trang có bảng hoặc nhiều nhãn hình tự động dùng cách đọc ảnh.
+                    </span>
+                  </label>
+
                   {autoTranslate && (
                     <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
                       <div className="flex items-center justify-between">
@@ -5654,6 +5708,12 @@ export default function App() {
                 {/* Bulk Translation Button with Confirmation */}
                 {pdfDoc && (
                   <div className="pt-4 border-t border-slate-100">
+                    {layoutBulkState.running && (
+                      <div className="mb-3 p-3 rounded-xl bg-emerald-50 border border-emerald-100 text-[10px] text-emerald-800 font-bold flex items-center gap-2">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Đang dịch giữ định dạng: {layoutBulkState.done}/{layoutBulkState.total} trang (xem ở tab "Giữ định dạng")
+                      </div>
+                    )}
                     {showBulkConfirm && !isBulkTranslating ? (
                       <div className="space-y-3 animate-in zoom-in-95 duration-200">
                         <div className="bg-amber-50 border border-amber-100 p-3 rounded-xl">
@@ -5683,6 +5743,24 @@ export default function App() {
                             <Sparkles className="w-4 h-4" />
                             Dịch chuyên sâu (Gemini 3.6 Flash)
                           </button>
+                          <button
+                            onClick={() => {
+                              setShowBulkConfirm(false);
+                              setShowSettings(false);
+                              setTranslationPanelMode('layout');
+                              setShowTranslationPanel(true);
+                              if (mobileViewMode === 'pdf') setMobileViewMode('split');
+                              setLayoutBulkRequest({ id: Date.now(), pages: Array.from({ length: numPages }, (_, i) => i + 1) });
+                            }}
+                            className="w-full py-3 bg-emerald-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-emerald-700 shadow-lg shadow-emerald-100 transition-all active:scale-95 flex items-center justify-center gap-2"
+                            title="Dịch toàn bộ tài liệu, giữ nguyên bố cục trang gốc (xuất PDF dạng ảnh)"
+                          >
+                            <LayoutTemplate className="w-4 h-4" />
+                            Dịch toàn bộ giữ định dạng
+                          </button>
+                          <p className="text-[9px] text-slate-400 leading-snug px-1">
+                            Giữ định dạng: trang đã dịch trước đó (kể cả trên máy khác) được dựng lại, không tốn token; trang scan sẽ được bỏ qua. Theo dõi tiến độ và xuất PDF ở tab "Giữ định dạng".
+                          </p>
                           <button
                             onClick={() => setShowBulkConfirm(false)}
                             className="w-full py-2.5 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-bold uppercase hover:bg-slate-200 transition-all"

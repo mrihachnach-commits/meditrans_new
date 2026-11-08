@@ -10,6 +10,64 @@ export class GeminiService implements TranslationService {
   private static globalKeyLastUsed: Map<string, number> = new Map();
   private static lastSuccessfulKey: string | null = null;
   private static requestDispatchLock: Promise<void> = Promise.resolve();
+  /** Model không chấp nhận tham số thinking → không gửi nữa. */
+  private static thinkingUnsupported = new Set<string>();
+  /** Model không nhận mức "minimal" → lùi về "low" trước khi bỏ hẳn tham số. */
+  private static thinkingLowOnly = new Set<string>();
+  private static reasoningUnsupported = false;
+
+  /**
+   * Dịch thuật không cần "suy nghĩ" dài: Gemini 3 mặc định thinking mức CAO (tốn token đầu ra + chậm).
+   * Gemini 3.x Flash → thinkingLevel "minimal", 3.x Pro → "low"; 2.5 Flash/Flash-Lite → thinkingBudget 0.
+   */
+  private static thinkingConfigFor(model: string, prefer: 'minimal' | 'low' = 'minimal'): Record<string, any> | undefined {
+    const m = (model || '').toLowerCase();
+    if (GeminiService.thinkingUnsupported.has(m)) return undefined;
+    const ver = m.match(/gemini-(\d+(?:\.\d+)?)/);
+    if (!ver) return undefined;
+    const v = parseFloat(ver[1]);
+    if (v >= 3) return { thinkingLevel: m.includes('pro') || prefer === 'low' || GeminiService.thinkingLowOnly.has(m) ? 'low' : 'minimal' };
+    if (v >= 2.5) return m.includes('pro') ? { thinkingBudget: 128 } : { thinkingBudget: 0 };
+    return undefined;
+  }
+
+  private static genConfig(model: string, base: Record<string, any>, prefer: 'minimal' | 'low' = 'minimal'): Record<string, any> {
+    const thinking = GeminiService.thinkingConfigFor(model, prefer);
+    return thinking ? { ...base, thinkingConfig: thinking } : base;
+  }
+
+  /** Lỗi do tham số thinking/reasoning không được hỗ trợ → ghi nhớ để lần sau bỏ, trả về true để thử lại ngay. */
+  private static handleThinkingError(model: string, error: any): boolean {
+    const msg = String(error?.message || '').toLowerCase();
+    if (msg.includes('reasoning') && !GeminiService.reasoningUnsupported) {
+      GeminiService.reasoningUnsupported = true;
+      console.warn('[MediTrans] Proxy không hỗ trợ reasoning_effort → bỏ tham số này.');
+      return true;
+    }
+    const m = (model || '').toLowerCase();
+    if (/thinking/.test(msg) && !GeminiService.thinkingUnsupported.has(m)) {
+      const ver = m.match(/gemini-(\d+(?:\.\d+)?)/);
+      if (ver && parseFloat(ver[1]) >= 3 && !m.includes('pro') && !GeminiService.thinkingLowOnly.has(m)) {
+        GeminiService.thinkingLowOnly.add(m);
+        console.warn(`[MediTrans] Model ${model} không nhận thinkingLevel "minimal" → dùng "low".`);
+        return true;
+      }
+      GeminiService.thinkingUnsupported.add(m);
+      console.warn(`[MediTrans] Model ${model} không nhận thinkingConfig → bỏ tham số này.`);
+      return true;
+    }
+    return false;
+  }
+
+  /** reasoning_effort cho proxy kiểu OpenAI (chỉ với model Gemini có thinking). */
+  private static reasoningFor(model: string): string | undefined {
+    if (GeminiService.reasoningUnsupported) return undefined;
+    const m = (model || '').toLowerCase();
+    if (/gemini-2\.5-flash(?!-lite)/.test(m)) return 'none';
+    const ver = m.match(/gemini-(\d+(?:\.\d+)?)/);
+    if (ver && parseFloat(ver[1]) >= 3) return m.includes('pro') ? 'low' : 'minimal';
+    return undefined;
+  }
 
   constructor(apiKeys?: string | string[], modelName: string = "gemini-2.5-flash-lite") {
     const cleanModel = (modelName || '').trim();
@@ -235,6 +293,8 @@ export class GeminiService implements TranslationService {
       stream: true,
       messages
     };
+    const reasoning = GeminiService.reasoningFor(mappedModel);
+    if (reasoning) body.reasoning_effort = reasoning;
 
     let requestUrl = cleanBaseUrl;
     let authHeaderValue = `Bearer ${key.trim()}`;
@@ -358,6 +418,8 @@ export class GeminiService implements TranslationService {
       stream: false,
       messages
     };
+    const reasoning = GeminiService.reasoningFor(mappedModel);
+    if (reasoning) body.reasoning_effort = reasoning;
 
     let requestUrl = cleanBaseUrl;
     let authHeaderValue = `Bearer ${key.trim()}`;
@@ -535,13 +597,18 @@ export class GeminiService implements TranslationService {
   public static buildPagePrompt(pageNumber: number): { systemInstruction: string; prompt: string } {
     const systemInstruction = `You are an expert English→Vietnamese medical translator. Translate the page image into Vietnamese Markdown.
 Rules:
-1. Output 100% Vietnamese. Translate every heading, paragraph, list item, table cell, figure/table caption and in-figure label (Figure n → **Hình n**, Table n → **Bảng n**, Pathology → **Bệnh học**). Never skip a caption. Keep drug/gene names, abbreviations (CT, MRI, DBT, HbA1c…), numbers and units.
-2. No preamble, notes or code fences. Omit running headers, footers and page numbers.
-3. Reading order: multi-column pages column by column (left first, top→bottom); never mix lines across columns. Text continued from the previous page comes first.
-4. Markdown: #/##/### for titles and section headings; blank line between blocks; section labels like "1." or "a." on their own line in bold; keep nested list hierarchy with 2-space indents (never flatten); bold imaging modality labels (**Siêu âm**:, **CT**:, **MRI**:).
-5. Tables: GFM with the original number of columns, leading and trailing pipes, |---| separator row, one row per line, blank line before and after.
-6. Symbols as plain Unicode (> < ≤ ≥ ± × ≈ µm °C %), never LaTeX or $.
-7. Abbreviation boxes: separate list "- **RV**: Thất phải (Right ventricle)"; never pair them with text from the neighbouring column.`;
+1. Translate EVERYTHING into Vietnamese: page title, section headings, subheadings, list items, paragraphs, table cells, captions, in-figure labels (Figure n → **Hình n**, Table n → **Bảng n**). Never leave an English heading or sentence untranslated; keep only abbreviations, drug/gene names, numbers and units as written (CT, MRI, TDLU, BI-RADS, mg).
+2. Omit page furniture entirely — running header/footer lines, chapter name in side tabs, page numbers. Do not output them in any language.
+3. No preamble, notes or code fences.
+4. Structure: page title → "## "; section headings (often in a colored/boxed band, e.g. EMBRYOLOGY) → "### " in CAPITALS; subheadings (e.g. Embryologic Events) → "**bold text**" alone on its line, never as a bullet. Bullets: "- " level 1, "  - " level 2, "    - " level 3; keep every level, never flatten. Blank line between blocks.
+5. Reading order: multi-column pages column by column (left column top→bottom, then the next); never mix lines across columns; text continued from the previous page first.
+6. Tables: GFM with the original number of columns, leading and trailing pipes, |---| separator row, one row per line, blank line before and after.
+7. Symbols as plain Unicode (> < ≤ ≥ ± × ↑ ↓ µm °C %), never LaTeX or $. Abbreviation boxes: "- **RV**: Thất phải (Right ventricle)".
+Example of the expected shape:
+### PHÔI THAI HỌC
+**Các sự kiện phôi thai**
+- Tuần 4–6
+  - Dải ngoại bì phát triển từ nách đến bẹn của thai nhi`;
     return { systemInstruction, prompt: `Page ${pageNumber}. Translate the whole page.` };
   }
 
@@ -604,6 +671,7 @@ Rules:
           if (signal?.aborted || error.message === "Translation aborted") {
             throw new Error("Translation aborted");
           }
+          if (GeminiService.handleThinkingError(this.mapModelForGoogle(requestModel), error)) continue;
           const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
           const isServerErr = error.message?.includes("500") || error.message?.includes("502") || error.message?.includes("503") || error.message?.includes("504") || error.message?.toLowerCase().includes("fetch");
           
@@ -625,9 +693,7 @@ Rules:
         const genModel = ai.getGenerativeModel({ 
           model: googleModel,
           systemInstruction: systemInstruction,
-          generationConfig: {
-            temperature: 0,
-          }
+          generationConfig: GeminiService.genConfig(googleModel, { temperature: 0, maxOutputTokens: 8192 }, 'low')
         });
 
         const response = await genModel.generateContentStream([
@@ -679,6 +745,7 @@ Rules:
         if (signal?.aborted || error.message === "Translation aborted") {
           throw new Error("Translation aborted");
         }
+          if (GeminiService.handleThinkingError(this.mapModelForGoogle(requestModel), error)) continue;
         const isQuotaError = error.message?.toLowerCase().includes("quota") || 
                            error.message?.toLowerCase().includes("429") ||
                            error.message?.toLowerCase().includes("resource_exhausted");
@@ -741,6 +808,7 @@ Rules:
           return resultText;
         } catch (error: any) {
           if (signal?.aborted) throw new Error("Translation aborted");
+          if (GeminiService.handleThinkingError(this.mapModelForGoogle(requestModel), error)) continue;
           const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
           if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
             retryCount++;
@@ -757,7 +825,7 @@ Rules:
         const genModel = ai.getGenerativeModel({ 
           model: googleModel,
           systemInstruction: systemInstruction,
-          generationConfig: { temperature: 0 }
+          generationConfig: GeminiService.genConfig(googleModel, { temperature: 0, maxOutputTokens: 8192 }, 'low')
         });
 
         const result = await genModel.generateContent([
@@ -773,6 +841,7 @@ Rules:
       } catch (error: any) {
         if (signal?.aborted) throw new Error("Translation aborted");
         
+          if (GeminiService.handleThinkingError(this.mapModelForGoogle(requestModel), error)) continue;
         const isPermissionDeniedError = error.message?.toLowerCase().includes("permission_denied") || 
                                        error.message?.toLowerCase().includes("403") ||
                                        error.message?.toLowerCase().includes("denied access");
@@ -904,6 +973,71 @@ Rules:
     } catch (error: any) { throw error; }
   }
   /**
+   * Dịch thường theo lớp chữ: nhận Markdown đã dựng sẵn từ lớp chữ PDF (cấu trúc chuẩn), chỉ dịch chữ.
+   * Không gửi ảnh → nhanh hơn, ít token hơn, không lỗi đọc nhầm chữ.
+   */
+  async *translateMarkdownPageStream(markdown: string, pageNumber: number, signal?: AbortSignal, model?: string): AsyncGenerator<string> {
+    const requestModel = model || this.modelName;
+    const systemInstruction = `You are an expert English→Vietnamese medical translator. The user sends one page of a medical document as Markdown extracted from the PDF text layer; its structure is already correct.
+Rules:
+1. Translate ALL text into accurate, natural Vietnamese medical language. Keep only abbreviations, drug/gene names, numbers and units as written. "Figure n" → "Hình n", "Table n" → "Bảng n".
+2. Keep the Markdown EXACTLY: same headings (#), list markers and indentation, **bold**/*italic* markers, line breaks, blank lines and order. Do not merge, split, add or drop lines. ALL-CAPS headings stay ALL-CAPS.
+3. Output only the translated Markdown — no preamble, notes or code fences. Symbols as plain Unicode, never LaTeX.`;
+    const prompt = markdown;
+    const MAX_RETRIES = 5;
+    let retryCount = 0;
+    while (retryCount <= MAX_RETRIES) {
+      if (signal?.aborted) throw new Error('Translation aborted');
+      let ai: any, key: string;
+      try {
+        ({ ai, key } = await this.acquireKeyAndInstance());
+      } catch {
+        throw new Error('Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.');
+      }
+      let emitted = false;
+      try {
+        if (this.isCurrentKeyProxy(key)) {
+          for await (const chunk of this.callOpenAIStream(key, requestModel, systemInstruction, prompt, '', signal)) {
+            if (signal?.aborted) break;
+            emitted = true;
+            yield chunk;
+          }
+        } else {
+          const gm = this.mapModelForGoogle(requestModel);
+          const genModel = ai.getGenerativeModel({
+            model: gm,
+            systemInstruction,
+            generationConfig: GeminiService.genConfig(gm, { temperature: 0, maxOutputTokens: 8192 }),
+          });
+          const response = await genModel.generateContentStream(prompt, signal ? ({ signal } as any) : undefined);
+          for await (const chunk of response.stream) {
+            if (signal?.aborted) throw new Error('Translation aborted');
+            const t = chunk.text();
+            if (t) { emitted = true; yield t; }
+          }
+        }
+        if (!emitted && !signal?.aborted) throw new Error('Phản hồi rỗng.');
+        GeminiService.lastSuccessfulKey = key;
+        return;
+      } catch (error: any) {
+        if (signal?.aborted) throw new Error('Translation aborted');
+        if (emitted) throw error; // đã hiển thị một phần → để lớp trên xử lý, tránh lặp nội dung
+        if (GeminiService.handleThinkingError(this.mapModelForGoogle(requestModel), error)) continue;
+        const msg = String(error?.message || '').toLowerCase();
+        if (msg.includes('level 2') || msg.includes('đăng nhập')) throw error;
+        const isQuota = msg.includes('429') || msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('401');
+        if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
+          retryCount++;
+          await new Promise(r => setTimeout(r, Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500)));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Quá số lần thử lại.');
+  }
+
+  /**
    * Dịch giữ định dạng: dịch danh sách khối chữ (đã trích từ PDF) sang tiếng Việt.
    * Trả về map id → bản dịch. Khối nào model bỏ sót sẽ không có trong map (giữ nguyên chữ gốc).
    */
@@ -954,10 +1088,11 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
         if (this.isCurrentKeyProxy(key)) {
           raw = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, '', signal);
         } else {
+          const gm = this.mapModelForGoogle(this.modelName);
           const genModel = ai.getGenerativeModel({
-            model: this.mapModelForGoogle(this.modelName),
+            model: gm,
             systemInstruction,
-            generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+            generationConfig: GeminiService.genConfig(gm, { temperature: 0.1, responseMimeType: 'application/json' }),
           });
           const result = await genModel.generateContent(prompt, signal ? ({ signal } as any) : undefined);
           raw = (await result.response).text() || '';
@@ -967,6 +1102,7 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
         return parsed;
       } catch (error: any) {
         if (signal?.aborted) throw new Error('Translation aborted');
+        if (GeminiService.handleThinkingError(this.mapModelForGoogle(this.modelName), error)) continue;
         const msg = String(error?.message || '').toLowerCase();
         // Lỗi phân quyền (Level) không nên thử lại
         if (msg.includes('level 2') || msg.includes('đăng nhập')) throw error;
