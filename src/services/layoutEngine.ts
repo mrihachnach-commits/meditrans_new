@@ -98,6 +98,10 @@ export interface LayoutBlock {
   rotate?: 'up' | 'down';
   /** Khối lấy từ OCR (chữ trong ảnh / trang scan). */
   fromOcr?: boolean;
+  /** Vị trí khối trong danh sách OCR gốc (để lấy bản dịch AI trả kèm). */
+  srcIndex?: number;
+  /** Khối OCR đã lấy cỡ chữ/font từ lớp chữ PDF (chuẩn, không cần ước lượng). */
+  guided?: boolean;
 }
 
 export interface PaintReport {
@@ -158,7 +162,7 @@ function toSuperscript(s: string): string {
 }
 
 const BULLET_CHARS = '•●▪■◦○‣►▸➢➤✓✔❖◆◇□▫·∙§\\-–—*o\uF0A7\uF0B7\uF0D8\uF076\uF0FC\uF0A8\uF06E\uF0E0';
-const LABEL_RE = new RegExp(`^(\\d{1,3}(\\.\\d{1,3})*[.)]?|[a-zA-Z][.)]|\\(?[ivxIVX]{1,4}[.)]|[${BULLET_CHARS}])$`);
+const LABEL_RE = new RegExp(`^(\\d{1,3}(\\.\\d{1,3})*[.)]?|\\(\\d{1,2}\\)|\\(?[a-zA-Z][.)]|\\(?[ivxIVX]{1,4}[.)]|[${BULLET_CHARS}])$`);
 /** Ký hiệu đầu dòng dính liền chữ trong cùng một item: "• Breast", "o Conical…" */
 const LEADING_BULLET_RE = new RegExp(`^(\\s*[${BULLET_CHARS}])(\\s+)(?=\\S)`);
 const LEADER_RE = /^([\s\S]*?\S)\s*(?:[.·…]\s*){4,}\s*(\d{1,4}|[ivxlcdm]{1,6})?\s*$/i;
@@ -411,9 +415,22 @@ function calibrateFonts(ctx: CanvasRenderingContext2D, img: ImageData, items: No
 /* 2. Item → đoạn dòng (segment) → khối                                */
 /* ------------------------------------------------------------------ */
 
+const LEADING_NUM_RE = /^(\s*(?:\d{1,2}[.)]|\(\d{1,2}\)|\(?[a-z]\)|[ivx]{1,4}\.))(\s+)(?=\p{L})/u;
+
 function splitLeadingBullets(items: NormItem[]): NormItem[] {
   const out: NormItem[] = [];
   for (const it of items) {
+    // Số thứ tự dính liền chữ trong cùng một item: "3. Finally…", "(2) the related…" → tách ra (quy tắc chữ viết tắt
+    // đầu đoạn sẽ ghép lại nếu thực ra là chữ của đoạn văn)
+    const nm = it.str.match(LEADING_NUM_RE);
+    if (nm && it.str.length > nm[0].length + 2) {
+      const total = [...it.str].length;
+      const headLen = [...nm[0]].length;
+      const wHead = it.w * (headLen / total);
+      out.push({ ...it, str: nm[1].trim(), w: wHead * 0.75 });
+      out.push({ ...it, str: it.str.slice(nm[0].length), x: it.x + wHead, w: it.w - wHead });
+      continue;
+    }
     const m = it.str.match(LEADING_BULLET_RE);
     if (!m || it.str.length <= m[0].length) { 
       // Xử lý dấu gạch ngang hoặc ký hiệu đầu dòng đứng sát chữ không có khoảng trắng: "-Types", "•Anatomy"
@@ -532,6 +549,10 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
     let bestRow: NormItem[] | null = null;
     let bestDy = Infinity;
     for (let r = rows.length - 1; r >= 0 && r >= rows.length - 4; r--) {
+      // Hai item chồng nhau theo chiều ngang không thể cùng một hàng (vd. số chương cỡ lớn kéo 2 dòng tiêu đề vào một hàng)
+      const clash = rows[r].some(o => Math.min(o.x + o.w, it.x + it.w) - Math.max(o.x, it.x) > 0.3 * Math.min(o.size, it.size) &&
+        Math.abs(o.y - it.y) > 0.15 * Math.min(o.size, it.size));
+      if (clash) continue;
       for (const o of rows[r]) {
         if (!sameRow(o, it)) continue;
         const dy = Math.abs(o.y - it.y);
@@ -607,8 +628,10 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
     if (!L.isLabel || /^[^\p{L}\p{N}(]/u.test(L.text.trim())) continue; // ký hiệu •, – … giữ nguyên
     const S = segs.find(o => o !== L && !o.isLabel && Math.abs(o.y - L.y) < 0.4 * o.size && o.x0 >= L.x1 - 1 && o.x0 - L.x1 < 2 * o.size);
     if (!S) continue;
-    const wrapsUnder = segs.some(n => n !== L && n !== S && n.y > S.y + 0.5 * S.size && n.y < S.y + 1.9 * S.size &&
-      Math.abs(n.size - S.size) < 0.12 * S.size && n.x0 <= L.x0 + 0.5 * S.size && n.x1 > S.x0 + 2 * S.size);
+    if (S.leader) continue; // dòng mục lục ("… 71") — số mục là số mục thật
+    const wrapsUnder = segs.some(n => n !== L && n !== S && !n.leader && !LABEL_RE.test(n.text.trim()) &&
+      n.y > S.y + 0.5 * S.size && n.y < S.y + 1.9 * S.size &&
+      Math.abs(n.size - S.size) < 0.12 * S.size && n.x0 <= L.x0 + 0.6 * S.size && n.x0 >= L.x0 - 2.5 * S.size && n.x1 > S.x0 + 2 * S.size);
     if (!wrapsUnder) continue;
     S.runs = [...L.runs.map(r => ({ ...r })), ...S.runs];
     S.runs[L.runs.length - 1].text = S.runs[L.runs.length - 1].text.replace(/\s*$/, ' ');
@@ -644,7 +667,8 @@ function makeSegment(items: NormItem[]): Segment {
     const isSup = it.size < 0.82 * size && it.y < baseline - 0.15 * size;
     let piece = isSup ? toSuperscript(it.str) : it.str;
     const gap = it.x - prevEnd;
-    const needSpace = runs.length > 0 && gap > 0.12 * size && !/\s$/.test(runs[runs.length - 1].text) && !/^\s/.test(piece) && !isSup;
+    const needSpace = runs.length > 0 && gap > 0.12 * size && !/\s$/.test(runs[runs.length - 1].text) && !/^\s/.test(piece) && !isSup &&
+      !/^[,.;:!?)\]}%]/.test(piece) && !/[([{]$/.test(runs[runs.length - 1].text);
     const style: RunStyle = isSup && lastStyle
       ? lastStyle
       : { bold: it.bold, italic: it.italic, color: it.color };
@@ -730,13 +754,25 @@ export function buildBlocks(
   const segments = buildSegments(items, gutters).filter(s => s.text.length > 0);
   segments.sort((a, b) => a.y - b.y || a.x0 - b.x0);
 
+  // Hàng bảng: dòng có "ô" chữ khác cùng hàng (cùng cột trang, không cách bởi khe cột).
+  // Số trang / số thuần, ký hiệu đầu dòng không tính là ô (để mục lục, danh sách vẫn nối dòng được).
+  const isCellLike = (o: Segment) => !o.isLabel && !o.leader && !/^[\d\s.,–\-()%]+$/.test(o.text.trim()) && letterCount(o.text) >= 2;
+  const hasRowMate = (sg: Segment) => segments.some(o => o !== sg && isCellLike(o) &&
+    Math.abs(o.y - sg.y) < 0.4 * Math.min(o.size, sg.size) &&
+    (o.x1 <= sg.x0 + 1 || o.x0 >= sg.x1 - 1) &&
+    !gutters.some(g => (g > Math.min(o.x1, sg.x1) - 1 && g < Math.max(o.x0, sg.x0) + 1)));
+  const mate = new Map(segments.map(sg => [sg, isCellLike(sg) && hasRowMate(sg)]));
+
   const work: WorkBlock[] = [];
   for (const seg of segments) {
     let bestBlock: WorkBlock | null = null;
     let bestGap = Infinity;
+    const segIsCell = mate.get(seg);
     for (const b of seg.itemStart || seg.isLabel ? [] : work) {
       const last = b.lines[b.lines.length - 1];
       if (last.leader) continue; // dòng mục lục có số trang = kết thúc mục
+      if (b.lines[0].isLabel) continue; // khối số mục / ký hiệu đầu dòng chỉ có 1 dòng
+      if (segIsCell) continue; // ô bảng: mỗi hàng là một khối riêng, không nối dọc với hàng dưới
       if (Math.abs(seg.size - b.size) > 0.12 * b.size) continue;
       if (seg.bold !== b.bold) continue;
       const gap = seg.y - last.y;
@@ -852,21 +888,26 @@ function finalizeBlock(b: WorkBlock, pageWidth: number): LayoutBlock {
     if (!mm) { text += r.text; continue; }
     text += `${mm[1]}<${k + 1}>${mm[2]}</${k + 1}>${mm[3]}`;
   }
-  text = text.replace(/\s+/g, ' ').trim();
-  plain = plain.replace(/\s+/g, ' ').trim();
+  // Không để khoảng trắng trước dấu đóng / sau dấu mở ("[6 , 7 ]" → "[6, 7]")
+  const tidy = (t: string) => t.replace(/\s+/g, ' ').replace(/\s+((?:<\/?\d+>)*[,.;:!?)\]])/g, '$1').replace(/([(\[](?:<\/?\d+>)*)\s+/g, '$1').trim();
+  text = tidy(text);
+  plain = tidy(plain);
 
   const width = b.x1 - b.x0;
   let align: BlockAlign = 'left';
   if (lines.length >= 3) {
     const body = lines.slice(0, -1);
     const full = body.filter(l => l.x1 >= b.x1 - 0.6 * b.size).length;
-    if (full / body.length >= 0.7) align = 'justify';
+    // Tiêu đề (chữ đậm, ít dòng) không căn đều dù các dòng gần dài bằng nhau
+    if (full / body.length >= 0.7 && !(b.bold && lines.length <= 4)) align = 'justify';
   }
   if (align === 'left' && lines.length >= 2) {
     const center = (b.x0 + b.x1) / 2;
     const allCentered = lines.every(l => Math.abs((l.x0 + l.x1) / 2 - center) < 0.6 * b.size);
     const someShorter = lines.some(l => l.x1 - l.x0 < width - 2 * b.size);
-    if (allCentered && someShorter) align = 'center';
+    // Các dòng dài gần bằng nhau nhưng mép trái so le và cả khối nằm giữa trang → cũng là canh giữa
+    const ragged = lines.some(l => Math.abs(l.x0 - b.x0) > 0.3 * b.size);
+    if (allCentered && (someShorter || (ragged && Math.abs(center - pageWidth / 2) < 0.02 * pageWidth))) align = 'center';
   }
   if (align === 'left' && lines.length >= 2) {
     const allRight = lines.every(l => Math.abs(l.x1 - b.x1) < 0.6 * b.size);
@@ -1197,10 +1238,76 @@ export function paintTranslatedPage(
   ctx: CanvasRenderingContext2D,
   allBlocks: LayoutBlock[],
   translations: Record<string, string>,
+  /** Bản vẽ trang không có chữ (nền thật). null → xoá bằng màu nền. */
+  clean?: ImageData | null,
 ): PaintReport {
   const report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [] };
   const W = ctx.canvas.width, H = ctx.canvas.height;
   const img = ctx.getImageData(0, 0, W, H);
+  const cleanOk = !!clean && clean.width === W && clean.height === H;
+  /**
+   * Xoá một vùng: nếu bản "không chữ" thật sự đã mất chữ ở vùng này (chữ vector) → chép nền thật
+   * (giữ ảnh, khung, đường kẻ, nền màu). Ngược lại (chữ nằm trong ảnh / trang scan) → tô màu nền.
+   */
+  const erase = (x: number, y: number, w: number, h: number, bg: RGB) => {
+    const xa = Math.max(0, Math.floor(x)), ya = Math.max(0, Math.floor(y));
+    const xb = Math.min(W, Math.ceil(x + w)), yb = Math.min(H, Math.ceil(y + h));
+    if (xb <= xa || yb <= ya) return;
+    if (cleanOk) {
+      const d = img.data, c = clean!.data;
+      let inkOrig = 0, removed = 0;
+      for (let yy = ya; yy < yb; yy += 2) {
+        for (let xx = xa; xx < xb; xx += 2) {
+          const i = (yy * W + xx) * 4;
+          const ink = Math.abs(d[i] - bg.r) + Math.abs(d[i + 1] - bg.g) + Math.abs(d[i + 2] - bg.b) > 90;
+          if (!ink) continue;
+          inkOrig++;
+          if (Math.abs(d[i] - c[i]) + Math.abs(d[i + 1] - c[i + 1]) + Math.abs(d[i + 2] - c[i + 2]) > 60) removed++;
+        }
+      }
+      // Có chữ vector bị bỏ trong bản không-chữ → chép nền thật: chỉ chữ biến mất, logo/ảnh/khung trong vùng vẫn giữ
+      if (inkOrig === 0 || removed >= 0.15 * inkOrig) {
+        ctx.putImageData(clean!, 0, 0, xa, ya, xb - xa, yb - ya);
+        return;
+      }
+    }
+    // Không có nền thật (trang scan, chữ trong ảnh): chỉ thay các điểm ảnh LÀ CHỮ (đậm hơn nền với chữ tối,
+    // sáng hơn nền với chữ sáng) + 1 điểm viền → giữ vân giấy, nền ảnh, lề trắng; không để lại vệt chữ nhật.
+    const rw = xb - xa, rh = yb - ya;
+    const part = ctx.getImageData(xa, ya, rw, rh);
+    const p = part.data;
+    const lum = (i: number) => 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
+    const bgL = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
+    const dark = bgL >= 110;
+    const mask = new Uint8Array(rw * rh);
+    for (let k = 0; k < rw * rh; k++) {
+      const L = lum(k * 4);
+      if (dark ? bgL - L > 18 : L - bgL > 18) mask[k] = 1;
+    }
+    // Vùng mực đặc (logo, ảnh nhỏ chèn trong dòng) → giữ lại, không coi là chữ
+    const integ = new Uint32Array((rw + 1) * (rh + 1));
+    for (let yy = 0; yy < rh; yy++) {
+      let row = 0;
+      for (let xx = 0; xx < rw; xx++) { row += mask[yy * rw + xx]; integ[(yy + 1) * (rw + 1) + xx + 1] = integ[yy * (rw + 1) + xx + 1] + row; }
+    }
+    const R = 10;
+    const dense = (xx: number, yy: number) => {
+      const xa2 = Math.max(0, xx - R), ya2 = Math.max(0, yy - R), xb2 = Math.min(rw, xx + R + 1), yb2 = Math.min(rh, yy + R + 1);
+      const sum = integ[yb2 * (rw + 1) + xb2] - integ[ya2 * (rw + 1) + xb2] - integ[yb2 * (rw + 1) + xa2] + integ[ya2 * (rw + 1) + xa2];
+      return sum > 0.9 * (xb2 - xa2) * (yb2 - ya2);
+    };
+    for (let yy = 0; yy < rh; yy++) {
+      for (let xx = 0; xx < rw; xx++) {
+        const k = yy * rw + xx;
+        if (mask[k] && dense(xx, yy)) continue;
+        const near = mask[k] || (xx > 0 && mask[k - 1]) || (xx < rw - 1 && mask[k + 1]) || (yy > 0 && mask[k - rw]) || (yy < rh - 1 && mask[k + rw]);
+        if (!near) continue;
+        const i = k * 4;
+        p[i] = bg.r; p[i + 1] = bg.g; p[i + 2] = bg.b; p[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(part, xa, ya);
+  };
   const m = new Measurer(ctx);
   const norm = (t: string) => t.replace(/<\/?[a-zA-Z0-9][^>]*>/g, '').replace(/\s+/g, ' ').trim();
   // Chữ xoay 90° được vẽ riêng ở cuối; phần dàn trang bên dưới chỉ xử lý chữ ngang
@@ -1331,7 +1438,8 @@ export function paintTranslatedPage(
       let fits = true;
       g.forEach((b, i) => {
         const inf = info.get(b.id)!;
-        const ratio = Math.min(1.6, Math.max(1.05, (b.leading / b.size) * tight));
+        // Giãn dòng: theo bản gốc, chỉ nén khi cần; tối thiểu 1,08 cỡ chữ (đủ chỗ cho dấu tiếng Việt)
+        const ratio = Math.min(2.2, Math.max(1.12, (b.leading / b.size) * tight));
         let lo = layoutWords(m, inf.words, b, inf.base, widthOf(b), b.size * s, ratio);
         overrides[i] = null;
         if (b.lineCount === 1 && b.align === 'left' && lo.lines.length > 1 && inf.extLeftAvail > b.size && !rowMate.has(b.id)) {
@@ -1369,8 +1477,10 @@ export function paintTranslatedPage(
 
     let chosen: { s: number; los: LaidOut[]; tops: number[] } | null = null;
     outer:
+    // Ưu tiên GIỮ CỠ CHỮ: nén giãn dòng trước, chỉ thu nhỏ chữ khi giãn dòng đã tối thiểu
     for (let s = sMax; s >= 0.68 - 1e-6; s -= 0.02) {
-      for (const tight of [1, 0.93, 0.88]) {
+      // nén giãn dòng vừa phải (tối đa ~12%) rồi mới thu nhỏ chữ — tránh đoạn bị dồn dòng sát nhau trông chật
+      for (const tight of [1, 0.96, 0.92, 0.88]) {
         const r = tryFit(s, tight);
         if (r.fits) { chosen = { s, ...r }; break outer; }
       }
@@ -1399,11 +1509,24 @@ export function paintTranslatedPage(
   const bodyIdx = groups.map((g, i) => i).filter(i => isBody(groups[i]) && !fitted[i].overflow);
   if (bodyIdx.length >= 2) {
     const ss = bodyIdx.map(i => fitted[i].s);
-    const shared = Math.max(Math.min(...ss), median(ss) - 0.15);
+    // Cùng một cỡ chữ cho mọi đoạn thân bài (như bản in); chỉ đoạn buộc phải nhỏ hơn hẳn (< 0.72) mới giữ riêng
+    const shared = Math.max(0.72, Math.min(...ss));
     for (const i of bodyIdx) {
       if (fitted[i].s > shared + 0.005) fitted[i] = fitGroup(groups[i], shared);
     }
   }
+  // Ô bảng (có "bạn cùng hàng"): mọi ô cùng cỡ gốc dùng chung một cỡ chữ
+  const cellIdx = groups.map((g, i) => i).filter(i => groups[i].some(b => rowMate.has(b.id)) && !fitted[i].overflow);
+  const cellSizes = new Map<number, number[]>();
+  for (const i of cellIdx) {
+    const k = Math.round(groupSize(groups[i]));
+    (cellSizes.get(k) || cellSizes.set(k, []).get(k)!).push(i);
+  }
+  cellSizes.forEach(list => {
+    if (list.length < 2) return;
+    const shared = Math.max(0.72, Math.min(...list.map(i => fitted[i].s)));
+    for (const i of list) if (fitted[i].s > shared + 0.005) fitted[i] = fitGroup(groups[i], shared);
+  });
 
   groups.forEach((g, gi) => {
     const chosen = fitted[gi];
@@ -1417,6 +1540,31 @@ export function paintTranslatedPage(
         : { b, lo: chosen.los[i], top: chosen.tops[i], x0: b.x0 - inf.extLeft, width: chosen.widthOf(b), orig: b });
     });
   });
+
+  /* --- Dòng mục lục / ô bảng phải thu nhỏ riêng để giữ 1 dòng → đồng bộ: cùng cỡ gốc thì cùng cỡ vẽ --- */
+  {
+    const classOf = (p: typeof plans[number]) => p.orig.leader ? 'toc' : rowMate.has(p.orig.id) ? 'cell' : '';
+    const buckets = new Map<string, typeof plans>();
+    for (const p of plans) {
+      const c = classOf(p);
+      if (!c) continue;
+      const k = `${c}|${Math.round(p.orig.size)}|${p.orig.bold}`;
+      (buckets.get(k) || buckets.set(k, []).get(k)!).push(p);
+    }
+    buckets.forEach(list => {
+      if (list.length < 2) return;
+      const scales = list.map(p => p.lo.size / p.orig.size);
+      // cỡ chung gần mức phổ biến; dòng nào buộc phải nhỏ hơn hẳn giữ cỡ riêng (không kéo cả nhóm xuống)
+      const target = Math.max(0.68, Math.min(...scales), median(scales) - 0.08);
+      for (const p of list) {
+        const sc = p.lo.size / p.orig.size;
+        if (sc <= target + 0.01) continue;
+        const inf = info.get(p.b.id)!;
+        const lo = layoutWords(m, inf.words, p.b, inf.base, p.width, p.orig.size * target, p.lo.lineH / p.lo.size);
+        if (lo.lines.length <= p.lo.lines.length) p.lo = lo;
+      }
+    });
+  }
 
   /* --- Giữ lại các khối không dịch (số mục "1.1", số trang, ký hiệu…) nằm lọt trong vùng sẽ xoá --- */
   const targetIds = new Set(targets.map(t => t.id));
@@ -1452,7 +1600,7 @@ export function paintTranslatedPage(
     {
       const bg = inf.stats.bg, d = img.data;
       const xa = Math.max(0, Math.floor(b.x0)), xb = Math.min(W, Math.ceil(b.x1));
-      let ceiling = Math.max(0, b.top - 0.6 * b.size);
+      let ceiling = Math.max(0, b.top - 1.0 * b.size);
       for (const o of blocks) { // không lấn vào khối khác phía trên
         if (o === b || o.bottom > b.top + 1 || o.x1 <= b.x0 || o.x0 >= b.x1) continue;
         ceiling = Math.max(ceiling, o.bottom + 1);
@@ -1467,8 +1615,8 @@ export function paintTranslatedPage(
         top = y - 1;
       }
     }
-    ctx.fillStyle = rgbCss(inf.stats.bg);
-    ctx.fillRect(Math.min(b.x0, plan.x0) - padX, top, Math.max(b.x1 - b.x0, plan.width) + 2 * padX, bottom - top);
+    if (cleanOk) top = Math.max(Math.min(top, b.top - 0.3 * b.size), 0); // nền thật → nới rộng an toàn (khối khác được khôi phục)
+    erase(Math.min(b.x0, plan.x0) - padX, top, Math.max(b.x1 - b.x0, plan.width) + 2 * padX, bottom - top, inf.stats.bg);
   }
   for (const k of keepPatches) ctx.putImageData(k.patch, k.x, k.y);
 
@@ -1477,8 +1625,7 @@ export function paintTranslatedPage(
     .map(p => ({ c: companion.get(p.b.id), shift: Math.round(p.top - p.b.top) }))
     .filter((m): m is { c: NonNullable<typeof m.c>; shift: number } => !!m.c && Math.abs(m.shift) >= 1);
   for (const m of moves) { // lượt 1: xoá hết vị trí cũ
-    ctx.fillStyle = rgbCss(m.c.bg);
-    ctx.fillRect(m.c.x, m.c.y, m.c.patch.width, m.c.patch.height);
+    erase(m.c.x, m.c.y, m.c.patch.width, m.c.patch.height, m.c.bg);
   }
   for (const m of moves) ctx.putImageData(m.c.patch, m.c.x, m.c.y + m.shift); // lượt 2: đặt vào vị trí mới
 
@@ -1510,8 +1657,7 @@ export function paintTranslatedPage(
     }
     if (!lo) continue;
     if (!fitted) report.overflowIds.push(b.id);
-    ctx.fillStyle = rgbCss(stats.bg);
-    ctx.fillRect(b.x0 - pad, b.top - pad, thick + 2 * pad, len + 2 * pad);
+    erase(b.x0 - pad, b.top - pad, thick + 2 * pad, len + 2 * pad, stats.bg);
     ctx.save();
     if (b.rotate === 'up') { ctx.translate(b.x0, b.bottom); ctx.rotate(-Math.PI / 2); }
     else { ctx.translate(b.x1, b.top); ctx.rotate(Math.PI / 2); }
@@ -1546,41 +1692,51 @@ export interface OcrBlock {
  * (chỉ trong phạm vi nhỏ quanh khung, không lấn sang cột / tiêu đề bên cạnh):
  * mép trên/dưới sát chữ; số dòng và khoảng cách dòng đo bằng hình chiếu ngang (tách dòng tại "thung lũng" mực).
  */
-export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], idPrefix = 'b'): LayoutBlock[] {
+export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], idPrefix = 'b', items: NormItem[] = []): LayoutBlock[] {
   const W = ctx.canvas.width, H = ctx.canvas.height;
   const img = ctx.getImageData(0, 0, W, H);
   const d = img.data;
   const out: LayoutBlock[] = [];
 
   // Khung AI (pixel)
-  type Pre = { o: OcrBlock; X0: number; X1: number; Y0: number; Y1: number; rotate?: 'up' | 'down'; pitch: number };
+  type Pre = { o: OcrBlock; X0: number; X1: number; Y0: number; Y1: number; rotate?: 'up' | 'down'; pitch: number; idx: number };
   const pre: Pre[] = [];
-  for (const o of ocr) {
+  for (let idx = 0; idx < ocr.length; idx++) {
+    const o = ocr[idx];
     if (!o || !Array.isArray(o.box_2d) || o.box_2d.length !== 4 || !o.text?.trim()) continue;
     let [ymin, xmin, ymax, xmax] = o.box_2d.map(Number);
     if (![ymin, xmin, ymax, xmax].every(Number.isFinite)) continue;
     if (ymin > ymax) [ymin, ymax] = [ymax, ymin];
     if (xmin > xmax) [xmin, xmax] = [xmax, xmin];
     const X0 = Math.max(0, xmin / 1000 * W), X1 = Math.min(W, xmax / 1000 * W);
-    const Y0 = Math.max(0, ymin / 1000 * H), Y1 = Math.min(H, ymax / 1000 * H);
-    if (X1 - X0 < 3 || Y1 - Y0 < 3) continue;
+    let Y0 = Math.max(0, ymin / 1000 * H), Y1 = Math.min(H, ymax / 1000 * H);
+    if (X1 - X0 < 3) continue;
+    if (Y1 - Y0 < 0.012 * H) { // khung AI quá thấp → nới thành ít nhất một dòng chữ
+      const c = (Y0 + Y1) / 2;
+      Y0 = Math.max(0, c - 0.006 * H); Y1 = Math.min(H, c + 0.006 * H);
+    }
     const dir = String(o.dir || '').toLowerCase();
     const rotate = dir === 'up' ? 'up' : dir === 'down' ? 'down' : undefined;
     const n = Math.max(1, Math.round(o.lines || 1));
-    pre.push({ o, X0, X1, Y0, Y1, rotate, pitch: (rotate ? X1 - X0 : Y1 - Y0) / n });
+    pre.push({ o, X0, X1, Y0, Y1, rotate, pitch: (rotate ? X1 - X0 : Y1 - Y0) / n, idx });
   }
   const horiz = pre.filter(p => !p.rotate);
+  const inkDensity = new Map<number, number>();
   const xOverlap = (a: Pre, b: Pre) => Math.min(a.X1, b.X1) - Math.max(a.X0, b.X0) > 0.3 * Math.min(a.X1 - a.X0, b.X1 - b.X0);
 
   for (const P of pre) {
     const { o, X0, X1, Y0, Y1, rotate } = P;
-    const text = o.text.replace(/\s+/g, ' ').trim();
+    let text = o.text.replace(/\s+/g, ' ').trim();
+    // Dòng mục lục "Tên mục …… 123": dấu chấm dẫn + số trang vẽ riêng, căn phải như bản gốc
+    let leaderNum: string | undefined;
+    const lm = text.match(LEADER_RE);
+    if (lm && !rotate) { text = lm[1].trim(); leaderNum = lm[2] || ''; }
     const al = String(o.align || '').toLowerCase();
     const base = {
       id: '', text, plain: text, styles: [] as RunStyle[],
       baseStyle: { bold: !!o.bold, italic: !!o.italic, color: null } as RunStyle,
       firstOffset: 0, restOffset: 0, bold: !!o.bold, italic: !!o.italic, serif: o.serif !== false,
-      translatable: isTranslatableText(text), hScale: 1, fromOcr: true,
+      translatable: isTranslatableText(text), hScale: 1, fromOcr: true, srcIndex: P.idx,
     };
     if (rotate) {
       const n = Math.max(1, Math.round(o.lines || 1));
@@ -1606,8 +1762,12 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
     const ya = Math.max(0, Math.floor(Y0 - reach)), yb = Math.min(H, Math.ceil(Y1 + reach));
     const prof: number[] = [];
     for (let y = ya; y < yb; y++) { let c = 0; for (let x = xa; x < xb; x++) if (ink(x, y)) c++; prof.push(c); }
+    // Đường kẻ ngang (khung viền, kẻ bảng): hàng gần như toàn mực → không phải chữ
+    for (let i = 0; i < prof.length; i++) if (prof[i] > 0.85 * (xb - xa)) prof[i] = 0;
     // Ngưỡng thấp: dòng cuối rất ngắn ("etc.).") và chân chữ g/p/y vẫn được tính là dòng
-    const lowThr = Math.max(1, 0.004 * (xb - xa));
+    // (nhưng cao hơn nhiễu hạt trên ảnh siêu âm/scan: vài điểm lẻ mỗi hàng)
+    const peakRow = Math.max(1, ...prof);
+    const lowThr = Math.max(1, 0.004 * (xb - xa), 0.04 * peakRow);
     let runs: { a: number; b: number }[] = [];
     prof.forEach((c, i) => {
       if (c < lowThr) return;
@@ -1657,13 +1817,26 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
         if (ov > bestOv) { bestOv = ov; best = Q; }
       }
       if (best) return best;
-      let near: Pre | null = null, dist = Infinity; // dòng nằm ngoài mọi khung → khối gần nhất
+      // Dòng nằm ngoài mọi khung → khối gần nhất
+      const cands: { Q: Pre; dd: number }[] = [];
       for (const Q of horiz) {
         if (Q !== P && !xOverlap(P, Q)) continue;
         const dd = r.b < Q.Y0 ? Q.Y0 - r.b : r.a > Q.Y1 ? r.a - Q.Y1 : 0;
-        if (dd < dist && dd < 1.2 * Q.pitch) { dist = dd; near = Q; }
+        // chỉ nhận dòng có chiều cao tương xứng cỡ chữ của khối (tiêu đề to không "ăn" dòng chữ nhỏ bên dưới)
+        const rh = r.b - r.a + 1, qh = 0.8 * Q.pitch;
+        if (dd < 1.2 * Q.pitch && rh >= 0.5 * qh && rh <= 1.8 * qh) cands.push({ Q, dd });
       }
-      return near;
+      if (!cands.length) return null;
+      cands.sort((p, q) => p.dd - q.dd);
+      const above = cands.find(c => c.Q.Y1 <= r.a + 1), below = cands.find(c => c.Q.Y0 >= r.b - 1);
+      if (above && below && Math.abs(above.dd - below.dd) <= 0.35 * Math.max(above.Q.pitch, below.Q.pitch)) {
+        // Hoà: dòng thụt đầu → dòng đầu của đoạn dưới; còn lại → dòng cuối của đoạn trên
+        let start = xb;
+        for (let x = xa; x < xb && start === xb; x++) for (let y = r.a; y <= r.b; y++) if (ink(x, y)) { start = x; break; }
+        const indent = start - Math.max(above.Q.X0, below.Q.X0);
+        return indent > 0.8 * (r.b - r.a + 1) ? below.Q : above.Q;
+      }
+      return cands[0].Q;
     };
     const lines = runs.filter(r => owner(r) === P);
     const aiLines = Math.max(1, Math.round(o.lines || 1));
@@ -1671,6 +1844,14 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
     let bottom = lines.length ? lines[lines.length - 1].b : Y1;
     let n = lines.length || aiLines;
     if (aiLines > 1 && (n < aiLines * 0.6 || n > aiLines * 1.6)) { n = aiLines; top = Math.min(top, Y0); bottom = Math.max(bottom, Y1); }
+    // Đuôi chân chữ (g, p, y) và dấu thanh nhạt hơn ngưỡng dò dòng → nới mép dưới/trên tới hàng trống đầu tiên
+    if (lines.length) {
+      const rowHas = (y: number) => { for (let x = xa; x < xb; x++) if (ink(x, y)) return true; return false; };
+      const lh = lines[lines.length - 1].b - lines[lines.length - 1].a + 1;
+      for (let y = bottom + 1; y < Math.min(H, bottom + 0.45 * lh); y++) { if (rowHas(y)) bottom = y; else break; }
+      const lh0 = lines[0].b - lines[0].a + 1;
+      for (let y = top - 1; y > Math.max(0, top - 0.35 * lh0); y--) { if (rowHas(y)) top = y; else break; }
+    }
     // 3) Mép trái/phải theo mực thật: nới ra ngoài khung tới khi gặp khe trống (khe cột) hoặc khối khác
     const lineH = lines.length ? median(lines.map(l => l.b - l.a + 1)) : (bottom - top) / n;
     const gapMax = Math.max(3, 0.7 * lineH);
@@ -1680,15 +1861,32 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
       if (Q.X1 <= X0 + 2) limL = Math.max(limL, Q.X1 + 1);
       if (Q.X0 >= X1 - 2) limR = Math.min(limR, Q.X0 - 1);
     }
-    const colInk = (x: number) => { for (let y = Math.floor(top); y <= bottom; y += 1) if (ink(x, y)) return true; return false; };
+    const span = Math.max(1, bottom - top + 1);
+    const lhRef = lines.length ? median(lines.map(l => l.b - l.a + 1)) : span;
+    const colInk = (x: number) => {
+      let c = 0;
+      for (let y = Math.floor(top); y <= bottom; y += 1) if (ink(x, y)) c++;
+      // Cột toàn mực CAO HƠN HẲN một dòng chữ = đường kẻ dọc / khung → không phải chữ
+      // (nét dọc của chữ I, D, B… chỉ cao bằng một dòng → vẫn là chữ)
+      return c > 0 && !(span > 1.8 * lhRef && c > 0.9 * span);
+    };
     let x0 = X0, x1 = X1;
     { // co vào mực thật bên trong khung
       let l = xa; while (l < xb && !colInk(l)) l++;
       let r = xb - 1; while (r > l && !colInk(r)) r--;
       if (r > l) { x0 = l; x1 = r + 1; }
     }
-    for (let x = Math.floor(x0) - 1, blank = 0; x >= limL; x--) { if (colInk(x)) { x0 = x; blank = 0; } else if (++blank >= gapMax) break; }
-    for (let x = Math.ceil(x1), blank = 0; x <= limR; x++) { if (colInk(x)) { x1 = x + 1; blank = 0; } else if (++blank >= gapMax) break; }
+    // Nới ra ngoài khung chỉ theo cột có mực ở GIỮA dòng chữ (không nới vào chữ hoa đầu đoạn cỡ lớn, hình bên cạnh)
+    const midInk = (x: number) => {
+      if (!colInk(x)) return false;
+      for (const l of lines.length ? lines : [{ a: Math.floor(top), b: Math.ceil(bottom) }]) {
+        const h = l.b - l.a + 1;
+        for (let y = Math.round(l.a + 0.35 * h); y <= Math.round(l.b - 0.35 * h); y++) if (ink(x, y)) return true;
+      }
+      return false;
+    };
+    for (let x = Math.floor(x0) - 1, blank = 0; x >= limL; x--) { if (midInk(x)) { x0 = x; blank = 0; } else if (++blank >= gapMax) break; }
+    for (let x = Math.ceil(x1), blank = 0; x <= limR; x++) { if (midInk(x)) { x1 = x + 1; blank = 0; } else if (++blank >= gapMax) break; }
 
     // Thụt đầu dòng: dòng đầu bắt đầu lùi vào so với các dòng sau
     let firstIndent = 0;
@@ -1700,20 +1898,86 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
       firstIndent = Math.max(0, startOf(lines[0]) - median(lines.slice(1, 4).map(startOf)));
     }
     const h = Math.max(4, bottom - top);
-    let size: number, leading: number;
+    let size: number;
+    let leading: number;
+    // Cỡ chữ theo chiều cao nét chữ thật (đầu chữ cao → chân chữ thấp ≈ 0,93 cỡ chữ); dùng các dòng
+    // cao nhất (bách phân vị 75: dòng có cả chữ cao lẫn chữ có chân), rồi giới hạn theo giãn dòng thật
+    // (sách in: giãn dòng ≈ 1,12–1,42 cỡ chữ) để các đoạn có cỡ chữ ổn định.
+    const hs = lines.map(l => l.b - l.a + 1).sort((p, q) => p - q);
+    const tall = hs.length ? hs[Math.min(hs.length - 1, Math.floor(hs.length * 0.75))] : lineH;
+    // Cỡ chữ theo "dải lõi" của dòng (các hàng mực dày đặc): chữ thường → chiều cao chữ x (~0,52 cỡ, chữ có chân ~0,46);
+    // chữ IN HOA → chiều cao chữ hoa (~0,71 cỡ). Ổn định hơn chiều cao toàn dòng (phụ thuộc có chữ g/p/y hay không).
+    const letters = text.match(/\p{L}/gu) || [];
+    const capsRatio = letters.length ? letters.filter(ch => ch === ch.toUpperCase() && ch !== ch.toLowerCase()).length / letters.length : 0;
+    // Chiều cao mực theo từng cột trong dòng; bỏ cột thấp (dấu chấm dẫn, dấu câu) → trung vị = chiều cao chữ x / chữ hoa
+    const cores: number[] = [];
+    for (const l of lines) {
+      const lh = l.b - l.a + 1;
+      for (let x = Math.floor(X0); x < Math.min(W, Math.ceil(X1)); x += 1) {
+        let f = -1, g = -1;
+        for (let y = l.a; y <= l.b; y++) if (ink(x, y)) { if (f < 0) f = y; g = y; }
+        if (f >= 0 && g - f + 1 >= 0.3 * lh) cores.push(g - f + 1);
+      }
+    }
+    const coreH = cores.length >= 5 ? median(cores) : 0;
+    const coreRatio = capsRatio > 0.7 ? 0.71 : (o.serif === false ? 0.52 : 0.47);
+    size = coreH > 2 ? coreH / coreRatio : tall / 0.93;
+    size = Math.min(tall / 0.68, Math.max(tall / 1.0, size));
     if (n >= 2) {
       leading = lines.length === n ? median(lines.slice(1).map((l, i) => l.a - lines[i].a)) : h / (n - 1 + 0.82);
-      size = leading / 1.18;
+      // Cỡ chữ theo chiều cao nét; giãn dòng chỉ dùng làm giới hạn trên (dòng thưa như mục lục không làm chữ to ra)
+      size = Math.min(leading / 1.08, size);
     } else {
-      size = lineH / 0.95;
       leading = size * 1.2;
     }
     size = Math.max(5, size);
+    // Mật độ mực (để nhận chữ đậm khi AI không báo)
+    // Độ dày nét (độ dài trung bình các đoạn mực ngang, chỉ tính đoạn ≥ 2 điểm) chia cho chiều cao dòng
+    // → không phụ thuộc dấu chấm dẫn / khoảng trắng như mật độ mực
+    let runSum = 0, runN = 0;
+    for (const l of lines.length ? lines : [{ a: Math.floor(top), b: Math.ceil(bottom) }]) {
+      for (let y = l.a; y <= l.b; y += 2) {
+        let run = 0;
+        for (let x = Math.floor(x0); x <= x1; x++) {
+          if (x < x1 && ink(x, y)) run++;
+          else { if (run >= 2 && run < 0.5 * lhRef) { runSum += run; runN++; } run = 0; }
+        }
+      }
+    }
+    inkDensity.set(out.length, runN >= 20 ? runSum / runN / Math.max(1, size) : 0);
+    // Lớp chữ PDF (kể cả hỏng bảng mã) nằm dưới khối → cỡ chữ, font, đậm/nghiêng, màu CHUẨN như bản gốc
+    let guided = false;
+    const under = items.filter(it => {
+      const cx = it.x + it.w / 2, cy = it.y - 0.35 * it.size;
+      return cx >= x0 - 2 && cx <= x1 + 2 && cy >= top - 2 && cy <= bottom + 2;
+    });
+    if (under.length) {
+      const wsum = (f: (it: NormItem) => boolean) => under.filter(f).reduce((a, it) => a + Math.max(1, it.w), 0);
+      const total = wsum(() => true);
+      const sizes = under.flatMap(it => Array(Math.max(1, Math.min(40, Math.round(it.w / 10)))).fill(it.size));
+      const ts = median(sizes);
+      if (ts > 3 && ts < 3 * size) {
+        size = ts;
+        guided = true;
+        base.serif = wsum(it => it.serif) >= 0.5 * total;
+        base.bold = wsum(it => it.bold) > 0.5 * total;
+        base.italic = wsum(it => it.italic) > 0.5 * total;
+        base.baseStyle = { ...base.baseStyle, bold: base.bold, italic: base.italic };
+        const colored = under.filter(it => it.color && !isDark(it.color));
+        if (colored.length && wsum(it => !!it.color && !isDark(it.color)) > 0.5 * total) base.baseStyle.color = colored[0].color;
+        base.hScale = median(under.map(it => it.hScale || 1)) || 1;
+      }
+    }
+    if (n < 2) leading = size * 1.2;
     out.push({
       ...base,
+      guided,
+      leader: leaderNum !== undefined ? { num: leaderNum, right: x1 } : undefined,
       x0, x1,
-      top: top - 0.05 * size,
-      bottom: bottom + 0.05 * size,
+      // Khung theo cùng quy ước với khối từ lớp chữ (đỉnh = đường chân chữ − 0,9 cỡ; đáy = chân chữ dòng cuối + 0,28 cỡ)
+      // → bản dịch không bị coi là "tràn khung" chỉ vì khung OCR bó sát mực
+      top: top - 0.18 * size,
+      bottom: Math.max(bottom + 0.05 * size, top - 0.18 * size + (n - 1) * Math.max(size * 1.02, leading) + 1.18 * size),
       size,
       leading: Math.max(size * 1.02, leading),
       lineCount: n,
@@ -1721,12 +1985,47 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
       align: (al === 'center' || al === 'right' || al === 'justify') ? al as BlockAlign : (n >= 3 ? 'justify' : 'left'),
     });
   }
-  // Cỡ chữ thân bài đồng đều: các đoạn nhiều dòng có cỡ ước lượng gần nhau (±20%) → dùng chung trung vị
+  // Chữ đậm theo mật độ mực (so với mặt bằng các khối cùng cỡ) khi AI không báo
+  {
+    const dens = out.map((b, i) => ({ b, d: inkDensity.get(i) ?? 0 })).filter(x => !x.b.guided && !x.b.rotate && x.d > 0);
+    for (const x of dens) {
+      // Mốc chữ thường = các đoạn văn nhiều dòng (hiếm khi in đậm); không có thì dùng bách phân vị 30 của trang
+      const paras = dens.filter(y => y.b.lineCount >= 2).map(y => y.d);
+      const all = dens.map(y => y.d).sort((p, q) => p - q);
+      const ref = paras.length >= 2 ? median(paras) : all[Math.floor(all.length * 0.3)];
+      if (!x.b.bold && ref > 0 && x.d > 1.15 * ref && x.b.plain.length >= 3) { x.b.bold = true; x.b.baseStyle = { ...x.b.baseStyle, bold: true }; }
+    }
+  }
+  // Gom cỡ chữ thành vài cỡ chuẩn (như bản in chỉ có vài cỡ chữ): cỡ ước lượng lệch nhau < 9% → dùng chung
+  {
+    const free = out.filter(b => !b.guided && !b.rotate);
+    const sorted = [...free].sort((a, b) => a.size - b.size);
+    const clusters: LayoutBlock[][] = [];
+    for (const b of sorted) {
+      const c = clusters[clusters.length - 1];
+      if (c && b.size <= c[0].size * 1.09) c.push(b); else clusters.push([b]);
+    }
+    for (const c of clusters) {
+      const w = c.flatMap(b => Array(Math.max(1, Math.min(50, Math.round(b.plain.length / 20)))).fill(b.size));
+      const ms = median(w);
+      for (const b of c) { b.leading = Math.max(ms * 1.02, b.leading * (ms / b.size)); b.size = ms; }
+    }
+  }
+  // Cỡ chữ thân bài đồng đều: các đoạn nhiều dòng có cỡ ước lượng gần nhau (±12%) → dùng chung trung vị
   const body = out.filter(b => !b.rotate && b.lineCount >= 2);
+  if (body.length) {
+    // Dòng thường (không đậm, không viết hoa toàn bộ) mà cỡ đo được quá lớn → do logo/hình nhỏ chèn trong dòng
+    const ref = median(body.flatMap(b => Array(Math.min(30, Math.ceil(b.plain.length / 40))).fill(b.size)));
+    for (const b of out) {
+      if (b.guided || b.rotate || b.bold || b.lineCount >= 3) continue;
+      const caps = b.plain === b.plain.toUpperCase() && /\p{Lu}/u.test(b.plain);
+      if (!caps && b.size > 1.3 * ref && b.plain.length > 25) { b.size = ref; b.leading = Math.max(ref * 1.2, b.leading); }
+    }
+  }
   if (body.length >= 2) {
     const ms = median(body.map(b => b.size));
     const ml = median(body.map(b => b.leading));
-    for (const b of body) if (Math.abs(b.size - ms) <= 0.12 * ms) { b.size = ms; b.leading = Math.max(ms * 1.02, ml); }
+    for (const b of body) if (!b.guided && Math.abs(b.size - ms) <= 0.15 * ms) { b.size = ms; b.leading = Math.max(ms * 1.02, ml); }
   }
   return orderForReading(out, W, []).map((b, i) => ({ ...b, id: `${idPrefix}${i + 1}` }));
 }

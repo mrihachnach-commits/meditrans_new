@@ -1055,8 +1055,8 @@ Rules:
 ${scope}
 For each block return:
 - "box_2d": [ymin, xmin, ymax, xmax] integers 0-1000 (relative to image height/width) tightly enclosing the block's text
-- "text": the exact original text (join lines with single spaces, remove end-of-line hyphenation)
-- "v": natural, accurate Vietnamese medical translation of "text" (keep numbers, units, symbols, drug/gene names, abbreviations, person names, journal names, URLs, DOIs unchanged; Figure n → Hình n, Table n → Bảng n; ALL-CAPS stays ALL-CAPS; reference-list entries and page numbers: return unchanged; no Markdown, no line breaks)
+- "text": the exact original text (join lines with single spaces, remove end-of-line hyphenation). Table-of-contents entries: one block per entry, keep the leader dots as " ....... " followed by the page number (e.g. "V. GUIDANCE ....... 788")
+- "v": natural, accurate Vietnamese medical translation of "text" (for table-of-contents entries end with " ....... " and the same page number) (keep numbers, units, symbols, drug/gene names, abbreviations, person names, journal names, URLs, DOIs unchanged; Figure n → Hình n, Table n → Bảng n; ALL-CAPS stays ALL-CAPS; reference-list entries and page numbers: return unchanged; no Markdown, no line breaks)
 - "lines": number of text lines of the block on the image
 - "bold", "italic": true if most of the block is bold / italic
 - "serif": true if the font is serif (Times-like), false if sans-serif
@@ -1201,7 +1201,7 @@ Return ONLY JSON: {"columns":N,"splits":[...]} where N is 1, 2 or 3 and splits a
 
     const systemInstruction = `English→Vietnamese medical translator. Input: JSON text blocks extracted from one PDF page (reading order). Translate each block into natural, accurate Vietnamese medical language, consistent across blocks; it will be redrawn in the same box, so keep it concise and add nothing.
 Keep unchanged: numbers, units, symbols (± ≤ ≥ × µ °), drug/gene names, abbreviations, superscripts (¹²³), person names, journal names, URLs, DOIs, emails. Reference-list entries: return unchanged.
-Some blocks mark differently-styled words (bold/colored) with tags like <1>Right Ventricle</1>: put the same tag pair around the corresponding Vietnamese words (e.g. <1>Tâm thất phải</1>); keep every tag, add no new ones.
+Some blocks mark differently-styled words (bold/colored) with tags like <1>Right Ventricle</1>: put the same tag pair around the corresponding Vietnamese words (e.g. <1>Tâm thất phải</1>); keep every tag, add no new ones. Translate EVERY English word, including words outside the tags and in titles (e.g. "Atlas of <1>Full Breast Ultrasonography</1>" → "<1>Atlas Siêu âm Toàn bộ Vú</1>" or "Atlas <1>Siêu âm Toàn bộ Vú</1>"); only person names, journal names and the items listed above stay unchanged.
 Figure n → Hình n, Table n → Bảng n. ALL-CAPS headings stay ALL-CAPS. No Markdown, no LaTeX, no line breaks.
 Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
 

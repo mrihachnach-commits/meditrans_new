@@ -266,6 +266,26 @@ export async function analyzePage(
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   await page.render({ canvasContext: ctx, viewport }).promise;
 
+  // Bản vẽ trang KHÔNG có chữ (bỏ lệnh vẽ chữ) → nền thật dưới chữ: dùng để xoá chữ gốc mà vẫn giữ
+  // nguyên ảnh, khung viền, đường kẻ bảng, nền màu. Font vẽ bằng đường nét (không qua fillText) thì
+  // bản này vẫn còn chữ → bộ vẽ tự nhận ra và quay về cách tô màu nền.
+  let clean: ImageData | null = null;
+  try {
+    const bgCanvas = document.createElement('canvas');
+    bgCanvas.width = canvas.width;
+    bgCanvas.height = canvas.height;
+    const bctx = bgCanvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
+    bctx.fillStyle = '#ffffff';
+    bctx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+    const noop = () => { /* bỏ vẽ chữ */ };
+    (bctx as any).fillText = noop;
+    (bctx as any).strokeText = noop;
+    await page.render({ canvasContext: bctx, viewport }).promise;
+    clean = bctx.getImageData(0, 0, bgCanvas.width, bgCanvas.height);
+  } catch {
+    clean = null;
+  }
+
   const textContent = await page.getTextContent();
   const rawItems: RawTextItem[] = (textContent.items as any[])
     .filter(it => typeof it.str === 'string')
@@ -284,11 +304,13 @@ export async function analyzePage(
   const figures = scanned ? [] : await findImageRegions(page, viewport, canvas.width, canvas.height);
 
   let items = normalizeItems(rawItems, viewport.transform, styleResolver(page, textContent.styles));
-  if (!scanned) items = annotateItemColors(ctx, items);
+  // Lớp chữ hỏng bảng mã vẫn cho đúng VỊ TRÍ, CỠ CHỮ, FONT (có chân/không chân, đậm, nghiêng), MÀU
+  // → giữ lại để định dạng các khối OCR chuẩn như bản gốc.
+  if (items.length) items = annotateItemColors(ctx, items);
   const gutters = scanned ? undefined : await resolveGutters(pdfDoc, pageNumber, canvas, items, advisor, signal);
   const blocks = scanned ? [] : buildBlocks(items, canvas.width, canvas.height, gutters);
 
-  return { page, canvas, ctx, blocks, scanned, widthPt: base.width, heightPt: base.height, figures, rotatedLetters };
+  return { page, canvas, ctx, blocks, scanned, widthPt: base.width, heightPt: base.height, figures, rotatedLetters, clean, items };
 }
 
 /**
@@ -358,7 +380,7 @@ type Analyzed = Awaited<ReturnType<typeof analyzePage>>;
 
 /** Thay khối chữ của trang bằng khối OCR (trang scan / lớp chữ hỏng). */
 function applyOcr(analyzed: Analyzed, ocr: OcrBlock[]): Analyzed {
-  const blocks = blocksFromOcr(analyzed.ctx, ocr);
+  const blocks = blocksFromOcr(analyzed.ctx, ocr, 'b', analyzed.items);
   return { ...analyzed, blocks, scanned: false };
 }
 
@@ -367,7 +389,7 @@ function applyOcr(analyzed: Analyzed, ocr: OcrBlock[]): Analyzed {
  * Bỏ khối trùng với chữ đã có trong lớp chữ (AI đôi khi trả cả chữ thường).
  */
 function addExtraOcr(analyzed: Analyzed, extra: OcrBlock[]): { analyzed: Analyzed; kept: OcrBlock[] } {
-  const cand = blocksFromOcr(analyzed.ctx, extra, 'o');
+  const cand = blocksFromOcr(analyzed.ctx, extra, 'o', analyzed.items);
   const keptIdx = new Set<number>();
   const blocks = [...analyzed.blocks];
   cand.forEach(b => {
@@ -382,6 +404,15 @@ function addExtraOcr(analyzed: Analyzed, extra: OcrBlock[]): { analyzed: Analyze
     if (k >= 0) keptIdx.add(k);
   });
   return { analyzed: { ...analyzed, blocks }, kept: extra.filter((_, i) => keptIdx.has(i)) };
+}
+
+/** Bản dịch AI trả kèm khối OCR (bỏ phần "…… 123" của dòng mục lục, vì dấu chấm dẫn & số trang được vẽ riêng). */
+function ocrTranslation(ocr: OcrBlock[], b: LayoutBlock): string | undefined {
+  const o = b.srcIndex !== undefined ? ocr[b.srcIndex] : undefined;
+  let v = o?.v?.trim();
+  if (!v) return undefined;
+  if (b.leader) v = v.replace(/\s*(?:[.·…]\s*){3,}\s*(\d{1,4}|[ivxlcdm]{1,6})?\s*$/i, '').trim();
+  return v || undefined;
 }
 
 /** Lưu kết quả OCR gọn (vị trí + chữ gốc + kiểu chữ); bản dịch nằm trong các cặp câu. */
@@ -403,7 +434,7 @@ async function finishPage(
   if (ocr?.length) pairs.push({ s: OCR_PAIR_KEY, v: JSON.stringify(slimOcr(ocr)) });
   if (extraOcr?.length) pairs.push({ s: OCR_EXTRA_KEY, v: JSON.stringify(slimOcr(extraOcr)) });
   if (!scanned) {
-    report = paintTranslatedPage(ctx, blocks, translations);
+    report = paintTranslatedPage(ctx, blocks, translations, analyzed.clean);
     const seen = new Set<string>();
     for (const b of blocks) {
       const v = translations[b.id];
@@ -450,12 +481,11 @@ export async function translatePageWithLayout(
     if (signal?.aborted) throw new Error('Translation aborted');
     if (!ocr.length) throw new Error('OCR không nhận diện được chữ nào trên trang này.');
     analyzed = applyOcr(analyzed, ocr);
-    const byText = new Map(ocr.map(o => [o.text.replace(/\s+/g, ' ').trim(), o.v]));
     const translations: Record<string, string> = {};
     const missing: LayoutBlock[] = [];
     for (const b of analyzed.blocks) {
-      const v = byText.get(b.text);
-      if (v && v.trim()) translations[b.id] = v; else if (b.translatable) missing.push(b);
+      const v = ocrTranslation(ocr, b);
+      if (v) translations[b.id] = v; else if (b.translatable) missing.push(b);
     }
     for (const chunk of chunkBlocks(missing)) { // khối AI quên dịch → dịch bù
       if (signal?.aborted) throw new Error('Translation aborted');
@@ -480,8 +510,7 @@ export async function translatePageWithLayout(
         const r = addExtraOcr(analyzed, wanted);
         analyzed = r.analyzed;
         extraKept = r.kept;
-        const byText = new Map(wanted.map(o => [o.text.replace(/\s+/g, ' ').trim(), o.v]));
-        for (const b of analyzed.blocks) if (b.fromOcr) { const v = byText.get(b.text); if (v?.trim()) extraTr[b.id] = v; }
+        for (const b of analyzed.blocks) if (b.fromOcr) { const v = ocrTranslation(wanted, b); if (v) extraTr[b.id] = v; }
       }
     } catch (e) {
       if (signal?.aborted) throw e;
@@ -685,7 +714,7 @@ function openLayoutDB(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v9'; // v9: chữ viết tắt đầu đoạn, cỡ chữ đồng đều, OCR (trang scan, chữ trong ảnh, chữ xoay)
+const ENGINE_VERSION = 'v12'; // v12: kiểm thử trên sách thật (Atlas, BI-RADS)
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch

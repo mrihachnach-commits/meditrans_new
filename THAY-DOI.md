@@ -162,3 +162,61 @@ File sửa: `src/App.tsx` (tab thứ 3 ở khung phải + nút mở nhanh), `src
 - Tab "Dịch" thường: trang có lớp chữ hỏng tự chuyển sang đọc ảnh thay vì gửi chữ rác.
 
 **Sửa bản dịch:** nút "Sửa" (bút chì) trên thanh công cụ Giữ định dạng → sửa từng khối (có ô tìm kiếm), "Lưu & vẽ lại": vẽ lại ngay, không tốn token, lưu trên máy và đồng bộ lên tài khoản.
+
+### Cập nhật v10 — giữ cỡ chữ (nén giãn dòng), xoá chữ bằng nền thật, bảng, mục lục, OCR chính xác hơn
+
+**Cỡ chữ đều như bản in:**
+- Giữ nguyên cỡ chữ gốc; bản dịch dài hơn → **nén giãn dòng trước** (tối thiểu 1,08 cỡ chữ, đủ chỗ dấu tiếng Việt), chỉ thu nhỏ chữ khi giãn dòng đã tối thiểu.
+- Mọi đoạn thân bài trên trang dùng **chung một cỡ chữ** (không còn cột to cột nhỏ).
+
+**Xoá chữ gốc bằng nền thật:** trang được vẽ thêm một bản **không có chữ**; vùng chữ gốc được thay bằng đúng nền thật từ bản này → giữ nguyên ảnh (dải ảnh trang bìa), khung viền, đường kẻ bảng, nền màu, logo; hết bóng chữ tiêu đề. Chữ nằm trong ảnh / trang scan: chỉ thay các điểm ảnh là chữ (giữ vân giấy, nền ảnh, không để vệt chữ nhật).
+
+**Bảng:** các ô cùng cột không còn bị gộp thành một đoạn; mỗi ô giữ đúng hàng/cột, đường kẻ giữ nguyên.
+
+**Mục lục:** hết lỗi hai mục vẽ chồng một dòng ("5.3.2 5.3.3…", "8.4.5 8.4.6…").
+
+**Canh giữa:** khối chữ canh giữa có các dòng dài gần bằng nhau (khung chữ cuối trang) được nhận đúng.
+
+**OCR:**
+- Cỡ chữ đo theo chiều cao nét chữ thật, giới hạn theo giãn dòng → ổn định, sát bản gốc; dòng có logo chèn giữa không còn bị phóng to.
+- Đường kẻ / khung viền không bị tính là chữ.
+- Dòng nằm giữa hai khung AI: dòng thụt đầu thuộc đoạn dưới, còn lại thuộc đoạn trên (hết sót dòng cuối đoạn).
+- Chấm nhiễu trên ảnh siêu âm không bị tính là dòng chữ.
+- Lấy trọn chân chữ / dấu thanh khi xoá.
+
+**Dịch:** prompt yêu cầu dịch cả các từ nằm ngoài thẻ đánh dấu (vd. "Atlas of …" trên trang bìa).
+
+### Cập nhật v11 — trang OCR chuẩn font & cỡ chữ, mục lục OCR, cỡ chữ đồng đều
+
+**Trang OCR (lớp chữ hỏng bảng mã, vd. sách BI-RADS):**
+- Lớp chữ hỏng bảng mã vẫn cho đúng vị trí, cỡ chữ, font (có chân/không chân), đậm/nghiêng, màu → mỗi khối OCR lấy định dạng từ lớp chữ nằm dưới nó → **cỡ chữ và font khớp bản gốc** (không còn chữ Times thay cho chữ không chân, không còn to nhỏ lung tung). Trang scan thuần (không có lớp chữ) vẫn dùng ước lượng từ ảnh.
+- Hết vạch "|" sót lại trước tiêu đề / mục lục ("|GIỚI THIỆU", "|IV.", "II II."): nét dọc của chữ I, D, B… trước đây bị nhận nhầm là đường kẻ dọc nên không được xoá (và chắn chỗ làm tiêu đề "Tuyên bố miễn trừ trách nhiệm" gãy 3 dòng).
+- **Mục lục trên trang OCR**: dấu chấm dẫn + số trang vẽ riêng, căn phải đúng như bản gốc.
+- Khung OCR theo cùng quy ước với khối lớp chữ → dòng mục lục / tiêu đề không còn bị thu nhỏ vì "tràn khung" giả.
+- Khung AI quá thấp được nới thành một dòng; tiêu đề cỡ lớn không "ăn" dòng chữ nhỏ bên dưới.
+
+**Cỡ chữ đồng đều:**
+- Thân bài: cả trang dùng chung một cỡ (chỉ đoạn buộc phải nhỏ hơn hẳn mới giữ cỡ riêng).
+- Dòng mục lục và ô bảng cùng cỡ gốc: dùng chung một cỡ khi phải thu nhỏ để giữ 1 dòng.
+
+**Khác:** "M. Teboul…" ở đầu đoạn có thụt đầu dòng được ghép đúng vào đoạn.
+
+### Cập nhật v12 — kiểm thử & sửa trên sách thật (Atlas of Full Breast Ultrasonography, BI-RADS v2025)
+
+Chạy bộ máy thật trên các trang đại diện: bìa, mục lục, tiêu đề chương, trang 2 cột, bảng, trang có ảnh siêu âm (Atlas); trang scan điều khoản, mục lục, giới thiệu (BI-RADS — toàn bộ là ảnh scan, không có lớp chữ).
+
+**Lớp chữ (Atlas):**
+- Tiêu đề chương bị ghép dính 2 dòng ("DuctalUltrasonography", "Echography:Technique") và giãn dòng quá rộng, còn bóng chữ gốc: số chương cỡ lớn kéo nhiều dòng tiêu đề vào cùng một hàng → nay hai chữ chồng nhau theo chiều ngang không bao giờ cùng hàng.
+- Tiêu đề in đậm nhiều dòng không còn bị căn đều (giãn chữ).
+- Mục danh sách số dính liền chữ trong cùng item ("3. Finally…", "(2) the related…") bị nhập vào đoạn trên → nay tách đúng thành mục danh sách (quy tắc "M. Teboul" vẫn ghép lại khi là chữ của đoạn).
+- Hết khoảng trắng thừa trước dấu câu: "[6 , 7 ]", "(Fig. 2.8 )" → "[6, 7]", "(Fig. 2.8)".
+
+**OCR (BI-RADS):**
+- Cỡ chữ đo theo chiều cao chữ x / chữ hoa (biết từ nội dung chữ), bỏ qua dấu chấm dẫn → các dòng mục lục, tiêu đề, thân bài cùng cỡ như bản in (trước đây dòng có chấm dẫn nhỏ hơn hẳn, dòng thưa bị phóng to).
+- Gom cỡ chữ ước lượng thành vài cỡ chuẩn (lệch < 9% → dùng chung).
+- Tự nhận **chữ đậm** theo độ dày nét (so với đoạn văn thường) khi AI không báo.
+- Hết bóng chữ đậm còn sót khi xoá; logo / ảnh nhỏ chèn trong dòng được giữ lại.
+- Không nới khung sang chữ hoa đầu đoạn cỡ lớn (drop cap).
+- Prompt OCR: mỗi mục mục lục một khối, giữ dấu chấm dẫn + số trang.
+
+**Giãn dòng:** chỉ nén tối đa ~12% (tối thiểu 1,12 cỡ chữ) rồi mới thu nhỏ chữ đều cả trang — tránh đoạn bị dồn dòng sát nhau trông chật, các đoạn cùng giãn dòng.
