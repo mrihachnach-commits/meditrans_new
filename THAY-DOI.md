@@ -111,3 +111,54 @@ File sửa: `src/App.tsx` (tab thứ 3 ở khung phải + nút mở nhanh), `src
 3. Đổi các key ShopAIKey hệ thống cũ (đã từng lộ cho mọi tài khoản trước bản vá).
 4. Kiểm tra trong Firestore `users` không có tài khoản lạ mang `role: "admin"` hoặc `level` bất thường.
 5. Sau khi deploy, thử: tài khoản Level 1 không thấy "[Hệ thống] ShopAIKey"; tài khoản Level 2 dịch được bằng key hệ thống và tab Network không lộ giá trị key.
+
+
+### Cập nhật v7 — sửa lỗi ghép nhầm 2 cột, tự nhận diện số cột (AI hỗ trợ khi mơ hồ)
+
+**Lỗi đã sửa (Giữ định dạng):**
+- **Ghép nhầm dòng cột trái với dòng cột phải** (sách Springer… có khe cột hẹp ≈ 1 cỡ chữ, thấp hơn ngưỡng tách 1,2 cỡ chữ cũ) → chữ dịch tràn ngang cả trang, chữ siêu nhỏ, chồng lên nhau, còn sót chữ tiếng Anh, bản dịch rơi sai chỗ. Nay tự **tìm khe cột** (dải dọc không có chữ thân bài, nhiều dòng kết thúc/bắt đầu sát hai bên) và luôn tách tại đó.
+- **Số chương cỡ lớn ("1") kéo nhiều dòng tiêu đề vào cùng một hàng** → tiêu đề bị ghép dính ("DuctalUltrasonography"), che không hết chữ gốc (còn bóng chữ tiếng Anh phía trên). Nay so hàng theo cỡ chữ tương ứng.
+- **Dòng căn đều có khoảng trắng rất rộng** bị cắt thành nhiều mảnh ("With | regards | to | performance") → nay giữ thành một dòng.
+- **Số mục "1.1" bị xoá mất** khi tiêu đề bên cạnh được dịch → nay giữ nguyên các số/ký hiệu không cần dịch.
+- **Thứ tự đọc**: tiêu đề ngang trang → hết cột trái (trên → dưới) → cột phải (hỗ trợ cả 3 cột) → AI dịch đúng ngữ cảnh hơn.
+
+**Nhận diện số cột tự động:**
+- Trang 1 cột, 2 cột, 3 cột được nhận diện tự động, không tốn token khi tín hiệu rõ.
+- Khi mơ hồ (ít dòng, khe không rõ), gửi **ảnh trang thu nhỏ** cho AI hỏi số cột/vị trí khe (`GeminiService.detectColumns`), ghi nhớ kết quả theo trang (localStorage `meditrans_layout_columns_v1`) để không hỏi lại. AI lỗi → dùng nhận diện tự động.
+
+**Bản dịch đã lưu trước đây:** đệm ảnh đổi sang v7 nên trang cũ được dựng lại. Những khối không còn khớp với bản lưu cũ (do trước kia ghép nhầm cột) được **dịch bù riêng các khối đó** rồi cập nhật bản lưu đám mây. Nếu muốn dịch lại toàn bộ trang, bấm "Dịch lại".
+
+**Sửa lỗi "PROXY_GENERATION_DISABLED: generateContent is not supported":**
+- Nguyên nhân: khi nhóm key đang chọn chưa có key (hoặc kho key chưa tải xong), `App.tsx` tự lấy `GEMINI_API_KEY` của môi trường AI Studio. Key này đi qua proxy của AI Studio, mà proxy đó chặn `generateContent`.
+- Đã bỏ đường lùi này: web **chỉ dùng key do người dùng/hệ thống của web cung cấp** (kho key, key nhập tay, `[Hệ thống] ShopAIKey`). Không có key → báo "chưa có API Key" thay vì gọi nhầm proxy AI Studio.
+- Hỏi số cột (`detectColumns`) dùng chung cơ chế chọn key/xoay key/key hệ thống với dịch giữ định dạng.
+
+### Cập nhật v8 — giống bản gốc hơn & lưu trữ như bản dịch thường
+
+**Hiển thị (Giữ định dạng):**
+- **Hết chữ chồng lên nhau** ("trở nên kháng kháng sinh… (nhiễm trùng cơ hội)", "M. Teboul…"): dòng căn đều có khoảng trắng rất rộng, từ sau khoảng trắng bắt đầu bằng chữ hoa/dấu ngoặc trước đây bị cắt thành khối riêng. Nay so với dòng trên/dưới: chữ của chúng phủ qua khoảng trắng → vẫn là một dòng; chỉ tách khi dòng trên/dưới cũng có khe rộng cùng vị trí (cột bảng).
+- **Xoá sạch chữ gốc** theo mực thật trên ảnh (hết bóng chữ "Breast Doppler Ductal" phía trên tiêu đề).
+- **Cỡ chữ đồng đều cả trang**: các đoạn thân bài cùng cỡ gốc dùng chung một tỉ lệ (trừ đoạn buộc phải nhỏ hơn hẳn).
+- **Căn đều mọi dòng trừ dòng cuối** như bản in (trước đây dòng có nhiều khoảng trắng bị chuyển sang căn trái, trông như ngắt đoạn).
+- Đệm ảnh v8: trang đã dịch được vẽ lại theo bản sửa, không tốn token (chỉ dịch bù khối nào không còn khớp).
+
+**Lưu trữ giống bản dịch thường:**
+- Đám mây: lưu ở `users/{chủ file}/documents/{file}/pages/layout-{trang}` — **cùng collection với bản dịch chữ**, dùng quyền đã có sẵn → **không cần triển khai lại Firestore rules**. Vẫn đọc bản lưu cũ ở `layoutPages` (nếu có). Danh sách bản dịch chữ bỏ qua các tài liệu `layout-*`. Sao chép file trong Thư mục cũng sao chép luôn bản dịch giữ định dạng.
+- Điều kiện lưu đám mây giống hệt bản dịch chữ (đăng nhập + file có trên tài khoản); trang dịch trên máy trước đó được tự đẩy lên khi có thể.
+- Trên máy: cặp câu dịch lưu theo khoá không phụ thuộc phiên bản (`pairs::…`) → nâng cấp bộ máy không còn mất bản dịch; tự khôi phục bản dịch nằm trong đệm ảnh của các phiên bản cũ.
+
+### Cập nhật v9 — sửa chi tiết, OCR tự động (trang scan, chữ trong ảnh, chữ xoay), sửa bản dịch
+
+**Sửa chi tiết hiển thị:**
+- "M. Teboul…", "A. Colan…", "2. …" ở đầu đoạn không còn bị nhận nhầm là ký hiệu danh sách (trước đây tách dòng đầu → chữ chồng lên nhau). Nhận biết bằng cách xem dòng dưới có chạy lùi về dưới ký hiệu hay không (danh sách thật thì thụt treo).
+- Cỡ chữ thân bài đồng đều hơn giữa các cột/đoạn trên cùng trang.
+
+**OCR tự động (không cần bấm nút):**
+- Trang scan (không có lớp chữ) **và** trang có lớp chữ hỏng (font không có bảng mã → ký tự rác) được tự nhận diện và dịch bằng OCR: AI đọc ảnh trang, trả về từng khối chữ (vị trí, chữ gốc, bản dịch) trong MỘT lần gọi, dùng đúng hệ thống key của web.
+- Trang có lớp chữ nhưng có **ảnh** (siêu âm, X-quang, sơ đồ… có chữ in trong ảnh) hoặc **chữ xoay 90°**: tự gọi OCR bổ sung chỉ cho các vùng đó (vị trí ảnh đọc từ lệnh vẽ của PDF); chữ thường vẫn lấy từ lớp chữ. Khối OCR trùng với chữ đã có bị bỏ.
+- Chữ xoay được vẽ xoay đúng hướng (đọc từ dưới lên / từ trên xuống). Chữ sáng trên nền tối (nhãn trên ảnh siêu âm) giữ đúng màu.
+- Khung AI chỉ gần đúng → tinh chỉnh theo mực thật: tìm từng dòng chữ trên ảnh rồi gán mỗi dòng cho khối OCR chồng lên nhiều nhất (khung lệch ~1 dòng vẫn xoá sạch, không lấy nhầm dòng khối bên cạnh), tách dòng dính nhau, nhận thụt đầu dòng, cỡ chữ thân bài đồng đều.
+- Kết quả OCR lưu cùng bản dịch (`__ocr__` / `__ocr_extra__` trong các cặp câu) → mở lại / máy khác dựng lại không cần OCR lại.
+- Tab "Dịch" thường: trang có lớp chữ hỏng tự chuyển sang đọc ảnh thay vì gửi chữ rác.
+
+**Sửa bản dịch:** nút "Sửa" (bút chì) trên thanh công cụ Giữ định dạng → sửa từng khối (có ô tìm kiếm), "Lưu & vẽ lại": vẽ lại ngay, không tốn token, lưu trên máy và đồng bộ lên tài khoản.

@@ -982,7 +982,7 @@ export default function App() {
     if (folderVaultKeys.length > 0) return true;
 
     if (folder === 'gemini' || folder === 'all') {
-      const geminiManual = engineKeys['gemini-2.5-flash-lite'] || (import.meta as any).env?.VITE_GEMINI_API_KEY || (process as any).env?.GEMINI_API_KEY;
+      const geminiManual = engineKeys['gemini-2.5-flash-lite']; // chỉ dùng key người dùng nhập trong web — KHÔNG lấy GEMINI_API_KEY của môi trường AI Studio (proxy AI Studio chặn generateContent)
       if (geminiManual && geminiManual.trim()) return true;
     }
     if (folder === 'shopaikey' || folder === 'all') {
@@ -3401,6 +3401,7 @@ export default function App() {
       const unsubscribe = onSnapshot(q, (snapshot) => {
         const remoteTranslations: TranslationState = {};
         snapshot.docs.forEach(doc => {
+          if (!/^\d+$/.test(doc.id)) return; // "layout-N" = bản dịch giữ định dạng, không phải bản dịch chữ
           const data = doc.data();
           remoteTranslations[parseInt(doc.id)] = {
             content: data.content,
@@ -3511,7 +3512,7 @@ export default function App() {
       }
       
       if (allKeys.length === 0 && (activeKeyFolder === 'gemini' || activeKeyFolder === 'all')) {
-        const manualKey = engineKeys[selectedEngine] || (import.meta as any).env?.VITE_GEMINI_API_KEY || (process as any).env?.GEMINI_API_KEY;
+        const manualKey = engineKeys[selectedEngine]; // chỉ dùng key người dùng nhập trong web — KHÔNG lấy GEMINI_API_KEY của môi trường AI Studio (proxy AI Studio chặn generateContent)
         if (manualKey && manualKey.trim()) {
           allKeys.push(manualKey.trim());
           primaryKey = manualKey.trim();
@@ -4877,7 +4878,7 @@ export default function App() {
                       fullScreen={isFullScreen}
                       bulkRequest={layoutBulkRequest}
                       onBulkStateChange={setLayoutBulkState}
-                      cloud={user && fileId && fileOwnerId && !isLocalOnly
+                      cloud={user && fileId && fileOwnerId
                         ? { ownerId: fileOwnerId, fileId, canWrite: user.uid === fileOwnerId || userRole === 'admin' }
                         : null}
                     />

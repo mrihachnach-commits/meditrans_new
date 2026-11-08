@@ -386,7 +386,8 @@ export class GeminiService implements TranslationService {
     systemInstruction: string,
     prompt: string,
     imageBase64: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    maxTokens = 8192
   ): Promise<string> {
     const cleanBaseUrl = this.getProxyBaseUrl();
     const mappedModel = this.mapModelForOpenAI(model);
@@ -414,7 +415,7 @@ export class GeminiService implements TranslationService {
     const body: any = {
       model: mappedModel,
       temperature: 0,
-      max_tokens: 8192,
+      max_tokens: maxTokens,
       stream: false,
       messages
     };
@@ -1041,6 +1042,157 @@ Rules:
    * Dịch giữ định dạng: dịch danh sách khối chữ (đã trích từ PDF) sang tiếng Việt.
    * Trả về map id → bản dịch. Khối nào model bỏ sót sẽ không có trong map (giữ nguyên chữ gốc).
    */
+  /**
+   * OCR + dịch giữ định dạng cho trang scan (MỘT lần gọi): trả về từng khối chữ với vị trí trên ảnh,
+   * chữ gốc và bản dịch tiếng Việt. Dùng chung hệ thống key / xoay key / key hệ thống của web.
+   */
+  async ocrLayoutBlocks(imageDataUrl: string, signal?: AbortSignal, opts: { mode?: 'full' | 'extra'; regions?: number[][] } = {}): Promise<any[]> {
+    const extra = opts.mode === 'extra';
+    const scope = extra
+      ? `This page already has a normal text layer. Return ONLY: (1) text that is part of the IMAGES/photos/scans/diagrams inside these regions (box_2d [ymin,xmin,ymax,xmax] 0-1000): ${JSON.stringify(opts.regions || [])} — e.g. labels, annotations, measurements, words burned into ultrasound/X-ray/CT images, legends inside figures; and (2) any text rotated 90° (vertical text) anywhere on the page. Do NOT return the normal horizontal page text (paragraphs, headings, captions outside the images). If there is no such text, return {"blocks":[]}.`
+      : `Detect EVERY text block on the page image: titles, headings, paragraphs, each list item (separately), figure/table captions, each table cell (separately), labels and text inside images/figures, vertical (rotated) text, running headers, footers, page numbers. Treat each text column separately. Do NOT merge blocks from different columns.`;
+    const systemInstruction = `You are an OCR engine and an English→Vietnamese medical translator for book/journal pages (often scanned).
+${scope}
+For each block return:
+- "box_2d": [ymin, xmin, ymax, xmax] integers 0-1000 (relative to image height/width) tightly enclosing the block's text
+- "text": the exact original text (join lines with single spaces, remove end-of-line hyphenation)
+- "v": natural, accurate Vietnamese medical translation of "text" (keep numbers, units, symbols, drug/gene names, abbreviations, person names, journal names, URLs, DOIs unchanged; Figure n → Hình n, Table n → Bảng n; ALL-CAPS stays ALL-CAPS; reference-list entries and page numbers: return unchanged; no Markdown, no line breaks)
+- "lines": number of text lines of the block on the image
+- "bold", "italic": true if most of the block is bold / italic
+- "serif": true if the font is serif (Times-like), false if sans-serif
+- "align": "left" | "center" | "right" | "justify"
+- "dir": "up" if the text is rotated and reads bottom-to-top, "down" if it reads top-to-bottom; omit for normal horizontal text. For rotated text, "lines" counts the lines across the block.
+Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bottom).`;
+    const prompt = extra
+      ? 'Return only text inside the given image regions and rotated text, with boxes and Vietnamese translations. JSON only.'
+      : 'OCR this page into text blocks with boxes and Vietnamese translations. JSON only.';
+    const parse = (raw: string): any[] => {
+      let txt = (raw || '').replace(/```json|```/gi, '').trim();
+      const a = txt.indexOf('{'), b = txt.lastIndexOf('}');
+      const a2 = txt.indexOf('[');
+      if (a2 >= 0 && (a < 0 || a2 < a)) txt = txt.slice(a2, txt.lastIndexOf(']') + 1);
+      else if (a >= 0 && b > a) txt = txt.slice(a, b + 1);
+      const d = JSON.parse(txt);
+      const arr: any[] = Array.isArray(d) ? d : (d.blocks || d.t || []);
+      const out = arr
+        .filter(o => o && Array.isArray(o.box_2d || o.box) && typeof o.text === 'string' && o.text.trim())
+        .map(o => ({
+          box_2d: (o.box_2d || o.box).map(Number),
+          text: String(o.text),
+          v: typeof o.v === 'string' ? cleanLatex(o.v).replace(/\*\*/g, '').replace(/\s*\n\s*/g, ' ').trim() : undefined,
+          lines: Number(o.lines) || undefined,
+          bold: !!o.bold, italic: !!o.italic, serif: o.serif !== false,
+          align: typeof o.align === 'string' ? o.align : undefined,
+          dir: o.dir === 'up' || o.dir === 'down' ? o.dir : undefined,
+        }));
+      if (!out.length && !extra) throw new Error('OCR không trả về khối chữ hợp lệ.');
+      return out;
+    };
+
+    const MAX_RETRIES = 4;
+    for (let retry = 0; retry <= MAX_RETRIES; retry++) {
+      if (signal?.aborted) throw new Error('Translation aborted');
+      let ai: any, key: string;
+      try {
+        ({ ai, key } = await this.acquireKeyAndInstance());
+      } catch {
+        throw new Error('Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.');
+      }
+      try {
+        let raw = '';
+        if (this.isCurrentKeyProxy(key)) {
+          raw = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, imageDataUrl, signal, 16384);
+        } else {
+          const gm = this.mapModelForGoogle(this.modelName);
+          const genModel = ai.getGenerativeModel({
+            model: gm,
+            systemInstruction,
+            generationConfig: GeminiService.genConfig(gm, { temperature: 0.1, responseMimeType: 'application/json', maxOutputTokens: 16384 }, 'low'),
+          });
+          const result = await genModel.generateContent([
+            prompt,
+            { inlineData: { mimeType: 'image/jpeg', data: imageDataUrl.split(',')[1] || imageDataUrl } },
+          ], signal ? ({ signal } as any) : undefined);
+          raw = (await result.response).text() || '';
+        }
+        const parsed = parse(raw);
+        GeminiService.lastSuccessfulKey = key;
+        return parsed;
+      } catch (error: any) {
+        if (signal?.aborted) throw new Error('Translation aborted');
+        if (GeminiService.handleThinkingError(this.mapModelForGoogle(this.modelName), error)) continue;
+        const msg = String(error?.message || '').toLowerCase();
+        if (msg.includes('level 2') || msg.includes('đăng nhập')) throw error;
+        const isQuota = msg.includes('429') || msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('401');
+        if (retry < MAX_RETRIES && this.rotateKey(key, isQuota)) {
+          await new Promise(r => setTimeout(r, Math.min(8000, Math.pow(1.5, retry + 1) * 800)));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Quá số lần thử lại khi OCR trang.');
+  }
+
+  /**
+   * Nhận diện bố cục cột của trang sách (dùng khi bộ nhận diện tự động không chắc chắn).
+   * Trả về số cột văn bản thân bài và vị trí khe giữa các cột (tỉ lệ 0..1 theo chiều rộng trang).
+   */
+  async detectColumns(imageDataUrl: string, signal?: AbortSignal): Promise<{ columns: number; splits: number[] } | null> {
+    const systemInstruction = `You analyze the page layout of a book/journal page image. Count the columns of the MAIN BODY TEXT only (ignore running headers, footers, page numbers, figures, tables, captions, side tabs). A full-width title above two text columns still means 2 columns.
+Return ONLY JSON: {"columns":N,"splits":[...]} where N is 1, 2 or 3 and splits are the x-positions of the vertical white gaps between body-text columns, as fractions of the page width (0..1). For 1 column, splits is [].`;
+    const prompt = 'How many body-text columns does this page have? JSON only.';
+    const parse = (raw: string) => {
+      let txt = (raw || '').replace(/```json|```/gi, '').trim();
+      const a = txt.indexOf('{'), b = txt.lastIndexOf('}');
+      if (a >= 0 && b > a) txt = txt.slice(a, b + 1);
+      const d = JSON.parse(txt);
+      const columns = Math.round(Number(d?.columns));
+      if (!Number.isFinite(columns) || columns < 1 || columns > 4) return null;
+      const splits = (Array.isArray(d?.splits) ? d.splits : []).map(Number).filter((x: number) => Number.isFinite(x) && x > 0 && x < 1);
+      return { columns, splits };
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (signal?.aborted) throw new Error('Translation aborted');
+      let ai: any, key: string;
+      try {
+        ({ ai, key } = await this.acquireKeyAndInstance());
+      } catch {
+        return null;
+      }
+      try {
+        let raw = '';
+        if (this.isCurrentKeyProxy(key)) {
+          raw = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, imageDataUrl, signal);
+        } else {
+          const gm = this.mapModelForGoogle(this.modelName);
+          const genModel = ai.getGenerativeModel({
+            model: gm,
+            systemInstruction,
+            generationConfig: GeminiService.genConfig(gm, { temperature: 0, responseMimeType: 'application/json' }),
+          });
+          const result = await genModel.generateContent([
+            prompt,
+            { inlineData: { mimeType: 'image/jpeg', data: imageDataUrl.split(',')[1] || imageDataUrl } },
+          ], signal ? ({ signal } as any) : undefined);
+          raw = (await result.response).text() || '';
+        }
+        const parsed = parse(raw);
+        if (parsed) GeminiService.lastSuccessfulKey = key;
+        return parsed;
+      } catch (error: any) {
+        if (signal?.aborted) throw new Error('Translation aborted');
+        if (GeminiService.handleThinkingError(this.mapModelForGoogle(this.modelName), error)) continue;
+        const msg = String(error?.message || '').toLowerCase();
+        const isQuota = msg.includes('429') || msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('401');
+        if (attempt === 0 && this.rotateKey(key, isQuota)) continue;
+        console.warn('[Layout] detectColumns lỗi:', error);
+        return null;
+      }
+    }
+    return null;
+  }
+
   async translateLayoutBlocks(
     blocks: { id: string; text: string }[],
     signal?: AbortSignal
