@@ -7,6 +7,7 @@ import { OPS } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
 import {
   analyzeColumns,
+  detectDropCaps,
   annotateItemColors,
   blocksFromOcr,
   OcrBlock,
@@ -56,7 +57,8 @@ export const isOcrKey = (s: string) => s === OCR_PAIR_KEY || s === OCR_EXTRA_KEY
 /* Nhận diện số cột (tự động; AI hỗ trợ khi mơ hồ)                     */
 /* ------------------------------------------------------------------ */
 
-const COLUMN_CACHE_KEY = 'meditrans_layout_columns_v1';
+// v2: bỏ các câu trả lời cũ (AI có thể đã trả lời sai "1 cột" cho trang mà cột trái toàn hình)
+const COLUMN_CACHE_KEY = 'meditrans_layout_columns_v2';
 const columnMemo = new Map<string, number[]>(); // khoá → khe cột theo tỉ lệ chiều rộng trang
 
 function loadColumnMemo() {
@@ -121,12 +123,26 @@ async function resolveGutters(
   if (!weak.length) return strong.length ? strong : undefined; // rõ ràng: chắc chắn nhiều cột hoặc 1 cột
   if (!advisor?.detectColumns) return undefined;             // không có AI → để bộ máy tự quyết theo ngưỡng mặc định
 
+  // Sách thường dùng chung một bố cục cho mọi trang: trang khác của CÙNG tài liệu đã được AI xác nhận khe cột
+  // trùng vị trí với các khe yếu ở đây → dùng lại, không gọi AI (mỗi lần gọi gửi kèm ảnh trang → chậm, tốn token)
+  const prefix = key.slice(0, key.lastIndexOf('::') + 2);
+  const cands = [...strong, ...weak];
+  for (const [k, fr] of [...columnMemo.entries()].reverse()) {
+    if (!k.startsWith(prefix) || !fr.length) continue;
+    const xs = fr.map(f => f * W);
+    const explains = weak.every(w => xs.some(x => Math.abs(x - w) < 0.02 * W)) && xs.every(x => cands.some(c => Math.abs(c - x) < 0.03 * W));
+    if (explains) {
+      saveColumnMemo(key, fr);
+      return xs;
+    }
+  }
+
   try {
     const ans = await advisor.detectColumns(thumbnail(canvas), signal);
     if (!ans || !Number.isFinite(ans.columns)) return undefined;
     let gutters: number[];
     if (ans.columns <= 1) {
-      gutters = strong; // AI nói 1 cột → bỏ các khe yếu
+      gutters = strong; // AI nói 1 cột → chỉ bỏ các khe yếu; khe có bằng chứng rõ trên lớp chữ luôn được giữ
     } else {
       const cands = [...strong, ...weak];
       gutters = (ans.splits || [])
@@ -137,6 +153,7 @@ async function resolveGutters(
           return near ?? x;
         });
       if (!gutters.length) gutters = cands; // AI nói nhiều cột nhưng không chỉ vị trí → dùng mọi ứng viên
+      for (const x of strong) if (!gutters.some(g => Math.abs(g - x) < 0.03 * W)) gutters.push(x); // không bao giờ bỏ khe chắc chắn
     }
     gutters = [...new Set(gutters.map(x => Math.round(x)))].sort((a, b) => a - b);
     saveColumnMemo(key, gutters.map(x => x / W));
@@ -199,6 +216,8 @@ export function ensureLayoutFonts(): Promise<void> {
 /* Đọc trang                                                           */
 /* ------------------------------------------------------------------ */
 
+const KNOWN_SANS_RE = /sans|arial|helvet|avenir|myriad|frutiger|univers|futura|gill|segoe|calibri|verdana|tahoma|lato|roboto|gotham|\bdin|optima|franklin|trebuchet|gothic|corbel|candara|syntax|rotis|interstate|akzidenz|grotesk|grotesque|montserrat|nunito|raleway|poppins|inter\b|ubuntu|fira|noto ?sans|source ?sans|pt ?sans|lucida ?sans|myriadpro|officina|thesans|meta(?:plus|pro|normal|bold)?\b/i;
+
 function styleResolver(page: any, styles: Record<string, any>) {
   const cache = new Map<string, FontStyleInfo>();
   return (fontName: string): FontStyleInfo => {
@@ -225,7 +244,8 @@ function styleResolver(page: any, styles: Record<string, any>) {
     const info: FontStyleInfo = {
       bold: boldFlag || /bold|black|heavy|semibold|demi/i.test(all),
       italic: italicFlag || /italic|oblique/i.test(all),
-      serif: nameLooksSerif || (family === 'serif' && !/sans/i.test(name)),
+      // pdf.js đoán "serif" theo cờ font, nhiều font không chân (Avenir, Myriad, Frutiger…) bị gắn nhầm → loại trừ theo tên
+      serif: nameLooksSerif || (family === 'serif' && !KNOWN_SANS_RE.test(name)),
     };
     cache.set(fontName, info);
     return info;
@@ -250,10 +270,63 @@ export function isGarbledText(text: string): boolean {
   return false;
 }
 
-export async function analyzePage(
-  pdfDoc: PDFDocumentProxy, pageNumber: number, advisor?: LayoutBlockTranslator, signal?: AbortSignal,
-) {
+/* ------------------------------------------------------------------ */
+/* Điều phối CPU / huỷ                                                 */
+/* ------------------------------------------------------------------ */
+
+const abortError = () => new Error('Translation aborted');
+function checkAbort(signal?: AbortSignal) { if (signal?.aborted) throw abortError(); }
+/** Nhường luồng chính cho trình duyệt vẽ giao diện / nhận thao tác (chống đơ khi dịch nhiều trang). */
+const yieldToUI = () => new Promise<void>(r => setTimeout(r, 0));
+
+/**
+ * Khoá CPU: phần nặng (vẽ trang, đọc điểm ảnh, dàn chữ) chạy LẦN LƯỢT từng trang, trong khi phần gọi AI của
+ * các trang khác vẫn chạy song song. Trước đây 2–3 trang cùng vẽ/đọc điểm ảnh một lúc → đơ máy, trình xem PDF
+ * bên trái bị nghẽn (dùng chung worker pdf.js).
+ */
+let cpuChain: Promise<void> = Promise.resolve();
+async function withCpu<T>(fn: () => Promise<T> | T, signal?: AbortSignal): Promise<T> {
+  const prev = cpuChain;
+  let release!: () => void;
+  cpuChain = new Promise<void>(r => { release = r; });
+  try {
+    await prev;
+    checkAbort(signal);
+    await yieldToUI();
+    checkAbort(signal);
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+/** Vẽ trang bằng pdf.js, huỷ ngay khi bấm Dừng. */
+async function renderPage(page: any, ctx: CanvasRenderingContext2D, viewport: any, signal?: AbortSignal) {
+  checkAbort(signal);
+  const task = page.render({ canvasContext: ctx, viewport });
+  const onAbort = () => { try { task.cancel(); } catch { /* ignore */ } };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    await task.promise;
+  } catch (e) {
+    if (signal?.aborted) throw abortError();
+    throw e;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/** Giải phóng bộ nhớ của trang đã phân tích (canvas 1700px ≈ 15 MB mỗi cái). */
+function releaseAnalyzed(a: { canvas?: HTMLCanvasElement; page?: any } | null | undefined) {
+  if (!a) return;
+  try { if (a.canvas) { a.canvas.width = 0; a.canvas.height = 0; } } catch { /* ignore */ }
+  try { a.page?.cleanup?.(); } catch { /* ignore */ }
+}
+
+/** Phần nặng CPU: vẽ trang, đọc lớp chữ, lấy màu/cỡ chữ thật. */
+async function rasterizePage(pdfDoc: PDFDocumentProxy, pageNumber: number, signal?: AbortSignal) {
   const page: any = await pdfDoc.getPage(pageNumber);
+  checkAbort(signal);
   const base = page.getViewport({ scale: 1 });
   const scale = Math.min(3, Math.max(1.5, TARGET_WIDTH_PX / base.width));
   const viewport = page.getViewport({ scale });
@@ -261,63 +334,93 @@ export async function analyzePage(
   const canvas = document.createElement('canvas');
   canvas.width = Math.floor(viewport.width);
   canvas.height = Math.floor(viewport.height);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvasContext: ctx, viewport }).promise;
-
-  // Bản vẽ trang KHÔNG có chữ (bỏ lệnh vẽ chữ) → nền thật dưới chữ: dùng để xoá chữ gốc mà vẫn giữ
-  // nguyên ảnh, khung viền, đường kẻ bảng, nền màu. Font vẽ bằng đường nét (không qua fillText) thì
-  // bản này vẫn còn chữ → bộ vẽ tự nhận ra và quay về cách tô màu nền.
-  let clean: ImageData | null = null;
   try {
-    const bgCanvas = document.createElement('canvas');
-    bgCanvas.width = canvas.width;
-    bgCanvas.height = canvas.height;
-    const bctx = bgCanvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
-    bctx.fillStyle = '#ffffff';
-    bctx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
-    const noop = () => { /* bỏ vẽ chữ */ };
-    (bctx as any).fillText = noop;
-    (bctx as any).strokeText = noop;
-    await page.render({ canvasContext: bctx, viewport }).promise;
-    clean = bctx.getImageData(0, 0, bgCanvas.width, bgCanvas.height);
-  } catch {
-    clean = null;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const textContent = await page.getTextContent();
+    checkAbort(signal);
+    const rawItems: RawTextItem[] = (textContent.items as any[])
+      .filter(it => typeof it.str === 'string')
+      .map(it => ({ str: it.str, transform: it.transform, width: it.width, fontName: it.fontName }));
+    const letters = rawItems.reduce((s, it) => s + (it.str.match(/\p{L}/gu)?.length ?? 0), 0);
+    // Trang scan (không có lớp chữ) HOẶC lớp chữ hỏng (font không có bảng mã → ký tự rác) → tự chuyển sang OCR
+    const scanned = letters < 20 || isGarbledText(rawItems.map(it => it.str).join(' '));
+    // Chữ xoay (dọc) không dàn lại được từ lớp chữ → sẽ được OCR bổ sung
+    const rotatedLetters = rawItems.reduce((n, it) => {
+      const t = it.transform;
+      const rotated = Math.abs(t[1]) > 0.05 * Math.abs(t[0]) || t[0] <= 0;
+      return rotated ? n + (it.str.match(/\p{L}/gu)?.length ?? 0) : n;
+    }, 0);
+
+    await renderPage(page, ctx, viewport, signal);
+    await yieldToUI();
+    checkAbort(signal);
+
+    const ops = scanned ? { regions: [], vector: false } : await findImageRegions(page, viewport, canvas.width, canvas.height);
+    const figures = ops.regions;
+
+    // Bản vẽ trang KHÔNG có chữ (bỏ lệnh vẽ chữ) → nền thật dưới chữ: dùng để xoá chữ gốc mà vẫn giữ nguyên ảnh,
+    // khung viền, đường kẻ bảng, nền màu, và để lấy đúng màu chữ trên nền ảnh/gradient.
+    // Chỉ vẽ khi trang có hình / đường kẻ / mảng màu (trang chữ thuần trên nền trắng không cần → nhanh gấp đôi).
+    let clean: ImageData | null = null;
+    if (!scanned && (figures.length > 0 || ops.vector)) {
+      const bgCanvas = document.createElement('canvas');
+      bgCanvas.width = canvas.width;
+      bgCanvas.height = canvas.height;
+      try {
+        const bctx = bgCanvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
+        bctx.fillStyle = '#ffffff';
+        bctx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+        const noop = () => { /* bỏ vẽ chữ */ };
+        (bctx as any).fillText = noop;
+        (bctx as any).strokeText = noop;
+        await renderPage(page, bctx, viewport, signal);
+        clean = bctx.getImageData(0, 0, bgCanvas.width, bgCanvas.height);
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        clean = null;
+      } finally {
+        bgCanvas.width = 0; bgCanvas.height = 0;
+      }
+      await yieldToUI();
+      checkAbort(signal);
+    }
+
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let items = normalizeItems(rawItems, viewport.transform, styleResolver(page, textContent.styles));
+    // Lớp chữ hỏng bảng mã vẫn cho đúng VỊ TRÍ, CỠ CHỮ, FONT (có chân/không chân, đậm, nghiêng), MÀU
+    // → giữ lại để định dạng các khối OCR chuẩn như bản gốc.
+    if (items.length) items = annotateItemColors(ctx, items, clean, img);
+    return { page, canvas, ctx, scanned, widthPt: base.width, heightPt: base.height, figures, rotatedLetters, clean, items, img };
+  } catch (e) {
+    releaseAnalyzed({ canvas, page });
+    throw e;
   }
+}
 
-  const textContent = await page.getTextContent();
-  const rawItems: RawTextItem[] = (textContent.items as any[])
-    .filter(it => typeof it.str === 'string')
-    .map(it => ({ str: it.str, transform: it.transform, width: it.width, fontName: it.fontName }));
-
-  const letters = rawItems.reduce((s, it) => s + (it.str.match(/\p{L}/gu)?.length ?? 0), 0);
-  // Trang scan (không có lớp chữ) HOẶC lớp chữ hỏng (font không có bảng mã → ký tự rác) → tự chuyển sang OCR
-  const scanned = letters < 20 || isGarbledText(rawItems.map(it => it.str).join(' '));
-
-  // Chữ xoay (dọc) không dàn lại được từ lớp chữ → sẽ được OCR bổ sung
-  const rotatedLetters = rawItems.reduce((n, it) => {
-    const t = it.transform;
-    const rotated = Math.abs(t[1]) > 0.05 * Math.abs(t[0]) || t[0] <= 0;
-    return rotated ? n + (it.str.match(/\p{L}/gu)?.length ?? 0) : n;
-  }, 0);
-  const figures = scanned ? [] : await findImageRegions(page, viewport, canvas.width, canvas.height);
-
-  let items = normalizeItems(rawItems, viewport.transform, styleResolver(page, textContent.styles));
-  // Lớp chữ hỏng bảng mã vẫn cho đúng VỊ TRÍ, CỠ CHỮ, FONT (có chân/không chân, đậm, nghiêng), MÀU
-  // → giữ lại để định dạng các khối OCR chuẩn như bản gốc.
-  if (items.length) items = annotateItemColors(ctx, items);
-  const gutters = scanned ? undefined : await resolveGutters(pdfDoc, pageNumber, canvas, items, advisor, signal);
-  const blocks = scanned ? [] : buildBlocks(items, canvas.width, canvas.height, gutters);
-
-  return { page, canvas, ctx, blocks, scanned, widthPt: base.width, heightPt: base.height, figures, rotatedLetters, clean, items };
+export async function analyzePage(
+  pdfDoc: PDFDocumentProxy, pageNumber: number, advisor?: LayoutBlockTranslator, signal?: AbortSignal,
+) {
+  const r = await withCpu(() => rasterizePage(pdfDoc, pageNumber, signal), signal);
+  try {
+    // Hỏi AI số cột (nếu cần) nằm NGOÀI khoá CPU để trang khác vẫn xử lý được trong lúc chờ mạng
+    const gutters = r.scanned ? undefined : await resolveGutters(pdfDoc, pageNumber, r.canvas, r.items, advisor, signal);
+    checkAbort(signal);
+    const blocks: LayoutBlock[] = r.scanned ? [] : buildBlocks(r.items, r.canvas.width, r.canvas.height, gutters);
+    return { ...r, blocks };
+  } catch (e) {
+    releaseAnalyzed(r);
+    throw e;
+  }
 }
 
 /**
  * Vị trí các ảnh raster vẽ trên trang (toạ độ canvas), đọc từ danh sách lệnh vẽ của pdf.js.
  * Bỏ ảnh quá nhỏ (biểu tượng) và ảnh phủ gần hết trang (nền).
  */
-async function findImageRegions(page: any, viewport: any, W: number, H: number): Promise<{ x0: number; y0: number; x1: number; y1: number }[]> {
+async function findImageRegions(page: any, viewport: any, W: number, H: number): Promise<{ regions: { x0: number; y0: number; x1: number; y1: number }[]; vector: boolean }> {
   try {
     const opList = await page.getOperatorList();
     const fn: number[] = opList.fnArray, args: any[] = opList.argsArray;
@@ -329,6 +432,10 @@ async function findImageRegions(page: any, viewport: any, W: number, H: number):
     let ctm = [1, 0, 0, 1, 0, 0];
     const stack: number[][] = [];
     const out: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    // Có hình vẽ vector (đường kẻ bảng, khung, mảng màu nền) → cần bản vẽ "không chữ" để xoá chữ mà giữ nền
+    const vectorOps = new Set([OPS.stroke, OPS.fill, OPS.eoFill, OPS.fillStroke, OPS.eoFillStroke, OPS.closeStroke,
+      OPS.closeFillStroke, OPS.closeEOFillStroke, OPS.shadingFill].filter(v => v !== undefined));
+    let vectorCount = 0;
     const imageOps = new Set([OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageXObjectRepeat, (OPS as any).paintJpegXObject].filter(v => v !== undefined));
     for (let i = 0; i < fn.length; i++) {
       const op = fn[i];
@@ -337,6 +444,7 @@ async function findImageRegions(page: any, viewport: any, W: number, H: number):
       else if (op === OPS.transform) ctm = mulM(ctm, args[i]);
       else if (op === OPS.paintFormXObjectBegin) { stack.push(ctm); if (Array.isArray(args[i]?.[0]) && args[i][0].length === 6) ctm = mulM(ctm, args[i][0]); }
       else if (op === OPS.paintFormXObjectEnd) ctm = stack.pop() || [1, 0, 0, 1, 0, 0];
+      else if (vectorOps.has(op)) vectorCount++;
       else if (imageOps.has(op)) {
         const m = mulM(viewport.transform, ctm);
         const pts = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
@@ -346,9 +454,9 @@ async function findImageRegions(page: any, viewport: any, W: number, H: number):
         if (area >= 0.01 * W * H && area <= 0.85 * W * H && r.x1 - r.x0 > 0.06 * W && r.y1 - r.y0 > 0.04 * H) out.push(r);
       }
     }
-    return out;
+    return { regions: out, vector: vectorCount > 0 };
   } catch {
-    return [];
+    return { regions: [], vector: true };
   }
 }
 
@@ -392,6 +500,11 @@ function addExtraOcr(analyzed: Analyzed, extra: OcrBlock[]): { analyzed: Analyze
   const cand = blocksFromOcr(analyzed.ctx, extra, 'o', analyzed.items);
   const keptIdx = new Set<number>();
   const blocks = [...analyzed.blocks];
+  // So khớp theo NỘI DUNG: AI hay trả lại cả chữ thường của trang (tiêu đề, phụ đề trên ảnh bìa) với khung lệch chỗ
+  // → trước đây không trùng vị trí nên bị vẽ thêm lần nữa (vd. phụ đề bìa xếp dọc từng chữ ở đầu trang)
+  const norm = (t: string) => (t.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).join(' ');
+  const layerTexts = analyzed.blocks.filter(t => !t.fromOcr).map(t => norm(t.plain)).filter(t => t.length >= 3);
+  const layerAll = ' ' + layerTexts.join(' ') + ' ';
   cand.forEach(b => {
     const area = Math.max(1, (b.x1 - b.x0) * (b.bottom - b.top));
     const overlap = analyzed.blocks.some(t => {
@@ -399,6 +512,18 @@ function addExtraOcr(analyzed: Analyzed, extra: OcrBlock[]): { analyzed: Analyze
       return ix > 0 && iy > 0 && (ix * iy) / area > 0.3;
     });
     if (overlap) return;
+    // Chữ trong hình không thể chồng lên khối chữ thường của trang: khung lấn vào chữ thường = AI đoán sai vị trí → bỏ
+    const intrudes = analyzed.blocks.some(t => {
+      if (t.fromOcr || !t.translatable) return false;
+      const ix = Math.min(t.x1, b.x1) - Math.max(t.x0, b.x0), iy = Math.min(t.bottom, b.bottom) - Math.max(t.top, b.top);
+      return ix > 0.5 * t.size && iy > 0.5 * t.size;
+    });
+    if (intrudes) return;
+    const nt = norm(b.plain);
+    if (nt.length >= 4 && (layerAll.includes(' ' + nt + ' ') || layerTexts.some(t => nt.includes(t) && t.length > 0.6 * nt.length))) return;
+    // Khung vô lý: chữ nhiều từ mà khung hẹp hơn ~3 cỡ chữ (chữ ngang) → AI đoán sai vị trí, bỏ
+    const words = b.plain.trim().split(/\s+/).length;
+    if (!b.rotate && words >= 3 && b.x1 - b.x0 < 3 * b.size) return;
     blocks.push(b);
     const k = extra.findIndex((o, i) => !keptIdx.has(i) && o.text.replace(/\s+/g, ' ').trim() === b.text);
     if (k >= 0) keptIdx.add(k);
@@ -415,6 +540,15 @@ function ocrTranslation(ocr: OcrBlock[], b: LayoutBlock): string | undefined {
   return v || undefined;
 }
 
+const OCR_FIGURES_KEY = 'meditrans_layout_ocr_figures';
+/** Có dịch chữ nằm trong hình / chữ xoay dọc không (chậm, tốn token). Mặc định: không. */
+export function getLayoutOcrFigures(): boolean {
+  try { return localStorage.getItem(OCR_FIGURES_KEY) === '1'; } catch { return false; }
+}
+export function setLayoutOcrFigures(on: boolean) {
+  try { localStorage.setItem(OCR_FIGURES_KEY, on ? '1' : '0'); } catch { /* ignore */ }
+}
+
 /** Lưu kết quả OCR gọn (vị trí + chữ gốc + kiểu chữ); bản dịch nằm trong các cặp câu. */
 const slimOcr = (ocr: OcrBlock[]) => ocr.map(o => ({
   box_2d: o.box_2d, text: o.text, lines: o.lines, bold: o.bold || undefined, italic: o.italic || undefined,
@@ -427,42 +561,83 @@ async function finishPage(
   translations: Record<string, string>,
   ocr?: OcrBlock[],
   extraOcr?: OcrBlock[],
+  signal?: AbortSignal,
 ): Promise<LayoutPageResult> {
-  const { page, canvas, ctx, blocks, scanned, widthPt, heightPt } = analyzed;
-  let report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [] };
-  const pairs: LayoutPair[] = [];
-  if (ocr?.length) pairs.push({ s: OCR_PAIR_KEY, v: JSON.stringify(slimOcr(ocr)) });
-  if (extraOcr?.length) pairs.push({ s: OCR_EXTRA_KEY, v: JSON.stringify(slimOcr(extraOcr)) });
-  if (!scanned) {
-    report = paintTranslatedPage(ctx, blocks, translations, analyzed.clean);
-    const seen = new Set<string>();
-    for (const b of blocks) {
-      const v = translations[b.id];
-      const key = normKey(b.text);
-      if (!b.translatable || !v || seen.has(key)) continue;
-      seen.add(key);
-      pairs.push({ s: key, v: normKey(v) });
+  try {
+    return await withCpu(async () => {
+      const { canvas, ctx, blocks, scanned, widthPt, heightPt } = analyzed;
+      let report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [] };
+      const pairs: LayoutPair[] = [];
+      if (ocr?.length) pairs.push({ s: OCR_PAIR_KEY, v: JSON.stringify(slimOcr(ocr)) });
+      if (extraOcr?.length) pairs.push({ s: OCR_EXTRA_KEY, v: JSON.stringify(slimOcr(extraOcr)) });
+      if (!scanned) {
+        report = paintTranslatedPage(ctx, blocks, translations, analyzed.clean, analyzed.img);
+        const seen = new Set<string>();
+        for (const b of blocks) {
+          const v = translations[b.id];
+          const key = normKey(b.text);
+          if (!b.translatable || !v || seen.has(key)) continue;
+          seen.add(key);
+          pairs.push({ s: key, v: normKey(v) });
+        }
+      }
+      await yieldToUI();
+      const blob: Blob = await new Promise((resolve, reject) =>
+        canvas.toBlob(b => (b ? resolve(b) : reject(new Error('Không tạo được ảnh trang'))), 'image/jpeg', JPEG_QUALITY),
+      );
+      return {
+        pageNumber,
+        blob,
+        widthPt,
+        heightPt,
+        overflowCount: report.overflowIds.length,
+        shrunkCount: report.shrunkIds.length,
+        blockCount: blocks.filter(b => b.translatable).length,
+        scanned,
+        createdAt: Date.now(),
+        pairs,
+        ocr: !!ocr?.length || !!extraOcr?.length,
+      };
+    }, signal);
+  } finally {
+    releaseAnalyzed(analyzed);
+  }
+}
+
+/**
+ * Dịch danh sách khối: các phần (chunk) của một trang gửi SONG SONG; khối AI bỏ sót được dịch bù một lần
+ * (trước đây khối bị sót giữ nguyên tiếng Anh).
+ */
+async function translateBlocks(
+  translator: LayoutBlockTranslator, blocks: LayoutBlock[], signal?: AbortSignal,
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  if (!blocks.length) return out;
+  // Phần nhỏ (~1800 ký tự) gửi song song tối đa 3 phần: thời gian chờ AI ≈ phần dài nhất thay vì cả trang
+  // (AI viết ra càng dài càng lâu; một trang chữ dày gửi một lần mất 20–40 giây)
+  const chunks = chunkBlocks(blocks, 20, 1800);
+  const queue = [...chunks];
+  const runOne = async () => {
+    while (queue.length) {
+      checkAbort(signal);
+      const chunk = queue.shift()!;
+      Object.assign(out, await translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, chunks.length) }, runOne));
+  checkAbort(signal);
+  const missing = blocks.filter(b => !out[b.id]);
+  if (missing.length) {
+    try {
+      const again = await Promise.all(chunkBlocks(missing, 20, 1800).map(chunk =>
+        translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal)));
+      again.forEach(r => Object.assign(out, r));
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      console.warn('[Layout] Dịch bù khối bị sót thất bại:', e);
     }
   }
-
-  const blob: Blob = await new Promise((resolve, reject) =>
-    canvas.toBlob(b => (b ? resolve(b) : reject(new Error('Không tạo được ảnh trang'))), 'image/jpeg', JPEG_QUALITY),
-  );
-  try { page.cleanup?.(); } catch { /* ignore */ }
-
-  return {
-    pageNumber,
-    blob,
-    widthPt,
-    heightPt,
-    overflowCount: report.overflowIds.length,
-    shrunkCount: report.shrunkIds.length,
-    blockCount: blocks.filter(b => b.translatable).length,
-    scanned,
-    createdAt: Date.now(),
-    pairs,
-    ocr: !!ocr?.length || !!extraOcr?.length,
-  };
+  return out;
 }
 
 /** Dịch 1 trang bằng AI rồi vẽ lại giữ định dạng. */
@@ -471,36 +646,50 @@ export async function translatePageWithLayout(
   pageNumber: number,
   translator: LayoutBlockTranslator,
   signal?: AbortSignal,
-  opts: { forceOcr?: boolean } = {},
+  opts: { forceOcr?: boolean; ocrFigures?: boolean } = {},
 ): Promise<LayoutPageResult> {
   await ensureLayoutFonts();
   let analyzed = await analyzePage(pdfDoc, pageNumber, translator, signal);
-  // Trang scan (không có lớp chữ) hoặc người dùng chọn OCR → AI đọc ảnh, nhận diện khối chữ và dịch luôn
-  if ((analyzed.scanned || opts.forceOcr) && translator.ocrLayoutBlocks) {
-    const ocr = await translator.ocrLayoutBlocks(ocrImage(analyzed.canvas), signal);
-    if (signal?.aborted) throw new Error('Translation aborted');
-    if (!ocr.length) throw new Error('OCR không nhận diện được chữ nào trên trang này.');
-    analyzed = applyOcr(analyzed, ocr);
-    const translations: Record<string, string> = {};
-    const missing: LayoutBlock[] = [];
-    for (const b of analyzed.blocks) {
-      const v = ocrTranslation(ocr, b);
-      if (v) translations[b.id] = v; else if (b.translatable) missing.push(b);
+  const ocrFigures = opts.ocrFigures ?? getLayoutOcrFigures();
+  try {
+    // Trang scan (không có lớp chữ) hoặc người dùng chọn OCR → AI đọc ảnh, nhận diện khối chữ và dịch luôn
+    if ((analyzed.scanned || opts.forceOcr) && translator.ocrLayoutBlocks) {
+      const ocr = await translator.ocrLayoutBlocks(ocrImage(analyzed.canvas), signal);
+      checkAbort(signal);
+      if (!ocr.length) throw new Error('OCR không nhận diện được chữ nào trên trang này.');
+      analyzed = applyOcr(analyzed, ocr);
+      const translations: Record<string, string> = {};
+      const missing: LayoutBlock[] = [];
+      for (const b of analyzed.blocks) {
+        const v = ocrTranslation(ocr, b);
+        if (v) translations[b.id] = v; else if (b.translatable) missing.push(b);
+      }
+      Object.assign(translations, await translateBlocks(translator, missing, signal)); // khối AI quên dịch → dịch bù
+      checkAbort(signal);
+      return await finishPage(analyzed, pageNumber, translations, ocr, undefined, signal);
     }
-    for (const chunk of chunkBlocks(missing)) { // khối AI quên dịch → dịch bù
-      if (signal?.aborted) throw new Error('Translation aborted');
-      Object.assign(translations, await translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal));
-    }
-    return finishPage(analyzed, pageNumber, translations, ocr);
-  }
-  // Trang có lớp chữ nhưng có ẢNH (chữ trong hình) hoặc CHỮ XOAY → OCR bổ sung riêng các vùng đó
-  let extraKept: OcrBlock[] | undefined;
-  const extraTr: Record<string, string> = {};
-  if (!analyzed.scanned && translator.ocrLayoutBlocks && (analyzed.figures.length > 0 || analyzed.rotatedLetters >= 3)) {
-    try {
-      const W = analyzed.canvas.width, H = analyzed.canvas.height;
-      const regions = analyzed.figures.map(f => [f.y0 / H, f.x0 / W, f.y1 / H, f.x1 / W].map(v => Math.round(v * 1000)));
-      const extra = await translator.ocrLayoutBlocks(ocrImage(analyzed.canvas), signal, { mode: 'extra', regions });
+
+    // Trang có lớp chữ nhưng có ẢNH (chữ trong hình) hoặc CHỮ XOAY → OCR bổ sung riêng các vùng đó.
+    // Chạy SONG SONG với việc dịch chữ thường (trước đây chạy tuần tự → mỗi trang có hình chậm gấp đôi).
+    // Mặc định TẮT: gửi ảnh trang 1600px cho AI đọc chữ trong hình mất 20–60 giây mỗi trang có hình, trong khi chữ
+    // trong ảnh y khoa (thang đo, nhãn ST, L, R…) hầu như không cần dịch. Bật trong thanh công cụ khi cần.
+    const needExtra = ocrFigures && !analyzed.scanned && !!translator.ocrLayoutBlocks && (analyzed.figures.length > 0 || analyzed.rotatedLetters >= 3);
+    const W = analyzed.canvas.width, H = analyzed.canvas.height;
+    const regions = analyzed.figures.map(f => [f.y0 / H, f.x0 / W, f.y1 / H, f.x1 / W].map(v => Math.round(v * 1000)));
+    const extraPromise: Promise<OcrBlock[]> = needExtra
+      ? translator.ocrLayoutBlocks!(ocrImage(analyzed.canvas), signal, { mode: 'extra', regions }).catch(e => {
+        if (signal?.aborted) throw e;
+        console.warn('[Layout] OCR chữ trong ảnh / chữ xoay lỗi, bỏ qua phần này:', e);
+        return [];
+      })
+      : Promise.resolve([]);
+    const textTargets = analyzed.scanned ? [] : analyzed.blocks.filter(b => b.translatable);
+    const [textTr, extra] = await Promise.all([translateBlocks(translator, textTargets, signal), extraPromise]);
+    checkAbort(signal);
+
+    const translations: Record<string, string> = { ...textTr };
+    let extraKept: OcrBlock[] | undefined;
+    if (extra.length) {
       const inRegion = (o: OcrBlock) => {
         const [y0, x0, y1, x1] = o.box_2d, cy = (y0 + y1) / 2, cx = (x0 + x1) / 2;
         return regions.some(r => cy >= r[0] - 5 && cy <= r[2] + 5 && cx >= r[1] - 5 && cx <= r[3] + 5);
@@ -510,24 +699,14 @@ export async function translatePageWithLayout(
         const r = addExtraOcr(analyzed, wanted);
         analyzed = r.analyzed;
         extraKept = r.kept;
-        for (const b of analyzed.blocks) if (b.fromOcr) { const v = ocrTranslation(wanted, b); if (v) extraTr[b.id] = v; }
+        for (const b of analyzed.blocks) if (b.fromOcr) { const v = ocrTranslation(wanted, b); if (v) translations[b.id] = v; }
       }
-    } catch (e) {
-      if (signal?.aborted) throw e;
-      console.warn('[Layout] OCR chữ trong ảnh / chữ xoay lỗi, bỏ qua phần này:', e);
     }
+    return await finishPage(analyzed, pageNumber, translations, undefined, extraKept, signal);
+  } catch (e) {
+    releaseAnalyzed(analyzed);
+    throw e;
   }
-  const translations: Record<string, string> = { ...extraTr };
-  if (!analyzed.scanned) {
-    const targets = analyzed.blocks.filter(b => b.translatable && !translations[b.id]);
-    for (const chunk of chunkBlocks(targets)) {
-      if (signal?.aborted) throw new Error('Translation aborted');
-      const res = await translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal);
-      Object.assign(translations, res);
-    }
-  }
-  if (signal?.aborted) throw new Error('Translation aborted');
-  return finishPage(analyzed, pageNumber, translations, undefined, extraKept);
 }
 
 /**
@@ -543,40 +722,49 @@ export async function renderPageFromPairs(
 ): Promise<LayoutPageResult & { retranslated?: number }> {
   await ensureLayoutFonts();
   let analyzed = await analyzePage(pdfDoc, pageNumber, translator, signal);
-  const parseOcr = (key: string): OcrBlock[] | undefined => {
-    const e = pairs.find(p => p.s === key);
-    if (!e) return undefined;
-    try { const v = JSON.parse(e.v); return Array.isArray(v) && v.length ? v : undefined; } catch { return undefined; }
-  };
-  const ocr = parseOcr(OCR_PAIR_KEY);
-  let extraOcr = parseOcr(OCR_EXTRA_KEY);
-  if (ocr) analyzed = applyOcr(analyzed, ocr);
-  else if (extraOcr) { const r = addExtraOcr(analyzed, extraOcr); analyzed = r.analyzed; extraOcr = r.kept; }
-  const lookup = new Map(pairs.filter(p => !isOcrKey(p.s)).map(p => [normKey(p.s), p.v]));
-  const translations: Record<string, string> = {};
-  const missing: LayoutBlock[] = [];
-  for (const b of analyzed.blocks) {
-    // Bản lưu cũ (trước khi có thẻ màu) được ghép theo câu gốc không thẻ
-    const v = lookup.get(normKey(b.text)) ?? lookup.get(normKey(b.plain));
-    if (v) translations[b.id] = v;
-    else if (b.translatable) missing.push(b);
-  }
-  // Bản lưu cũ được tạo khi bộ máy còn ghép nhầm 2 cột → các khối mới không khớp: chỉ dịch bù những khối này
-  let retranslated = 0;
-  if (translator && missing.length && !analyzed.scanned) {
-    try {
-      for (const chunk of chunkBlocks(missing)) {
-        if (signal?.aborted) throw new Error('Translation aborted');
-        Object.assign(translations, await translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal));
-      }
-      retranslated = missing.length;
-    } catch (e) {
-      if (signal?.aborted) throw e;
-      console.warn('[Layout] Không dịch bù được khối thiếu:', e);
+  try {
+    const parseOcr = (key: string): OcrBlock[] | undefined => {
+      const e = pairs.find(p => p.s === key);
+      if (!e) return undefined;
+      try { const v = JSON.parse(e.v); return Array.isArray(v) && v.length ? v : undefined; } catch { return undefined; }
+    };
+    const ocr = parseOcr(OCR_PAIR_KEY);
+    let extraOcr = parseOcr(OCR_EXTRA_KEY);
+    if (ocr) analyzed = applyOcr(analyzed, ocr);
+    else if (extraOcr) { const r = addExtraOcr(analyzed, extraOcr); analyzed = r.analyzed; extraOcr = r.kept; }
+    const lookup = new Map(pairs.filter(p => !isOcrKey(p.s)).map(p => [normKey(p.s), p.v]));
+    // Bản lưu trước khi nhận diện chữ hoa đầu đoạn: câu gốc thiếu chữ cái đầu ("he ACR…") → vẫn ghép được
+    const lookupLoose = (b: LayoutBlock) => {
+      if (!b.dropCap) return undefined;
+      const tail = normKey(b.text).replace(/^\p{L}\s?/u, '');
+      return lookup.get(tail);
+    };
+    const translations: Record<string, string> = {};
+    const missing: LayoutBlock[] = [];
+    for (const b of analyzed.blocks) {
+      // Bản lưu cũ (trước khi có thẻ màu) được ghép theo câu gốc không thẻ
+      const v = lookup.get(normKey(b.text)) ?? lookup.get(normKey(b.plain)) ?? lookupLoose(b);
+      if (v) translations[b.id] = v;
+      else if (b.translatable) missing.push(b);
     }
+    // Bản lưu cũ được tạo khi bộ máy còn tách khối khác → các khối mới không khớp: chỉ dịch bù những khối này
+    let retranslated = 0;
+    if (translator && missing.length && !analyzed.scanned) {
+      try {
+        Object.assign(translations, await translateBlocks(translator, missing, signal));
+        retranslated = missing.length;
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        console.warn('[Layout] Không dịch bù được khối thiếu:', e);
+      }
+    }
+    checkAbort(signal);
+    const res = await finishPage(analyzed, pageNumber, translations, ocr, ocr ? undefined : extraOcr, signal);
+    return { ...res, retranslated };
+  } catch (e) {
+    releaseAnalyzed(analyzed);
+    throw e;
   }
-  const res = await finishPage(analyzed, pageNumber, translations, ocr, ocr ? undefined : extraOcr);
-  return { ...res, retranslated };
 }
 
 /* ------------------------------------------------------------------ */
@@ -609,12 +797,39 @@ function blockToMarkdownText(b: LayoutBlock): string {
  * Dựng Markdown chuẩn cấu trúc từ lớp chữ PDF (tiêu đề, tiêu đề phụ, danh sách nhiều cấp, đoạn văn, theo thứ tự cột).
  * Trang scan hoặc có bảng → không đủ điều kiện (dùng cách gửi ảnh như cũ).
  */
+/**
+ * Phân tích NHẸ cho dịch thường: chỉ đọc lớp chữ (vị trí, cỡ, đậm/nghiêng theo tên font), KHÔNG vẽ trang.
+ * Trước đây dùng chung bước phân tích của "giữ định dạng" (vẽ trang 1700px hai lần, đọc điểm ảnh, xếp hàng
+ * chung khoá CPU) → mỗi trang dịch thường tốn thêm 0,5–1 giây và tranh tài nguyên với trình xem PDF.
+ */
+async function analyzeTextOnly(pdfDoc: PDFDocumentProxy, pageNumber: number) {
+  const page: any = await pdfDoc.getPage(pageNumber);
+  try {
+    const base = page.getViewport({ scale: 1 });
+    const scale = Math.min(3, Math.max(1.5, TARGET_WIDTH_PX / base.width));
+    const viewport = page.getViewport({ scale });
+    const W = Math.floor(viewport.width), H = Math.floor(viewport.height);
+    const textContent = await page.getTextContent();
+    const rawItems: RawTextItem[] = (textContent.items as any[])
+      .filter(it => typeof it.str === 'string')
+      .map(it => ({ str: it.str, transform: it.transform, width: it.width, fontName: it.fontName }));
+    const letters = rawItems.reduce((s, it) => s + (it.str.match(/\p{L}/gu)?.length ?? 0), 0);
+    const scanned = letters < 20 || isGarbledText(rawItems.map(it => it.str).join(' '));
+    if (scanned) return { scanned, blocks: [] as LayoutBlock[], W, H };
+    const items = normalizeItems(rawItems, viewport.transform, styleResolver(page, textContent.styles));
+    detectDropCaps(items);
+    const { strong } = analyzeColumns(items);
+    const blocks = buildBlocks(items, W, H, strong.length ? strong : undefined);
+    return { scanned, blocks, W, H };
+  } finally {
+    try { page.cleanup?.(); } catch { /* ignore */ }
+  }
+}
+
 export async function buildPageMarkdown(pdfDoc: PDFDocumentProxy, pageNumber: number): Promise<PageMarkdown> {
-  await ensureLayoutFonts();
-  const a = await analyzePage(pdfDoc, pageNumber);
-  try { a.page.cleanup?.(); } catch { /* ignore */ }
+  const a = await analyzeTextOnly(pdfDoc, pageNumber);
+  const W = a.W, H = a.H;
   if (a.scanned) return { eligible: false, markdown: '', reason: 'scanned' };
-  const W = a.canvas.width, H = a.canvas.height;
   const blocks = a.blocks;
 
   // Bảng biểu: nhiều khối chữ có ≥2 khối khác nằm ngang hàng → để mô hình đọc ảnh dựng bảng
@@ -701,7 +916,20 @@ export async function buildPageMarkdown(pdfDoc: PDFDocumentProxy, pageNumber: nu
 const DB_NAME = 'MediTransLayoutDB';
 const STORE = 'pages';
 
+// Mở kết nối MỘT lần và dùng lại (trước đây mỗi lần đọc/ghi trang lại mở một kết nối mới, không đóng)
+let layoutDbPromise: Promise<IDBDatabase> | null = null;
 function openLayoutDB(): Promise<IDBDatabase> {
+  if (!layoutDbPromise) {
+    layoutDbPromise = openLayoutDBOnce().then(db => {
+      db.onversionchange = () => { db.close(); layoutDbPromise = null; };
+      db.onclose = () => { layoutDbPromise = null; };
+      return db;
+    }).catch(e => { layoutDbPromise = null; throw e; });
+  }
+  return layoutDbPromise;
+}
+
+function openLayoutDBOnce(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === 'undefined') return reject(new Error('IndexedDB not supported'));
     const req = indexedDB.open(DB_NAME, 1);
@@ -714,7 +942,7 @@ function openLayoutDB(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v12'; // v12: kiểm thử trên sách thật (Atlas, BI-RADS)
+const ENGINE_VERSION = 'v16'; // v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch
@@ -726,31 +954,30 @@ const pairsKey = (docKey: string, page: number) => `pairs::${docKey}::${page}`;
  */
 export async function loadLocalLayoutPairs(docKey: string): Promise<Record<number, LayoutPair[]>> {
   const out: Record<number, LayoutPair[]> = {};
-  const fromCurrent = new Set<number>();
+  // Chỉ đọc khoá của tài liệu này (trước đây duyệt toàn bộ kho, kể cả ảnh của mọi tài liệu khác → mở file chậm)
+  const current = parseInt(ENGINE_VERSION.slice(1), 10) || 1;
+  const prefixes = ['pairs', ENGINE_VERSION, ...Array.from({ length: current - 1 }, (_, i) => `v${current - 1 - i}`)];
   try {
     const db = await openLayoutDB();
-    await new Promise<void>(resolve => {
-      const req = db.transaction(STORE, 'readonly').objectStore(STORE).openCursor();
-      req.onsuccess = () => {
-        const cur = req.result;
-        if (!cur) return resolve();
-        const key = String(cur.key);
-        const suffix = `::${docKey}::`;
-        const at = key.indexOf(suffix);
-        if (at > 0 && /^\d+$/.test(key.slice(at + suffix.length))) {
-          const page = parseInt(key.slice(at + suffix.length), 10);
-          const prefix = key.slice(0, at);
-          const v: any = cur.value;
-          const pairs: LayoutPair[] | undefined = v?.pairs;
-          if (Array.isArray(pairs) && pairs.length) {
-            if (prefix === 'pairs') { out[page] = pairs; fromCurrent.add(page); }
-            else if (!fromCurrent.has(page) && (!out[page] || prefix === ENGINE_VERSION)) out[page] = pairs;
+    for (const prefix of prefixes) {
+      const lower = `${prefix}::${docKey}::`;
+      await new Promise<void>(resolve => {
+        const range = IDBKeyRange.bound(lower, lower + '\uffff');
+        const req = db.transaction(STORE, 'readonly').objectStore(STORE).openCursor(range);
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (!cur) return resolve();
+          const tail = String(cur.key).slice(lower.length);
+          if (/^\d+$/.test(tail)) {
+            const page = parseInt(tail, 10);
+            const pairs: LayoutPair[] | undefined = (cur.value as any)?.pairs;
+            if (!out[page] && Array.isArray(pairs) && pairs.length) out[page] = pairs;
           }
-        }
-        cur.continue();
-      };
-      req.onerror = () => resolve();
-    });
+          cur.continue();
+        };
+        req.onerror = () => resolve();
+      });
+    }
   } catch { /* ignore */ }
   return out;
 }
@@ -790,19 +1017,22 @@ export async function loadLayoutPages(docKey: string, numPages: number): Promise
   const out: Record<number, LayoutPageResult> = {};
   try {
     const db = await openLayoutDB();
-    await Promise.all(
-      Array.from({ length: numPages }, (_, i) => i + 1).map(
-        p =>
-          new Promise<void>(resolve => {
-            const req = db.transaction(STORE, 'readonly').objectStore(STORE).get(cacheKey(docKey, p));
-            req.onsuccess = () => {
-              if (req.result) out[p] = req.result as LayoutPageResult;
-              resolve();
-            };
-            req.onerror = () => resolve();
-          }),
-      ),
-    );
+    // Một con trỏ theo khoảng khoá của tài liệu (trước đây mở 1 giao dịch cho MỖI trang, kể cả trang chưa dịch)
+    const lower = `${ENGINE_VERSION}::${docKey}::`;
+    await new Promise<void>(resolve => {
+      const req = db.transaction(STORE, 'readonly').objectStore(STORE).openCursor(IDBKeyRange.bound(lower, lower + '\uffff'));
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur) return resolve();
+        const tail = String(cur.key).slice(lower.length);
+        if (/^\d+$/.test(tail)) {
+          const p = parseInt(tail, 10);
+          if (p >= 1 && p <= numPages && cur.value) out[p] = cur.value as LayoutPageResult;
+        }
+        cur.continue();
+      };
+      req.onerror = () => resolve();
+    });
   } catch (e) {
     console.warn('[Layout] Không đọc được đệm:', e);
   }

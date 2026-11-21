@@ -44,6 +44,8 @@ interface NormItem {
   color: RGB | null;
   font: string;      // tên font pdf.js (để hiệu chỉnh theo từng font)
   hScale: number;    // co/giãn ngang để khớp độ rộng chữ gốc (font hẹp/rộng)
+  /** Chữ hoa cỡ lớn đầu đoạn (drop cap) — tách khỏi dòng, gắn vào đoạn văn bên phải. */
+  dropCap?: boolean;
 }
 
 interface Run extends RunStyle { text: string; }
@@ -102,6 +104,19 @@ export interface LayoutBlock {
   srcIndex?: number;
   /** Khối OCR đã lấy cỡ chữ/font từ lớp chữ PDF (chuẩn, không cần ước lượng). */
   guided?: boolean;
+  /** Chữ hoa cỡ lớn đầu đoạn: vẽ lại chữ cái đầu của bản dịch ở cùng vị trí/cỡ, các dòng bên cạnh thụt vào. */
+  dropCap?: DropCap;
+}
+
+export interface DropCap {
+  x: number;          // mép trái chữ hoa
+  w: number;          // độ thụt của các dòng nằm cạnh chữ hoa
+  size: number;
+  baseline: number;
+  lines: number;      // số dòng nằm cạnh chữ hoa
+  bold: boolean;
+  serif: boolean;
+  color: RGB | null;
 }
 
 export interface PaintReport {
@@ -183,7 +198,20 @@ function isTranslatableText(text: string): boolean {
 /* Màu vùng                                                            */
 /* ------------------------------------------------------------------ */
 
-interface RegionStats { bg: RGB; uniform: number; fg: RGB | null; }
+interface RegionStats { bg: RGB; uniform: number; fg: RGB | null; mixed?: boolean; }
+
+// Bộ đệm dùng lại cho regionStats (không cấp phát mỗi lần gọi — hàm này được gọi hàng nghìn lần mỗi trang)
+const RS_BIN = new Int32Array(4096);
+const RS_EXACT = new Int32Array(4096);
+const RS_DIST = new Int32Array(766);
+const RS_CH = [new Int32Array(256), new Int32Array(256), new Int32Array(256)];
+
+function histMedian(h: Int32Array, n: number): number {
+  let acc = 0;
+  const half = n / 2;
+  for (let v = 0; v < 256; v++) { acc += h[v]; if (acc >= half) return v; }
+  return 255;
+}
 
 /** Thống kê vùng ảnh: nền = màu phổ biến nhất; chữ = trung vị nhóm 25% điểm khác nền nhiều nhất. */
 function regionStats(img: ImageData, x0: number, y0: number, x1: number, y1: number): RegionStats {
@@ -192,55 +220,142 @@ function regionStats(img: ImageData, x0: number, y0: number, x1: number, y1: num
   const ya = Math.max(0, Math.floor(y0)), yb = Math.min(H, Math.ceil(y1));
   const area = Math.max(1, (xb - xa) * (yb - ya));
   const step = area > 60000 ? 2 : 1;
-  const bins = new Map<number, { n: number; r: number; g: number; b: number }>();
+  RS_BIN.fill(0);
   let total = 0;
   for (let y = ya; y < yb; y += step) {
     for (let x = xa; x < xb; x += step) {
       const i = (y * W + x) * 4;
-      const key = ((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4);
-      const e = bins.get(key) || { n: 0, r: 0, g: 0, b: 0 };
-      e.n++; e.r += d[i]; e.g += d[i + 1]; e.b += d[i + 2];
-      bins.set(key, e);
+      RS_BIN[((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4)]++;
       total++;
     }
   }
-  let mode = { n: 0, r: 255, g: 255, b: 255 };
-  let modeKey = -1;
-  bins.forEach((e, k) => { if (e.n > mode.n) { mode = e; modeKey = k; } });
-  // Màu nền = màu chính xác xuất hiện nhiều nhất trong nhóm phổ biến (không lấy trung bình → không lệch sắc, không thành mảng xám mờ)
-  const exact = new Map<number, number>();
+  if (!total) return { bg: { r: 255, g: 255, b: 255 }, uniform: 1, fg: null };
+  let modeKey = 0;
+  for (let k = 1; k < 4096; k++) if (RS_BIN[k] > RS_BIN[modeKey]) modeKey = k;
+  // Màu nền = màu chính xác xuất hiện nhiều nhất trong nhóm phổ biến (không lấy trung bình → không lệch sắc)
+  RS_EXACT.fill(0);
   for (let y = ya; y < yb; y += step) {
     for (let x = xa; x < xb; x += step) {
       const i = (y * W + x) * 4;
       if ((((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4)) !== modeKey) continue;
-      const c = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
-      exact.set(c, (exact.get(c) || 0) + 1);
+      RS_EXACT[((d[i] & 15) << 8) | ((d[i + 1] & 15) << 4) | (d[i + 2] & 15)]++;
     }
   }
-  let bestC = -1, bestN = 0;
-  exact.forEach((n, c) => { if (n > bestN) { bestN = n; bestC = c; } });
-  const bg: RGB = bestC >= 0
-    ? { r: (bestC >> 16) & 255, g: (bestC >> 8) & 255, b: bestC & 255 }
-    : mode.n ? { r: mode.r / mode.n, g: mode.g / mode.n, b: mode.b / mode.n } : { r: 255, g: 255, b: 255 };
+  let lowKey = 0;
+  for (let k = 1; k < 4096; k++) if (RS_EXACT[k] > RS_EXACT[lowKey]) lowKey = k;
+  const bg: RGB = {
+    r: ((modeKey >> 8) << 4) | (lowKey >> 8),
+    g: (((modeKey >> 4) & 15) << 4) | ((lowKey >> 4) & 15),
+    b: ((modeKey & 15) << 4) | (lowKey & 15),
+  };
 
-  let near = 0;
-  const far: { dist: number; r: number; g: number; b: number }[] = [];
+  // Điểm "xa nền": lập biểu đồ khoảng cách để lấy ngưỡng nhóm 25% xa nhất, không cần sắp xếp
+  RS_DIST.fill(0);
+  let near = 0, farN = 0, colored = 0;
   for (let y = ya; y < yb; y += step) {
     for (let x = xa; x < xb; x += step) {
       const i = (y * W + x) * 4;
-      const p = { r: d[i], g: d[i + 1], b: d[i + 2] };
-      const dist = colorDist(p, bg);
+      const dist = Math.abs(d[i] - bg.r) + Math.abs(d[i + 1] - bg.g) + Math.abs(d[i + 2] - bg.b);
       if (dist < 40) near++;
-      else if (dist > 120) far.push({ dist, ...p });
+      else if (dist > 120) {
+        RS_DIST[dist]++;
+        farN++;
+        if (Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2]) > 60) colored++;
+      }
     }
   }
   let fg: RGB | null = null;
-  if (far.length > Math.max(3, total * 0.01)) {
-    far.sort((a, b) => b.dist - a.dist);
-    const top = far.slice(0, Math.max(3, Math.ceil(far.length * 0.25)));
-    fg = { r: median(top.map(p => p.r)), g: median(top.map(p => p.g)), b: median(top.map(p => p.b)) };
+  let mixed = false;
+  if (farN > Math.max(3, total * 0.01)) {
+    const want = Math.max(3, Math.ceil(farN * 0.25));
+    let thr = 765, acc = 0;
+    for (; thr > 120; thr--) { acc += RS_DIST[thr]; if (acc >= want) break; }
+    RS_CH[0].fill(0); RS_CH[1].fill(0); RS_CH[2].fill(0);
+    let n = 0;
+    for (let y = ya; y < yb; y += step) {
+      for (let x = xa; x < xb; x += step) {
+        const i = (y * W + x) * 4;
+        const dist = Math.abs(d[i] - bg.r) + Math.abs(d[i + 1] - bg.g) + Math.abs(d[i + 2] - bg.b);
+        if (dist < thr) continue;
+        RS_CH[0][d[i]]++; RS_CH[1][d[i + 1]]++; RS_CH[2][d[i + 2]]++; n++;
+      }
+    }
+    fg = { r: histMedian(RS_CH[0], n), g: histMedian(RS_CH[1], n), b: histMedian(RS_CH[2], n) };
+    const cf = colored / farN;
+    mixed = farN >= 6 && cf > 0.04 && cf < 0.96;
   }
-  return { bg, uniform: near / Math.max(1, total), fg };
+  return { bg, uniform: near / total, fg, mixed };
+}
+
+/**
+ * Màu chữ trên nền ảnh / chuyển màu (không có bản sạch): chữ thường là phần SÁNG NHẤT hoặc TỐI NHẤT của vùng.
+ * Lấy trung vị 8% điểm sáng nhất và 8% điểm tối nhất, chọn nhóm khác hẳn màu giữa vùng hơn.
+ */
+function extremeColor(img: ImageData, x0: number, y0: number, x1: number, y1: number): RGB | null {
+  const W = img.width, H = img.height, d = img.data;
+  const xa = Math.max(0, Math.floor(x0)), xb = Math.min(W, Math.ceil(x1));
+  const ya = Math.max(0, Math.floor(y0)), yb = Math.min(H, Math.ceil(y1));
+  const step = (xb - xa) * (yb - ya) > 60000 ? 2 : 1;
+  const L = new Int32Array(256);
+  let n = 0;
+  for (let y = ya; y < yb; y += step) for (let x = xa; x < xb; x += step) {
+    const i = (y * W + x) * 4; L[(d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8]++; n++;
+  }
+  if (n < 20) return null;
+  const k = Math.max(3, Math.round(0.08 * n));
+  let lo = 0, acc = 0; for (; lo < 255; lo++) { acc += L[lo]; if (acc >= k) break; }
+  let hi = 255; acc = 0; for (; hi > 0; hi--) { acc += L[hi]; if (acc >= k) break; }
+  const mid = histMedian(L, n);
+  const pickHigh = hi - mid >= mid - lo;
+  if (Math.abs((pickHigh ? hi : lo) - mid) < 60) return null; // không có nét chữ tương phản rõ
+  RS_CH[0].fill(0); RS_CH[1].fill(0); RS_CH[2].fill(0);
+  let m = 0;
+  for (let y = ya; y < yb; y += step) for (let x = xa; x < xb; x += step) {
+    const i = (y * W + x) * 4; const l = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+    if (pickHigh ? l < hi : l > lo) continue;
+    RS_CH[0][d[i]]++; RS_CH[1][d[i + 1]]++; RS_CH[2][d[i + 2]]++; m++;
+  }
+  return m ? { r: histMedian(RS_CH[0], m), g: histMedian(RS_CH[1], m), b: histMedian(RS_CH[2], m) } : null;
+}
+
+/**
+ * Màu chữ thật của một vùng, dựa vào bản vẽ "không chữ" (clean): điểm mực = điểm khác hẳn nền thật tại chỗ.
+ * Không bị nền ảnh / gradient / khung màu đánh lừa như cách so với màu nền phổ biến nhất.
+ * Trả về undefined khi không dùng được (không có bản sạch, hoặc chữ vẽ bằng đường nét nên bản sạch vẫn còn chữ).
+ */
+function glyphColor(img: ImageData, clean: ImageData | null | undefined, x0: number, y0: number, x1: number, y1: number): { fg: RGB; mixed: boolean } | undefined {
+  if (!clean || clean.width !== img.width || clean.height !== img.height) return undefined;
+  const W = img.width, H = img.height, d = img.data, c = clean.data;
+  const xa = Math.max(0, Math.floor(x0)), xb = Math.min(W, Math.ceil(x1));
+  const ya = Math.max(0, Math.floor(y0)), yb = Math.min(H, Math.ceil(y1));
+  RS_DIST.fill(0);
+  let total = 0, n = 0, colored = 0;
+  for (let y = ya; y < yb; y++) {
+    for (let x = xa; x < xb; x++) {
+      const i = (y * W + x) * 4;
+      total++;
+      const dist = Math.abs(d[i] - c[i]) + Math.abs(d[i + 1] - c[i + 1]) + Math.abs(d[i + 2] - c[i + 2]);
+      if (dist <= 90) continue;
+      RS_DIST[dist]++; n++;
+      if (Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2]) > 60) colored++;
+    }
+  }
+  if (n < Math.max(4, total * 0.01)) return undefined;
+  const want = Math.max(3, Math.ceil(n * 0.4));
+  let thr = 765, acc = 0;
+  for (; thr > 90; thr--) { acc += RS_DIST[thr]; if (acc >= want) break; }
+  RS_CH[0].fill(0); RS_CH[1].fill(0); RS_CH[2].fill(0);
+  let m = 0;
+  for (let y = ya; y < yb; y++) {
+    for (let x = xa; x < xb; x++) {
+      const i = (y * W + x) * 4;
+      const dist = Math.abs(d[i] - c[i]) + Math.abs(d[i + 1] - c[i + 1]) + Math.abs(d[i + 2] - c[i + 2]);
+      if (dist < thr) continue;
+      RS_CH[0][d[i]]++; RS_CH[1][d[i + 1]]++; RS_CH[2][d[i + 2]]++; m++;
+    }
+  }
+  const cf = colored / n;
+  return { fg: { r: histMedian(RS_CH[0], m), g: histMedian(RS_CH[1], m), b: histMedian(RS_CH[2], m) }, mixed: n >= 6 && cf > 0.04 && cf < 0.96 };
 }
 
 function rgbCss(c: RGB, a = 1) {
@@ -278,16 +393,38 @@ export function normalizeItems(
  * pdf.js gộp cả câu nhiều màu vào một item → ước lượng vị trí từng ký tự (theo độ rộng đo bằng canvas)
  * rồi tách item tại chỗ đổi màu, để giữ được từ in màu giữa câu.
  */
-export function annotateItemColors(ctx: CanvasRenderingContext2D, items: NormItem[]): NormItem[] {
-  const img = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
+export function annotateItemColors(
+  ctx: CanvasRenderingContext2D, items: NormItem[], clean?: ImageData | null, pageImg?: ImageData,
+): NormItem[] {
+  const img = pageImg ?? ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
   const out: NormItem[] = [];
+  // Bản "không chữ" chỉ dùng được khi chữ thật sự biến mất trong đó (font vẽ bằng đường nét thì không) → thử vài dòng
+  if (clean) {
+    const probe = items.filter(i => i.w > 4 && letterCount(i.str) >= 3).slice(0, 12);
+    const ok = probe.filter(i => glyphColor(img, clean, i.x, i.y - 0.75 * i.size, i.x + i.w, i.y + 0.15 * i.size) !== undefined).length;
+    if (probe.length && ok < 0.5 * probe.length) clean = null;
+  }
+  /** Màu chữ của vùng: ưu tiên so với nền thật; không có thì so với màu nền phổ biến (chỉ tin khi nền đồng đều). */
+  const colorOf = (x0: number, y0: number, x1: number, y1: number, fallback: RGB | null): RGB | null => {
+    const g = glyphColor(img, clean, x0, y0, x1, y1);
+    if (g !== undefined) return g.fg;
+    const st = regionStats(img, x0, y0, x1, y1);
+    // Nền không đồng đều (ảnh, gradient): màu "khác nền" thường là nền chứ không phải chữ → dùng màu của cả dòng
+    if (st.uniform < 0.45) return fallback;
+    return st.fg ?? fallback;
+  };
   ctx.save();
   for (const it of items) {
     const chars = [...it.str];
     if (it.w < 1 || chars.length === 0) { out.push(it); continue; }
     const y0 = it.y - 0.75 * it.size, y1 = it.y + 0.15 * it.size;
-    if (chars.length === 1 || letterCount(it.str) < 2) {
-      it.color = regionStats(img, it.x, y0, it.x + it.w, y1).fg;
+    // Một lượt quét: ưu tiên so với nền thật; không có thì so với màu nền phổ biến
+    const glyph = glyphColor(img, clean, it.x, y0, it.x + it.w, y1);
+    const whole = glyph ? null : regionStats(img, it.x, y0, it.x + it.w, y1);
+    it.color = glyph ? glyph.fg : (whole!.uniform < 0.45 ? extremeColor(img, it.x, y0, it.x + it.w, y1) : null) ?? whole!.fg;
+    // Chỉ tách theo từng từ khi vùng có hơn một màu mực (tiết kiệm nhiều thời gian: phần lớn dòng chỉ một màu)
+    const multiColor = glyph ? glyph.mixed : (!!whole!.mixed && whole!.uniform >= 0.45);
+    if (chars.length === 1 || letterCount(it.str) < 2 || !multiColor) {
       out.push(it);
       continue;
     }
@@ -307,7 +444,7 @@ export function annotateItemColors(ctx: CanvasRenderingContext2D, items: NormIte
       const w = isW(chars[i]);
       let j = i + 1;
       while (j < chars.length && isW(chars[j]) === w) j++;
-      const color = w ? regionStats(img, xs[i] + 0.3, y0, xs[j] - 0.3, y1).fg : null;
+      const color = w ? colorOf(xs[i] + 0.3, y0, xs[j] - 0.3, y1, it.color) : null;
       tokens.push({ from: i, to: j, word: w, color });
       i = j;
     }
@@ -329,6 +466,7 @@ export function annotateItemColors(ctx: CanvasRenderingContext2D, items: NormIte
   }
   ctx.restore();
   calibrateFonts(ctx, img, out);
+  detectDropCaps(out);
   return out;
 }
 
@@ -415,6 +553,21 @@ function calibrateFonts(ctx: CanvasRenderingContext2D, img: ImageData, items: No
 /* 2. Item → đoạn dòng (segment) → khối                                */
 /* ------------------------------------------------------------------ */
 
+/** Đánh dấu chữ hoa cỡ lớn đầu đoạn (drop cap): 1 chữ cái in hoa, cỡ ≥ 1,9 lần chữ thân bài, có dòng chữ nhỏ ngay bên phải ngang đỉnh. */
+export function detectDropCaps(items: NormItem[]) {
+  const sizes = items.filter(i => letterCount(i.str) >= 3).flatMap(i => Array(Math.min(20, letterCount(i.str))).fill(i.size));
+  const body = median(sizes);
+  if (!body) return;
+  for (const it of items) {
+    const t = it.str.trim();
+    if (!/^["“‘(]?\p{Lu}\p{M}*$/u.test(t) || it.size < 1.9 * body) continue;
+    const capTop = it.y - 0.72 * it.size, capX1 = it.x + it.w;
+    const beside = items.filter(o => o !== it && letterCount(o.str) >= 1 && o.size < 0.6 * it.size &&
+      o.x >= capX1 - 1 && o.x - capX1 < 2.5 * o.size && o.y > capTop && o.y - 0.7 * o.size < it.y + 0.2 * o.size);
+    if (beside.some(o => o.y < capTop + 1.4 * o.size)) it.dropCap = true;
+  }
+}
+
 const LEADING_NUM_RE = /^(\s*(?:\d{1,2}[.)]|\(\d{1,2}\)|\(?[a-z]\)|[ivx]{1,4}\.))(\s+)(?=\p{L})/u;
 
 function splitLeadingBullets(items: NormItem[]): NormItem[] {
@@ -478,8 +631,8 @@ export interface ColumnAnalysis {
 export function analyzeColumns(items: NormItem[]): ColumnAnalysis {
   const c = detectGutterCandidates(splitLeadingBullets(items));
   return {
-    strong: c.filter(g => g.evidence >= 10).map(g => g.x),
-    weak: c.filter(g => g.evidence >= 3 && g.evidence < 10).map(g => g.x),
+    strong: c.filter(g => g.evidence >= 5).map(g => g.x),
+    weak: c.filter(g => g.evidence >= 3 && g.evidence < 5).map(g => g.x),
   };
 }
 
@@ -521,8 +674,14 @@ function detectGutterCandidates(items: NormItem[]): GutterCandidate[] {
     k = j + 1;
     if (mid < minX + 0.2 * span || mid > maxX - 0.2 * span) continue;
     if (gx1 - gx0 > 6 * size) continue; // khoảng trống rộng (hình, lề) – để ngưỡng thường xử lý
-    const leftEnds = body.filter(i => { const e = i.x + i.w; return e <= mid && e >= gx0 - 2.5 * size; }).length;
-    const rightStarts = body.filter(i => i.x >= mid && i.x <= gx1 + 2.5 * size).length;
+    // Bằng chứng = số HÀNG chữ kết thúc sát bên trái / bắt đầu sát bên phải khe (tính cả chú thích hình cỡ nhỏ:
+    // trang có cột trái phần lớn là hình thì chỉ còn chú thích + vài dòng thân bài làm bằng chứng)
+    const rowKey = (i: NormItem) => Math.round(i.y / Math.max(2, 0.5 * size));
+    const leftEnds = new Set(all.filter(i => { const e = i.x + i.w; return e <= mid && e >= gx0 - 2.5 * size; }).map(rowKey)).size;
+    const rightStarts = new Set(all.filter(i => i.x >= mid && i.x <= gx1 + 2.5 * size).map(rowKey)).size;
+    // Chữ cỡ nhỏ (chú thích) vắt qua khe → không phải khe cột
+    const crossing = all.filter(i => i.x < gx0 - 1 && i.x + i.w > gx1 + 1).length;
+    if (crossing > Math.max(3, 0.3 * Math.min(leftEnds, rightStarts))) continue;
     const evidence = Math.min(leftEnds, rightStarts);
     if (evidence >= 3) gutters.push({ x: mid, evidence });
   }
@@ -541,7 +700,7 @@ function sameRow(a: NormItem, b: NormItem): boolean {
 }
 
 function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment[] {
-  const items = splitLeadingBullets(rawItems);
+  const items = splitLeadingBullets(rawItems.filter(i => !i.dropCap));
   const gutters = gutterOverride ?? defaultGutters(items);
   const sorted = [...items].sort((a, b) => a.y - b.y || a.x - b.x);
   const rows: NormItem[][] = [];
@@ -613,7 +772,12 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
             if (j.aligned > 0) return false; // khe trùng vị trí với dòng trên/dưới → cột bảng
             return /^\s*\p{Ll}/u.test(it.str) || j.covered >= 1;
           })();
-        if (gutterBreak || labelBreak || (gap > 1.2 * mainSize && !justifiedGap)) flush();
+        // Hai mảnh chữ khác cỡ hẳn (thân bài ↔ chú thích hình) đứng cách nhau trên cùng hàng = hai cột khác nhau
+        // (sách Springer: khe cột chỉ ≈ 1,15 cỡ chữ, chỗ cột bên kia chỉ có hình + chú thích thì không dò ra khe)
+        const sizeBreak = gap > 0.5 * Math.min(it.size, prev.size) &&
+          Math.abs(it.size - prev.size) > 0.1 * Math.max(it.size, prev.size) &&
+          letterCount(prev.str) >= 2 && letterCount(it.str) >= 2;
+        if (gutterBreak || labelBreak || sizeBreak || (gap > 1.2 * mainSize && !justifiedGap)) flush();
       }
       cur.push(it);
     }
@@ -758,6 +922,7 @@ export function buildBlocks(
   // Số trang / số thuần, ký hiệu đầu dòng không tính là ô (để mục lục, danh sách vẫn nối dòng được).
   const isCellLike = (o: Segment) => !o.isLabel && !o.leader && !/^[\d\s.,–\-()%]+$/.test(o.text.trim()) && letterCount(o.text) >= 2;
   const hasRowMate = (sg: Segment) => segments.some(o => o !== sg && isCellLike(o) &&
+    Math.abs(o.size - sg.size) < 0.1 * Math.max(o.size, sg.size) && // khác cỡ chữ = cột khác (chú thích hình), không phải ô bảng
     Math.abs(o.y - sg.y) < 0.4 * Math.min(o.size, sg.size) &&
     (o.x1 <= sg.x0 + 1 || o.x0 >= sg.x1 - 1) &&
     !gutters.some(g => (g > Math.min(o.x1, sg.x1) - 1 && g < Math.max(o.x0, sg.x0) + 1)));
@@ -810,6 +975,7 @@ export function buildBlocks(
   }
 
   const blocks = work.map(b => finalizeBlock(b, pageWidth));
+  attachDropCaps(blocks, items);
   // Khối 1 dòng nằm sát lề phải của vùng nội dung (tiêu đề chạy, số trang…) → căn phải
   const rightEdge = Math.max(...blocks.map(b => b.x1));
   const inHeaderFooter = (b: LayoutBlock) => b.bottom < pageHeight * 0.1 || b.top > pageHeight * 0.9;
@@ -819,12 +985,17 @@ export function buildBlocks(
   }
   // Khối 1 dòng nằm giữa trang (tiêu đề chạy, tên chương) → căn giữa
   for (const b of blocks) {
-    if (b.align === 'left' && b.lineCount === 1 && !b.leader && b.x0 > pageWidth * 0.15 &&
+    // (chỉ dòng ngắn: dòng đầu của đoạn văn dài gần hết khổ không phải tiêu đề căn giữa)
+    if (b.align === 'left' && b.lineCount === 1 && !b.leader && !b.dropCap && b.x0 > pageWidth * 0.15 &&
+        b.x1 - b.x0 < 0.6 * pageWidth &&
         Math.abs((b.x0 + b.x1) / 2 - pageWidth / 2) < pageWidth * 0.015) b.align = 'center';
   }
   // Cột nhãn căn phải (nhãn hình nằm bên trái ảnh): ≥2 khối ngắn cùng cỡ, chung mép phải, khác mép trái
   for (const b of blocks) {
     if (b.align !== 'left' || b.leader || b.lineCount > 3) continue;
+    // Mục danh sách (có ký hiệu/số thứ tự bên trái) hoặc ô bảng (có khối khác cùng hàng) → không phải nhãn hình căn phải
+    const rowPeer = blocks.some(o => o !== b && Math.abs(o.top - b.top) < 0.5 * b.size && (o.x1 <= b.x0 + 1 || o.x0 >= b.x1 - 1));
+    if (rowPeer) continue;
     const similar = (o: LayoutBlock) => o !== b && o.lineCount <= 3 && Math.abs(o.size - b.size) < 0.2 * b.size;
     const sameRight = blocks.filter(o => similar(o) && Math.abs(o.x1 - b.x1) < 0.4 * b.size);
     const ragged = sameRight.filter(o => Math.abs(o.x0 - b.x0) > 1.5 * b.size).length;
@@ -835,6 +1006,38 @@ export function buildBlocks(
     if (!columnEdge && sameRight.length >= 2 && ragged >= 1 && sameRight.length > sameLeft) b.align = 'right';
   }
   return orderForReading(blocks, pageWidth, gutters);
+}
+
+function attachDropCaps(blocks: LayoutBlock[], items: NormItem[]) {
+  for (const cap of items.filter(i => i.dropCap)) {
+    const capTop = cap.y - 0.72 * cap.size, capX1 = cap.x + cap.w;
+    let best: LayoutBlock | null = null, bestD = Infinity;
+    for (const b of blocks) {
+      if (!b.translatable || b.dropCap || b.leader) continue;
+      if (b.x0 < capX1 - 1 || b.x0 - capX1 > 2.5 * b.size) continue;
+      const firstBase = b.top + 0.9 * b.size;
+      const d = Math.abs(firstBase - (capTop + 0.75 * b.size));
+      if (firstBase < capTop - 0.3 * b.size || firstBase > capTop + 1.6 * b.size) continue;
+      if (d < bestD) { bestD = d; best = b; }
+    }
+    if (!best) continue;
+    const letter = cap.str.trim();
+    const join = /^\p{Ll}/u.test(best.plain) ? '' : ' ';
+    best.text = letter + join + best.text;
+    best.plain = letter + join + best.plain;
+    const firstBase = best.top + 0.9 * best.size;
+    let k = 0;
+    for (let i = 0; i < best.lineCount; i++) if (firstBase + i * best.leading <= cap.y + 0.35 * best.size) k++;
+    best.dropCap = {
+      x: cap.x, w: best.x0 - cap.x, size: cap.size, baseline: cap.y, lines: Math.max(1, k),
+      bold: cap.bold, serif: cap.serif, color: cap.color,
+    };
+    best.x0 = cap.x;
+    best.firstOffset = 0;
+    best.restOffset = 0;
+    best.bottom = Math.max(best.bottom, cap.y + 0.08 * cap.size);
+    if (best.align === 'center' || best.align === 'right') best.align = best.lineCount >= 3 ? 'justify' : 'left';
+  }
 }
 
 function finalizeBlock(b: WorkBlock, pageWidth: number): LayoutBlock {
@@ -1086,7 +1289,7 @@ function layoutWordsInner(
   const space = m.width(' ', fontCss(base, serif, size)) * hs;
   const scale = size / b.size;
   const lineWidth = (i: number) => {
-    const w = width - (i === 0 ? b.firstOffset : b.restOffset) * scale;
+    const w = width - (i === 0 ? b.firstOffset : b.restOffset) * scale - (b.dropCap && i < b.dropCap.lines ? b.dropCap.w : 0);
     // Mục lục nhiều dòng: các dòng trên ngắt như bản gốc (chừa khoảng cho số trang)
     return useBodyRight && b.bodyRight ? Math.min(w, b.bodyRight + 0.5 * b.size - b.x0) : w;
   };
@@ -1140,7 +1343,7 @@ function drawLaidOut(
   let y = top + size * 0.93;
   lo.lines.forEach((line, i) => {
     const isLast = i === lo.lines.length - 1;
-    const offset = (i === 0 ? b.firstOffset : b.restOffset) * scale;
+    const offset = (i === 0 ? b.firstOffset : b.restOffset) * scale + (b.dropCap && i < b.dropCap.lines ? b.dropCap.w : 0);
     const avail = width - offset;
     const widths = line.map(w => wordWidth(m, w, serif, size, hs));
     const natural = widths.reduce((s, w) => s + w, 0) + space * Math.max(0, line.length - 1);
@@ -1228,6 +1431,8 @@ interface BlockInfo {
   extLeftAvail: number; // chỗ trống bên trái (dùng khi bên phải hết chỗ)
   base: RunStyle;
   words: Word[];
+  /** Chữ cái đầu bản dịch vẽ thành chữ hoa cỡ lớn (drop cap). */
+  capChar?: string;
 }
 
 /**
@@ -1240,16 +1445,18 @@ export function paintTranslatedPage(
   translations: Record<string, string>,
   /** Bản vẽ trang không có chữ (nền thật). null → xoá bằng màu nền. */
   clean?: ImageData | null,
+  /** Ảnh trang gốc đã đọc sẵn lúc phân tích (tránh đọc lại toàn trang — tốn ~15 MB và thời gian). */
+  pageImg?: ImageData | null,
 ): PaintReport {
   const report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [] };
   const W = ctx.canvas.width, H = ctx.canvas.height;
-  const img = ctx.getImageData(0, 0, W, H);
+  const img = pageImg && pageImg.width === W && pageImg.height === H ? pageImg : ctx.getImageData(0, 0, W, H);
   const cleanOk = !!clean && clean.width === W && clean.height === H;
   /**
    * Xoá một vùng: nếu bản "không chữ" thật sự đã mất chữ ở vùng này (chữ vector) → chép nền thật
    * (giữ ảnh, khung, đường kẻ, nền màu). Ngược lại (chữ nằm trong ảnh / trang scan) → tô màu nền.
    */
-  const erase = (x: number, y: number, w: number, h: number, bg: RGB) => {
+  const erase = (x: number, y: number, w: number, h: number, bg: RGB, size = 0) => {
     const xa = Math.max(0, Math.floor(x)), ya = Math.max(0, Math.floor(y));
     const xb = Math.min(W, Math.ceil(x + w)), yb = Math.min(H, Math.ceil(y + h));
     if (xb <= xa || yb <= ya) return;
@@ -1290,21 +1497,129 @@ export function paintTranslatedPage(
       let row = 0;
       for (let xx = 0; xx < rw; xx++) { row += mask[yy * rw + xx]; integ[(yy + 1) * (rw + 1) + xx + 1] = integ[yy * (rw + 1) + xx + 1] + row; }
     }
-    const R = 10;
+    // Cửa sổ "mực đặc" theo cỡ chữ: nét chữ cỡ rất lớn (tiêu đề bìa) dày hơn cửa sổ cố định 21px → trước đây bị
+    // coi là logo nên không xoá, để lại vệt nét chữ
+    const R = Math.max(10, Math.round(0.45 * (size > 0 ? size : rh / 1.3)));
     const dense = (xx: number, yy: number) => {
       const xa2 = Math.max(0, xx - R), ya2 = Math.max(0, yy - R), xb2 = Math.min(rw, xx + R + 1), yb2 = Math.min(rh, yy + R + 1);
       const sum = integ[yb2 * (rw + 1) + xb2] - integ[ya2 * (rw + 1) + xb2] - integ[yb2 * (rw + 1) + xa2] + integ[ya2 * (rw + 1) + xa2];
       return sum > 0.9 * (xb2 - xa2) * (yb2 - ya2);
     };
+    // Đường kẻ bảng / khung / gạch chân dài: chuỗi mực ngang rất dài hoặc chuỗi dọc chạy suốt chiều cao vùng → GIỮ
+    // (trước đây bị xoá cùng chữ → đường kẻ bảng đứt đoạn, vạch "_" lẻ ở góc ô)
+    const em = size > 0 ? size : Math.max(8, rh / 1.3);
+    const hMin = Math.max(30, 4 * em);
+    const vMin = rh >= 1.1 * em ? Math.max(6, Math.min(0.9 * rh, 2.5 * em)) : Infinity;
+    // Đường kẻ thật chạy tiếp ra NGOÀI khung chữ; nét chữ (thân chữ F, l, gạch ngang chữ T…) thì không
+    const od = img.data;
+    const inkAt = (gx: number, gy: number) => {
+      if (gx < 0 || gy < 0 || gx >= W || gy >= H) return false;
+      const i = (gy * W + gx) * 4;
+      const L = 0.299 * od[i] + 0.587 * od[i + 1] + 0.114 * od[i + 2];
+      return dark ? bgL - L > 18 : L - bgL > 18;
+    };
+    const beyond = (gx: number, gy: number, dx: number, dy: number) => {
+      for (let k = 1; k <= 4; k++) if (inkAt(gx + dx * k, gy + dy * k)) return true;
+      return false;
+    };
+    for (let yy = 0; yy < rh; yy++) {
+      let run = 0;
+      for (let xx = 0; xx <= rw; xx++) {
+        if (xx < rw && mask[yy * rw + xx]) { run++; continue; }
+        if (run >= hMin) {
+          const a = xx - run, gy = ya + yy;
+          const cont = (a === 0 && beyond(xa, gy, -1, 0)) || (xx === rw && beyond(xa + rw - 1, gy, 1, 0)) || run >= 10 * em;
+          if (cont) for (let t = a; t < xx; t++) mask[yy * rw + t] = 2;
+        }
+        run = 0;
+      }
+    }
+    if (vMin !== Infinity) {
+      for (let xx = 0; xx < rw; xx++) {
+        let run = 0;
+        for (let yy = 0; yy <= rh; yy++) {
+          if (yy < rh && mask[yy * rw + xx]) { run++; continue; }
+          if (run >= vMin) {
+            const a = yy - run, gx = xa + xx;
+            const cont = (a === 0 && beyond(gx, ya, 0, -1)) || (yy === rh && beyond(gx, ya + rh - 1, 0, 1));
+            if (cont) for (let t = a; t < yy; t++) mask[t * rw + xx] = 2;
+          }
+          run = 0;
+        }
+      }
+    }
+    const isText = (k: number) => mask[k] === 1;
+    // Tập điểm cần thay = điểm chữ + 1 điểm viền (bỏ vùng mực đặc và đường kẻ)
+    const repl = new Uint8Array(rw * rh);
     for (let yy = 0; yy < rh; yy++) {
       for (let xx = 0; xx < rw; xx++) {
         const k = yy * rw + xx;
+        if (mask[k] === 2) continue;
         if (mask[k] && dense(xx, yy)) continue;
-        const near = mask[k] || (xx > 0 && mask[k - 1]) || (xx < rw - 1 && mask[k + 1]) || (yy > 0 && mask[k - rw]) || (yy < rh - 1 && mask[k + rw]);
-        if (!near) continue;
+        const near = isText(k) || (xx > 0 && isText(k - 1)) || (xx < rw - 1 && isText(k + 1)) || (yy > 0 && isText(k - rw)) || (yy < rh - 1 && isText(k + rw));
+        if (near) repl[k] = 1;
+      }
+    }
+    // Nền đồng màu (đa số trang sách) → tô màu nền, nhanh
+    let off = 0, seen = 0;
+    for (let k = 0; k < rw * rh; k += 3) {
+      if (repl[k] || mask[k] === 2) continue;
+      seen++;
+      const i = k * 4;
+      if (Math.abs(p[i] - bg.r) + Math.abs(p[i + 1] - bg.g) + Math.abs(p[i + 2] - bg.b) > 30) off++;
+    }
+    if (off <= 0.004 * seen) {
+      for (let k = 0; k < rw * rh; k++) {
+        if (!repl[k]) continue;
         const i = k * 4;
         p[i] = bg.r; p[i + 1] = bg.g; p[i + 2] = bg.b; p[i + 3] = 255;
       }
+      ctx.putImageData(part, xa, ya);
+      return;
+    }
+    // Nền không đồng màu: lấp bằng NỘI SUY từ các điểm nền thật hai bên (ngang + dọc), không tô một màu phẳng
+    // → nền ảnh / chuyển màu / vân giấy không còn "bóng" hình chữ cũ.
+    const acc = new Float32Array(rw * rh * 3);
+    const cnt = new Uint8Array(rw * rh);
+    const src = new Uint8ClampedArray(p); // màu gốc để nội suy
+    const good = (k: number) => !repl[k] && mask[k] !== 2;
+    const fill = (k: number, a: number, b2: number, t: number) => { // a, b2: chỉ số điểm biên (-1 = không có)
+      const o = k * 3;
+      for (let c = 0; c < 3; c++) {
+        const va = a >= 0 ? src[a * 4 + c] : -1, vb = b2 >= 0 ? src[b2 * 4 + c] : -1;
+        const v = va >= 0 && vb >= 0 ? va + (vb - va) * t : va >= 0 ? va : vb >= 0 ? vb : (c === 0 ? bg.r : c === 1 ? bg.g : bg.b);
+        acc[o + c] += v;
+      }
+      cnt[k]++;
+    };
+    for (let yy = 0; yy < rh; yy++) { // ngang
+      let xx = 0;
+      while (xx < rw) {
+        if (!repl[yy * rw + xx]) { xx++; continue; }
+        const s0 = xx;
+        while (xx < rw && repl[yy * rw + xx]) xx++;
+        let l = s0 - 1; while (l >= 0 && !good(yy * rw + l)) l--;
+        let r = xx; while (r < rw && !good(yy * rw + r)) r++;
+        const a = l >= 0 ? yy * rw + l : -1, b2 = r < rw ? yy * rw + r : -1;
+        for (let t = s0; t < xx; t++) fill(yy * rw + t, a, b2, (l >= 0 && r < rw) ? (t - l) / (r - l) : 0);
+      }
+    }
+    for (let xx = 0; xx < rw; xx++) { // dọc
+      let yy = 0;
+      while (yy < rh) {
+        if (!repl[yy * rw + xx]) { yy++; continue; }
+        const s0 = yy;
+        while (yy < rh && repl[yy * rw + xx]) yy++;
+        let u = s0 - 1; while (u >= 0 && !good(u * rw + xx)) u--;
+        let dn = yy; while (dn < rh && !good(dn * rw + xx)) dn++;
+        const a = u >= 0 ? u * rw + xx : -1, b2 = dn < rh ? dn * rw + xx : -1;
+        for (let t = s0; t < yy; t++) fill(t * rw + xx, a, b2, (u >= 0 && dn < rh) ? (t - u) / (dn - u) : 0);
+      }
+    }
+    for (let k = 0; k < rw * rh; k++) {
+      if (!repl[k]) continue;
+      const i = k * 4, o = k * 3, n = cnt[k] || 1;
+      p[i] = acc[o] / n; p[i + 1] = acc[o + 1] / n; p[i + 2] = acc[o + 2] / n; p[i + 3] = 255;
     }
     ctx.putImageData(part, xa, ya);
   };
@@ -1360,7 +1675,26 @@ export function paintTranslatedPage(
     }
 
     const base: RunStyle = { ...b.baseStyle, color: b.baseStyle.color && !isDark(b.baseStyle.color) ? b.baseStyle.color : (stats.fg ?? b.baseStyle.color) };
-    info.set(b.id, { stats, free, extLeft, extRight, extLeftAvail, base, words: parseRich(translations[b.id], b, base) });
+    const words = parseRich(translations[b.id], b, base);
+    let capChar: string | undefined;
+    if (b.dropCap && words.length) {
+      // Tách chữ cái đầu của bản dịch (kể cả dấu thanh) để vẽ to như bản gốc
+      const w0 = words[0];
+      const pi = w0.findIndex(p => /\p{L}/u.test(p.text));
+      const mm = pi >= 0 ? w0[pi].text.match(/^(\P{L}*)(\p{L}\p{M}*)([\s\S]*)$/u) : null;
+      if (mm) {
+        capChar = mm[2].toUpperCase();
+        w0[pi] = { ...w0[pi], text: mm[1] + mm[3] };
+        const rest = w0.filter(p => p.text);
+        if (rest.length) words[0] = rest; else words.shift();
+        const dc = b.dropCap;
+        const capW = m.width(capChar, fontCss({ bold: dc.bold, italic: false, color: null }, dc.serif, dc.size));
+        dc.w = Math.max(dc.w, capW + 0.25 * b.size);
+      } else {
+        b.dropCap = undefined;
+      }
+    }
+    info.set(b.id, { stats, free, extLeft, extRight, extLeftAvail, base, words, capChar });
   }
 
   /* --- Ký hiệu đầu dòng / số thứ tự đi kèm mỗi mục: di chuyển cùng mục khi mục bị đẩy xuống --- */
@@ -1555,7 +1889,9 @@ export function paintTranslatedPage(
       if (list.length < 2) return;
       const scales = list.map(p => p.lo.size / p.orig.size);
       // cỡ chung gần mức phổ biến; dòng nào buộc phải nhỏ hơn hẳn giữ cỡ riêng (không kéo cả nhóm xuống)
-      const target = Math.max(0.68, Math.min(...scales), median(scales) - 0.08);
+      // Chênh lệch nhỏ (≤ 0,2) → mọi dòng cùng một cỡ (cỡ nhỏ nhất), như bản in; chỉ dòng nhỏ hơn hẳn mới giữ cỡ riêng
+      const mn = Math.min(...scales), md = median(scales);
+      const target = Math.max(0.68, md - mn <= 0.2 ? mn : md - 0.08);
       for (const p of list) {
         const sc = p.lo.size / p.orig.size;
         if (sc <= target + 0.01) continue;
@@ -1571,6 +1907,10 @@ export function paintTranslatedPage(
   const keepPatches: { patch: ImageData; x: number; y: number }[] = [];
   for (const o of blocks) {
     if (targetIds.has(o.id) || companionIds.has(o.id)) continue;
+    // Chỉ giữ số mục / số trang / ký hiệu nhỏ. KHÔNG giữ khối OCR (chữ trong hình — khung AI ước lượng, có thể
+    // cao/rộng lấn sang chữ thường) và khối nhiều dòng: trước đây việc "giữ lại" chép trả cả dải chữ gốc tiếng Anh
+    // đè lên bản dịch (vd. dải đầu dòng ở cột trái trang có ảnh siêu âm).
+    if (o.fromOcr || o.rotate || o.bottom - o.top > 2.2 * o.size || o.x1 - o.x0 > 12 * o.size) continue;
     const hit = targets.some(b => {
       const plan = plans.find(p => p.orig === b);
       const x0 = Math.min(b.x0, plan ? plan.x0 : b.x0), x1 = Math.max(b.x1, plan ? plan.x0 + plan.width : b.x1);
@@ -1616,7 +1956,35 @@ export function paintTranslatedPage(
       }
     }
     if (cleanOk) top = Math.max(Math.min(top, b.top - 0.3 * b.size), 0); // nền thật → nới rộng an toàn (khối khác được khôi phục)
-    erase(Math.min(b.x0, plan.x0) - padX, top, Math.max(b.x1 - b.x0, plan.width) + 2 * padX, bottom - top, inf.stats.bg);
+    // Mép trái/phải theo mực thật: chữ đậm / chữ nghiêng / khoảng cách chữ của font gốc có thể in tràn ra ngoài
+    // độ rộng PDF khai báo → còn sót nét cuối chữ (vd. vệt "┌" của chữ T cuối tiêu đề)
+    let left = Math.min(b.x0, plan.x0) - padX, right = Math.max(b.x1, plan.x0 + plan.width) + padX;
+    {
+      const bg = inf.stats.bg, d = img.data;
+      const ya2 = Math.max(0, Math.floor(b.top)), yb2 = Math.min(H, Math.ceil(b.bottom));
+      let limR = right + 0.8 * b.size, limL = left - 0.8 * b.size;
+      for (const o of blocks) {
+        if (o === b || o.bottom <= b.top || o.top >= b.bottom) continue;
+        if (o.x0 >= b.x1 - 1) limR = Math.min(limR, o.x0 - 1);
+        if (o.x1 <= b.x0 + 1) limL = Math.max(limL, o.x1 + 1);
+      }
+      const colInk = (x: number) => {
+        if (x < 0 || x >= W) return false;
+        for (let y = ya2; y < yb2; y++) {
+          const i = (y * W + x) * 4;
+          if (Math.abs(d[i] - bg.r) + Math.abs(d[i + 1] - bg.g) + Math.abs(d[i + 2] - bg.b) > 90) return true;
+        }
+        return false;
+      };
+      // chỉ nới khi mực liền với chữ (không vươn sang hình / đường kẻ cách xa)
+      for (let x = Math.ceil(right); x < limR && colInk(x); x++) right = x + 2;
+      for (let x = Math.floor(left); x > limL && colInk(x); x--) left = x - 1;
+    }
+    erase(left, top, right - left, bottom - top, inf.stats.bg, b.size);
+    if (b.dropCap) {
+      const dc = b.dropCap;
+      erase(dc.x - 0.08 * dc.size, dc.baseline - 0.82 * dc.size, dc.w + 0.1 * dc.size, 0.92 * dc.size, inf.stats.bg, b.size);
+    }
   }
   for (const k of keepPatches) ctx.putImageData(k.patch, k.x, k.y);
 
@@ -1634,6 +2002,14 @@ export function paintTranslatedPage(
     const inf = info.get(p.b.id)!;
     ctx.save();
     drawLaidOut(ctx, m, p.lo, p.b, inf.base, p.x0, p.width, p.top);
+    if (inf.capChar && p.b.dropCap) {
+      const dc = p.b.dropCap;
+      ctx.font = fontCss({ bold: dc.bold, italic: false, color: null }, dc.serif, dc.size);
+      const c = dc.color && !isDark(dc.color) ? dc.color : (inf.base.color ?? dc.color);
+      ctx.fillStyle = c ? rgbCss(c) : '#1a1a1a';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(inf.capChar, dc.x, dc.baseline);
+    }
     ctx.restore();
     report.painted++;
   }

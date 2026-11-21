@@ -220,3 +220,82 @@ Chạy bộ máy thật trên các trang đại diện: bìa, mục lục, tiêu
 - Prompt OCR: mỗi mục mục lục một khối, giữ dấu chấm dẫn + số trang.
 
 **Giãn dòng:** chỉ nén tối đa ~12% (tối thiểu 1,12 cỡ chữ) rồi mới thu nhỏ chữ đều cả trang — tránh đoạn bị dồn dòng sát nhau trông chật, các đoạn cùng giãn dòng.
+
+### Cập nhật v7 — sửa lỗi dàn trang, nhanh hơn, nút Dừng dừng thật
+
+**Lỗi dàn trang đã sửa (đã kiểm thử tái hiện trước/sau):**
+- **Chữ mờ như "bóng ma" trên bìa/nền ảnh** (vd. "Từ Sinh thiết đến Cắt bỏ"): trước đây màu từng từ được lấy so với "màu nền phổ biến" → trên nền chuyển màu, một từ bị nhận là "chữ màu xanh đậm" và vẽ gần trùng màu nền. Nay lấy màu chữ bằng cách so ảnh gốc với bản vẽ không chữ; nền không đồng màu thì dùng màu cả dòng.
+- **Vết chữ cũ còn lại trên nền ảnh/gradient**: vùng xoá được lấp bằng nội suy từ điểm nền xung quanh (không tô một màu phẳng). Nền trắng/đồng màu vẫn tô nhanh như cũ.
+- **Đường kẻ bảng bị đứt, vạch "_" lẻ ở góc ô**: khi xoá chữ, các đường kẻ ngang/dọc dài được giữ nguyên.
+- **Chữ hoa cỡ lớn đầu đoạn (drop cap)**: trước đây chữ "T" bị ghép nhầm vào dòng khác ("Tappendices."), dòng đầu bị coi là căn giữa, chữ Việt đè lên chữ "T". Nay nhận diện riêng: chữ cái đầu của bản dịch được vẽ lại to ở đúng chỗ, các dòng bên cạnh thụt vào.
+- Dòng đầu đoạn văn dài nằm gần giữa trang không còn bị nhận nhầm là tiêu đề căn giữa.
+- Mục danh sách / ô bảng không còn bị nhận nhầm là "cột nhãn hình căn phải" (lỗi chữ lệch trái đè lên "c.", "d."…).
+- Ô bảng / mục lục / danh sách "PHẦN I…VII": cùng cỡ gốc thì cùng cỡ chữ (hết cảnh dòng to dòng nhỏ).
+- Font không chân (Avenir, Myriad, Frutiger, Helvetica…) bị pdf.js gắn nhầm "serif" → nay vẽ đúng Arimo thay vì Tinos.
+- Khối chữ AI bỏ sót (còn nguyên tiếng Anh) được dịch bù tự động; phản hồi JSON bị cắt giữa chừng vẫn lấy được phần đã dịch.
+
+**Nhanh hơn, không đơ máy:**
+- Phân tích màu/cỡ chữ nhanh hơn 4–7 lần (viết lại hàm thống kê điểm ảnh, chỉ tách từng từ khi dòng thật sự có nhiều màu).
+- Phần nặng CPU (vẽ trang, đọc điểm ảnh, dàn chữ) chạy lần lượt từng trang, có nhường luồng cho giao diện; phần gọi AI vẫn song song → không còn 3 trang cùng vẽ một lúc làm đơ máy và nghẽn trình xem PDF bên trái.
+- Chỉ vẽ bản "không chữ" khi trang có hình / đường kẻ / mảng màu; ảnh trang được đọc một lần và dùng lại; giải phóng canvas ngay sau khi xong (mỗi canvas ≈ 15 MB).
+- Các phần chữ của một trang gửi AI song song; OCR chữ trong hình chạy song song với dịch chữ thường (trước đây tuần tự).
+- Bố cục cột AI đã xác nhận được dùng lại cho các trang khác cùng sách → ít lần gửi ảnh cho AI.
+- IndexedDB: dùng một kết nối duy nhất; đọc đệm theo khoảng khoá của tài liệu (trước đây duyệt toàn bộ kho của mọi tài liệu mỗi lần mở file).
+
+**Nút Dừng:**
+- Bấm Dừng → hiện "Đang dừng…", huỷ ngay lệnh vẽ pdf.js, lệnh gọi AI và cả thời gian chờ thử lại (trước đây có thể chờ tới 8 giây/lần thử, và việc "dựng lại từ bản lưu" không dừng được nên web vẫn chạy ngầm).
+- Lật sang trang khác → huỷ việc dựng lại trang cũ.
+- Đệm ảnh nâng lên v13: trang đã dịch được tự dựng lại theo bộ máy mới, không tốn token (bản lưu cũ thiếu chữ cái đầu do drop cap vẫn ghép được).
+
+### Cập nhật v7.1 — sửa tiếp trang 2 cột có hình và bìa sách
+
+- **Trang 2 cột mà cột trái phần lớn là hình** (vd. sách Springer trang 6): trước đây bộ nhận diện chỉ thấy khe cột "yếu" nên phải hỏi AI. AI nhìn thấy cột trái toàn hình và trả lời "1 cột", thế là khe cột bị bỏ. Hậu quả: dòng của hai cột bị ghép lẫn vào nhau, đoạn văn vỡ thành dòng lẻ, chữ Anh còn sót đè lên chú thích hình. Câu trả lời sai này còn được ghi nhớ nên dịch lại vẫn sai. Sửa: tính bằng chứng theo số hàng (có tính cả chú thích hình); khe cột có bằng chứng rõ thì AI không được bỏ; xoá bộ nhớ số cột cũ.
+- **Bìa sách: phụ đề xếp dọc từng chữ ở đầu trang**: AI đọc chữ trong ảnh và trả lại cả phụ đề vốn đã có trong lớp chữ, nhưng với khung vị trí sai. Nay khối OCR trùng nội dung với lớp chữ, hoặc có khung vô lý (nhiều từ mà khung quá hẹp), đều bị loại, kể cả khi dựng lại từ bản đã lưu.
+- Đệm ảnh v14: các trang đã dịch tự được vẽ lại. Những khối trước đây bị tách sai sẽ được dịch bù (tốn ít token).
+
+### Cập nhật v7.2 — kiểm thử trên sách thật (Fornage, Interventional Ultrasound of the Breast)
+
+- **Dải chữ tiếng Anh sót ở đầu mỗi dòng cột trái** (trang 6: "Fig. 1.13", "benign type", "and 1.14,"…): AI đọc chữ trong ảnh siêu âm trả về một khối hẹp và cao dọc mép trái hình (thang độ sâu, nhãn "ST"). Khối này không cần dịch nên bước "giữ nguyên số mục/ký hiệu" đã chép trả cả dải ảnh gốc, đè lên bản dịch. Sửa: không bao giờ chép trả khối OCR hoặc khối lớn; bỏ khối OCR có khung lấn vào chữ thường.
+- **Đọc chữ trong hình nay mặc định TẮT** (nút mới "Chữ trong hình" trên thanh công cụ). Đây là nguyên nhân chính khiến mỗi trang có hình mất hơn 1 phút: phải gửi ảnh trang 1600px cho AI đọc rồi mới vẽ được. Chữ trong ảnh y khoa (thang đo, ST, L/R…) hầu như không cần dịch.
+- **Chú thích hình bị ghép với thân bài cột bên cạnh** (trang 15): khe cột của Springer rất hẹp, chỗ cột bên kia chỉ có hình + chú thích thì không dò ra khe. Nay hai mảnh chữ khác cỡ hẳn trên cùng hàng được tách riêng, và không bị coi là ô bảng.
+- **Vệt nét chữ sót ở cuối tiêu đề** (vd. "┌" sau "PATIENT"): vùng xoá được nới sang hai bên theo mực thật.
+- Nét chữ rất to (tiêu đề bìa) không còn bị coi là logo nên được xoá hết; chữ trên nền ảnh lấy đúng màu (phần sáng/tối nhất của vùng).
+- Đường kẻ bảng chỉ được giữ khi chạy tiếp ra ngoài khung chữ (không giữ nhầm thân chữ F, l…).
+- **Dịch nhanh hơn**: mỗi trang chia thành các phần ~1800 ký tự, gửi song song tối đa 3 phần. Thời gian chờ AI giảm ~40% (mô phỏng).
+- Kiểm thử: 40 trang thật (tr. 18–57) chạy không lỗi, xử lý trên máy ~0,5 giây/trang; nút Dừng thoát mọi luồng trong < 0,1 giây sau khi bấm.
+- Đệm ảnh v16: trang đã dịch tự vẽ lại.
+
+### Cập nhật v7.3 — không dồn tải lên ShopAIKey
+
+**Bộ điều tiết chung cho mọi yêu cầu qua proxy** (ShopAIKey và key hệ thống `/api/ai/chat`; mọi chức năng: dịch thường, dịch giữ định dạng, tóm tắt, OCR…):
+- Tối đa **2 yêu cầu cùng lúc**, các lần gửi cách nhau ≥ 0,35 giây. Muốn đổi thì đặt `localStorage.mediTrans_proxyMaxConcurrent` (1–8).
+- Proxy báo quá tải (429, 5xx, "overloaded", lỗi mạng) → **tạm dừng mọi yêu cầu** theo `Retry-After`, hoặc lùi dần 4 → 8 → 16 → 30 giây, và chỉ gửi 1 yêu cầu/lần. Sau 6 lần thành công liên tiếp thì tăng dần trở lại.
+- Bấm Dừng vẫn thoát ngay cả khi đang chờ trong hàng.
+
+**Cấu hình dịch nhiều trang (trước → sau, khi dùng ShopAIKey):**
+| Chức năng | Trước | Sau |
+|---|---|---|
+| Dịch toàn bộ (dịch thường) | 6 trang cùng lúc (nhiều key: tới 10), chạy theo mẻ | 3 trang, hàng đợi liên tục (trang xong thì lấy trang tiếp) |
+| Dịch trước khi lật trang | 5 trang | 2 trang |
+| Dịch giữ định dạng | 3 trang × 3 phần = tới 9 yêu cầu | 2 trang; mọi yêu cầu qua bộ điều tiết (≤ 2 cùng lúc) |
+
+Key Google riêng (AIzaSy…) giữ cấu hình cũ, vì có giới hạn và cơ chế xoay key riêng.
+
+Kiểm thử mô phỏng: dồn 12 yêu cầu cùng lúc vào proxy chỉ chịu 2 → đỉnh 2 yêu cầu, 0 lần quá tải, 12/12 thành công. Proxy chỉ chịu 1 → 2 lần quá tải rồi tự hạ nhịp, 12/12 thành công.
+
+### Cập nhật v7.4 — rà soát toàn bộ luồng API Key + tăng tốc dịch thường / nâng cao
+
+**Lỗi key Google (Gemini API) đã sửa:**
+1. **Nguyên nhân lỗi 403 PERMISSION_DENIED:** mọi yêu cầu qua key Google đều bị ĐỔI NGẦM sang `gemini-3.6-flash` (hàm `mapModelForGoogle`), kể cả khi chọn "Cơ bản (Flash Lite)". Key không có quyền dùng model này thì hỏng hết. ShopAIKey không bị vì dùng bảng đổi tên khác. Nay: giữ đúng model đã chọn; nếu key bị từ chối model đó (403/404) thì **tự chuyển** lần lượt sang gemini-2.5-flash → 2.5-flash-lite → flash-latest. Model dùng được được ghi nhớ theo từng key.
+2. **Test key:** chỉ thử các model 3.x nên key tốt vẫn báo lỗi; lỗi 429 (tạm hết lượt) bị coi là key hỏng và bị đánh dấu "error" trên Firestore. Nay: thử cả model dự phòng, báo rõ model nào dùng được; phân biệt *key sai*, *bị từ chối*, *tạm hết lượt* (key tạm hết lượt vẫn giữ trạng thái "active"). Áp dụng cho Test key trong Cài đặt, khi thêm key mới, trong Quản trị (key người dùng, key hệ thống) và kiểm tra hàng loạt.
+3. **Nhận diện loại key thống nhất:** trước đây chỗ xét nhãn, chỗ xét tiền tố "sk-" → ShopAIKey không có "sk-" bị gọi nhầm sang Google, key AIzaSy… lỡ gắn nhãn ShopAIKey bị gửi sang proxy. Nay: AIzaSy… luôn là Google; các key khác theo nhãn trong kho key, dùng chung cho mọi chức năng (dịch thường, nâng cao, giữ định dạng, tóm tắt, tra thuật ngữ, OCR).
+4. **Lỗi 403 / key sai** trước đây bị coi như hết hạn mức → thử lại 6 lần vô ích rồi mới hiện lỗi tiếng Anh khó hiểu. Nay: key bị từ chối hẳn được bỏ qua 10 phút, chuyển sang key khác; không còn key nào thì báo ngay bằng tiếng Việt (nêu cách khắc phục).
+5. Dịch thường bằng key Google trước đây không dừng được bằng nút Dừng (thiếu tín hiệu huỷ) → đã sửa.
+6. Key nhập tay: nhập ở chế độ "Cơ bản" rồi chọn "Chuyên sâu" thì báo không có key → nay dùng chung.
+7. **Chia sẻ key:** thêm danh sách email đang được chia sẻ và nút **Thu hồi**; kiểm tra email hợp lệ, không chia sẻ cho chính mình, Enter để chia sẻ.
+
+**Dịch thường / dịch nâng cao nhanh hơn:**
+- Dịch theo lớp chữ dùng **phân tích nhẹ** (chỉ đọc lớp chữ, không vẽ trang): dựng Markdown nhanh hơn ~30 lần (5 trang: 2,7 giây → 0,08 giây), không tranh tài nguyên với trình xem PDF và tab Giữ định dạng.
+- **Trang dài (> ~2.400 ký tự) chia 2–3 phần dịch song song**, cắt tại ranh giới đoạn (tiêu đề luôn đi cùng đoạn sau nó). Phần đầu vẫn hiện dần; thời gian chờ ≈ phần dài nhất (ước tính nhanh gần gấp đôi với trang dài).
+- **Bảo đảm toàn bộ tiếng Việt:** sau khi dịch, dòng (kể cả ô bảng, gạch đầu dòng, dòng in đậm) còn sót tiếng Anh được tự dịch bù, giữ nguyên định dạng Markdown; tài liệu tham khảo giữ nguyên. Không có dòng sót thì không gọi thêm AI.
+- Số luồng dịch hàng loạt với key Google: 2 trang/key (tối đa 8) thay vì 6–12 với cả 1 key (gây 429 liên tục).

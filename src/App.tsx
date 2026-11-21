@@ -7,7 +7,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo, memo } from '
 import * as pdfjs from 'pdfjs-dist';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { GeminiService } from './services/geminiService';
+import { GeminiService, getProxyMaxConcurrent } from './services/geminiService';
 import { Logo, LogoWithText } from './components/Logo';
 import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
@@ -17,6 +17,7 @@ import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveT
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { LayoutTranslatePanel } from './components/LayoutTranslatePanel';
 import { buildPageMarkdown } from './services/layoutTranslationService';
+import { splitMarkdownForParallel, fixUntranslatedLines } from './utils/translateBoost';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
 
 const PDFJS_VERSION = '3.11.174';
@@ -471,6 +472,7 @@ export default function App() {
     if (!k) return false;
     if (k.isSystem) return true;
     const val = (k.value || '').trim();
+    if (val.startsWith('AIzaSy')) return false; // key Google Gemini luôn là key Google, kể cả khi lỡ gắn nhãn ShopAIKey
     const eng = (k.engine || '').toLowerCase();
     return val.startsWith('sk-') || val.startsWith('sh-') || val.startsWith('sai-') || eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy');
   };
@@ -494,17 +496,20 @@ export default function App() {
     }
     setTestingKeyId(keyId);
     try {
-      const res = await translationService.current.testSingleKeyTranslation(keyValue, "Hello world! Testing translation AI.");
+      const rec = userKeys.find(k => k.id === keyId);
+      const res = await translationService.current.testSingleKeyTranslation(keyValue, "Hello world! Testing translation AI.", rec ? (isKeyShopAIKey(rec) ? 'proxy' : 'google') : undefined);
       setKeyTestResults(prev => ({
         ...prev,
         [keyId]: res
       }));
-      if (res.success && user) {
+      // Thành công / chỉ tạm hết lượt → "active"; key sai hoặc bị Google từ chối hẳn → "error" (đưa xuống cuối hàng xoay key)
+      const keyBroken = !res.success && (res.errorKind === 'key' || res.errorKind === 'model');
+      if ((res.success || keyBroken || res.errorKind === 'quota') && user) {
         const targetKey = userKeys.find(k => k.id === keyId);
         if (targetKey && !targetKey.isSystem && targetKey.id !== 'system_proxy' && !keyId.startsWith('system_') && (targetKey.ownerId === user.uid || userRole === 'admin')) {
           try {
             await updateDoc(doc(db, 'apiKeys', keyId), {
-              status: 'active',
+              status: keyBroken ? 'error' : 'active',
               lastUsed: serverTimestamp()
             });
           } catch (e) {
@@ -569,7 +574,8 @@ export default function App() {
     if (!newKey.value.trim()) return;
     setNewKeyTestResult({ loading: true });
     try {
-      const res = await translationService.current.testSingleKeyTranslation(newKey.value, "Hello world! Testing translation AI.");
+      const type = isKeyShopAIKey({ value: newKey.value, engine: newKey.engine }) ? 'proxy' : 'google';
+      const res = await translationService.current.testSingleKeyTranslation(newKey.value, "Hello world! Testing translation AI.", type);
       setNewKeyTestResult({ ...res, loading: false });
     } catch (err: any) {
       setNewKeyTestResult({ success: false, error: err.message || "Lỗi khi chạy thử", loading: false });
@@ -976,13 +982,23 @@ export default function App() {
     return combined;
   }, [ownedKeys, sharedKeys, effectiveUserLevel]);
 
+  // Ghi nhận loại từng key (Google / ShopAIKey) theo kho key → mọi chức năng (dịch, test, giữ định dạng…) nhận
+  // diện key giống nhau. Trước đây chỗ thì xét nhãn, chỗ thì xét tiền tố "sk-" → ShopAIKey không có tiền tố "sk-"
+  // bị gọi nhầm sang Google.
+  useEffect(() => {
+    const list = userKeys.filter(k => k.value?.trim()).map(k => ({ value: k.value, isProxy: isKeyShopAIKey(k) }));
+    const manualShop = engineKeys['shopaikey'] || (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_shopAiKey') : '');
+    if (manualShop && manualShop.trim()) list.push({ value: manualShop, isProxy: true });
+    GeminiService.registerKeyTypes(list);
+  }, [userKeys, engineKeys]);
+
   const hasValidKeysForFolder = useCallback((folder: 'all' | 'gemini' | 'shopaikey') => {
     // If the vault has keys matching this folder, they are available to use/rotate
     const folderVaultKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && (k.id === 'system_proxy' || k.value?.trim()));
     if (folderVaultKeys.length > 0) return true;
 
     if (folder === 'gemini' || folder === 'all') {
-      const geminiManual = engineKeys['gemini-2.5-flash-lite']; // chỉ dùng key người dùng nhập trong web — KHÔNG lấy GEMINI_API_KEY của môi trường AI Studio (proxy AI Studio chặn generateContent)
+      const geminiManual = engineKeys[selectedEngine] || engineKeys['gemini-2.5-flash-lite'] || engineKeys['gemini-3.6-flash']; // chỉ dùng key người dùng nhập trong web — KHÔNG lấy GEMINI_API_KEY của môi trường AI Studio (proxy AI Studio chặn generateContent)
       if (geminiManual && geminiManual.trim()) return true;
     }
     if (folder === 'shopaikey' || folder === 'all') {
@@ -1361,7 +1377,7 @@ export default function App() {
           if (!map[ownerId]) map[ownerId] = { freeCount: 0, shopAiCount: 0 };
           const val = (d.value || '').trim();
           const eng = (d.engine || '').toLowerCase();
-          const isShop = val.startsWith('sk-') || eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy');
+          const isShop = !val.startsWith('AIzaSy') && (val.startsWith('sk-') || eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy'));
           if (isShop) {
             map[ownerId].shopAiCount++;
           } else {
@@ -1619,7 +1635,7 @@ export default function App() {
       return;
     }
 
-    const isShopKey = newKey.engine === 'shopaikey' || newKey.value.trim().startsWith('sk-');
+    const isShopKey = isKeyShopAIKey({ value: newKey.value, engine: newKey.engine });
 
     // Level 1 Enforcement:
     if (effectiveUserLevel <= 1) {
@@ -1667,10 +1683,33 @@ export default function App() {
     }
   };
 
+  /** Thu hồi quyền dùng key đã chia sẻ cho một email. */
+  const handleUnshareKey = async (email: string) => {
+    if (!user || !showShareKeyModal) return;
+    try {
+      const docRef = doc(db, 'apiKeys', showShareKeyModal.id);
+      const snap = await getDoc(docRef);
+      if (!snap.exists()) return;
+      const list = ((snap.data().sharedWith || []) as string[]).filter(e => e.toLowerCase() !== email.toLowerCase());
+      await updateDoc(docRef, { sharedWith: list });
+      showToast(`Đã thu hồi Key khỏi ${email}`, 'success');
+    } catch (error: any) {
+      handleFirestoreError(error, OperationType.UPDATE, `apiKeys/${showShareKeyModal.id}`);
+    }
+  };
+
   const handleShareKey = async () => {
     if (!user || !showShareKeyModal || !shareKeyEmail.trim()) return;
-    setIsSharingKey(true);
     const targetEmail = shareKeyEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) {
+      showToast('Email không hợp lệ.', 'error');
+      return;
+    }
+    if (targetEmail === (user.email || '').toLowerCase()) {
+      showToast('Không cần chia sẻ Key cho chính mình.', 'info');
+      return;
+    }
+    setIsSharingKey(true);
     try {
       const docRef = doc(db, 'apiKeys', showShareKeyModal.id);
       const snap = await getDoc(docRef);
@@ -2969,17 +3008,43 @@ export default function App() {
         const md = await buildPageMarkdown(pdfDoc, targetPage);
         if (signal.aborted) return null;
         if (md.eligible) {
-          let fullContent = '';
-          let lastUpdate = Date.now();
-          for await (const chunk of svc.translateMarkdownPageStream(md.markdown, targetPage, signal, engine || selectedEngine)) {
-            if (signal.aborted) break;
-            started = true;
-            fullContent += chunk;
+          // Trang dài → 2–3 phần dịch SONG SONG (thời gian chờ ≈ phần dài nhất). Phần đầu hiện dần như cũ;
+          // phần sau hiện ngay khi các phần trước nó xong, giữ đúng thứ tự.
+          const parts = splitMarkdownForParallel(md.markdown);
+          const results = parts.map(() => '');
+          const done = parts.map(() => false);
+          let lastUpdate = 0;
+          const visible = () => {
+            let out = '';
+            for (let i = 0; i < parts.length; i++) {
+              if (!results[i]) break;
+              out += (i ? '\n\n' : '') + results[i];
+              if (!done[i]) break;
+            }
+            return out;
+          };
+          const emit = (force = false) => {
             const now = Date.now();
-            if (onProgress && now - lastUpdate > 120) { onProgress(fullContent); lastUpdate = now; }
-          }
+            if (onProgress && (force || now - lastUpdate > 120)) { onProgress(visible()); lastUpdate = now; }
+          };
+          await Promise.all(parts.map(async (part, i) => {
+            for await (const chunk of svc.translateMarkdownPageStream(part, targetPage, signal, engine || selectedEngine)) {
+              if (signal.aborted) break;
+              started = true;
+              results[i] += chunk;
+              emit();
+            }
+            done[i] = true;
+            emit(true);
+          }));
           if (signal.aborted) return null;
-          if (fullContent.trim()) return fullContent;
+          let fullContent = results.map(r => r.trim()).filter(Boolean).join('\n\n');
+          if (fullContent.trim()) {
+            // Bảo đảm 100% tiếng Việt: dòng AI bỏ sót tiếng Anh → dịch bù riêng các dòng đó
+            fullContent = await fixUntranslatedLines(fullContent, svc, signal);
+            if (signal.aborted) return null;
+            return fullContent;
+          }
         } else {
           console.log(`[MediTrans] Trang ${targetPage}: dùng ảnh (${md.reason}).`);
         }
@@ -3061,6 +3126,10 @@ export default function App() {
       }
 
       if (signal.aborted) return null;
+      if (fullContent.trim()) {
+        fullContent = await fixUntranslatedLines(fullContent, svc, signal); // dòng sót tiếng Anh → dịch bù
+        if (signal.aborted) return null;
+      }
       return fullContent;
 
     } catch (error) {
@@ -3224,7 +3293,9 @@ export default function App() {
 
       // Limit concurrent translations to avoid browser/network congestion.
       // We allow space for the current page + the lookahead pool.
-      const MAX_CONCURRENT_PRE_TRANSLATION = 5; // Fixed reasonable concurrency limit
+      // Proxy (ShopAIKey / key hệ thống): dịch trước tối đa 2 trang để không dồn yêu cầu gây quá tải
+      const svcKeys: number = ((translationService.current as any)?.apiKeys || []).length || 1;
+      const MAX_CONCURRENT_PRE_TRANSLATION = (translationService.current as any)?.usesProxy?.() ? 2 : Math.min(5, 1 + svcKeys);
       const currentConcurrency = translatingPagesRef.current.size;
       const spaceLeft = MAX_CONCURRENT_PRE_TRANSLATION - currentConcurrency;
 
@@ -3305,17 +3376,24 @@ export default function App() {
         concurrentLimit = Math.min(10, Math.max(6, shopKeysCount * 2));
       }
     } else {
-      concurrentLimit = Math.min(12, userKeys.length > 0 ? Math.max(6, userKeys.length * 2) : 8);
+      // Key Google: mỗi key miễn phí chỉ vài–mười mấy yêu cầu/phút → 2 trang mỗi key (tối đa 8). Trước đây 1 key
+      // cũng chạy 6–8 trang cùng lúc → bị 429 liên tục, thử lại chờ lâu, chậm hơn cả chạy ít luồng.
+      const googleKeys = userKeys.filter(k => !isKeyShopAIKey(k) && k.status !== 'error' && k.value?.trim()).length || 1;
+      concurrentLimit = Math.min(8, Math.max(2, googleKeys * 2));
     }
     
+    // ShopAIKey / key hệ thống: mọi yêu cầu đi qua bộ điều tiết chung (mặc định 2 yêu cầu cùng lúc, tự lùi khi
+    // proxy báo quá tải). Chạy nhiều trang hơn số đó chỉ làm trang phải chờ và tốn CPU chụp ảnh trang → giới hạn
+    // số trang = số yêu cầu tối đa + 1 (1 trang chuẩn bị sẵn trong lúc chờ).
+    if ((translationService.current as any)?.usesProxy?.()) {
+      concurrentLimit = Math.min(concurrentLimit, getProxyMaxConcurrent() + 1);
+    }
     console.log(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages with concurrency ${concurrentLimit} (Folder: ${activeKeyFolder})...`);
 
-    // Process in batches
-    for (let i = 0; i < pagesToTranslate.length; i += concurrentLimit) {
-      if (signal.aborted) break;
-
-      const batch = pagesToTranslate.slice(i, i + concurrentLimit);
-      await Promise.all(batch.map(async (pageNum, batchIdx) => {
+    // Hàng đợi liên tục (trang nào xong thì lấy trang tiếp) thay vì chạy theo mẻ phải chờ trang chậm nhất
+    const bulkQueue = [...pagesToTranslate];
+    let launchIdx = 0;
+    const processPage = async (pageNum: number, batchIdx: number) => {
         if (signal.aborted) return;
         
         // Stagger parallel launch slightly (150ms per thread) to prevent burst 429 errors on proxies
@@ -3374,8 +3452,13 @@ export default function App() {
         } finally {
           translatingPagesRef.current.delete(pageNum);
         }
-      }));
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrentLimit, bulkQueue.length) }, async () => {
+      while (bulkQueue.length && !signal.aborted) {
+        const pageNum = bulkQueue.shift()!;
+        await processPage(pageNum, launchIdx < concurrentLimit ? launchIdx++ : 0);
+      }
+    }));
 
     if (bulkAbortControllerRef.current === controller) {
       bulkAbortControllerRef.current = null;
@@ -3512,7 +3595,9 @@ export default function App() {
       }
       
       if (allKeys.length === 0 && (activeKeyFolder === 'gemini' || activeKeyFolder === 'all')) {
-        const manualKey = engineKeys[selectedEngine]; // chỉ dùng key người dùng nhập trong web — KHÔNG lấy GEMINI_API_KEY của môi trường AI Studio (proxy AI Studio chặn generateContent)
+        // Key nhập tay lưu theo chế độ dịch: chế độ khác chưa có key thì dùng key của chế độ còn lại (trước đây
+        // nhập key ở "Cơ bản" rồi chọn "Chuyên sâu" → báo không có key)
+        const manualKey = engineKeys[selectedEngine] || engineKeys['gemini-2.5-flash-lite'] || engineKeys['gemini-3.6-flash']; // chỉ dùng key người dùng nhập trong web — KHÔNG lấy GEMINI_API_KEY của môi trường AI Studio (proxy AI Studio chặn generateContent)
         if (manualKey && manualKey.trim()) {
           allKeys.push(manualKey.trim());
           primaryKey = manualKey.trim();
@@ -6103,7 +6188,7 @@ export default function App() {
                                 setNewKey(prev => ({
                                   ...prev,
                                   value: val,
-                                  engine: val.trim().startsWith('sk-') ? 'shopaikey' : prev.engine
+                                  engine: val.trim().startsWith('sk-') ? 'shopaikey' : val.trim().startsWith('AIzaSy') ? 'gemini' : prev.engine
                                 }));
                               }}
                               className="w-full pl-3 pr-10 py-2 bg-white border border-indigo-100 rounded-xl text-xs mb-2 focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
@@ -6839,9 +6924,29 @@ export default function App() {
                   value={shareKeyEmail}
                   onChange={(e) => setShareKeyEmail(e.target.value)}
                   autoFocus
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleShareKey(); }}
                   className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-medium"
                 />
-              </div>
+                {(() => {
+                const live = userKeys.find(k => k.id === showShareKeyModal.id) || showShareKeyModal;
+                const shared: string[] = live.sharedWith || [];
+                if (!shared.length) return null;
+                return (
+                  <div className="mt-3">
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 ml-1">Đang chia sẻ với ({shared.length})</label>
+                    <div className="max-h-40 overflow-auto space-y-1.5">
+                      {shared.map(email => (
+                        <div key={email} className="flex items-center justify-between gap-2 px-3 py-2 bg-slate-50 rounded-xl border border-slate-100">
+                          <span className="text-xs text-slate-600 truncate">{email}</span>
+                          <button onClick={() => handleUnshareKey(email)}
+                            className="text-[10px] font-bold text-rose-600 hover:bg-rose-50 px-2 py-1 rounded-lg shrink-0">Thu hồi</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
             </div>
 
             <div className="flex gap-3">

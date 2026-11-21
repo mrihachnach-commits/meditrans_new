@@ -149,7 +149,7 @@ export const SystemShopAiKeyManager: React.FC<SystemShopAiKeyManagerProps> = ({ 
     setTestingId(key.id);
     try {
       const service = new GeminiService(key.value, key.engine || 'shopaikey');
-      const res = await service.testSingleKeyTranslation(key.value, "Testing ShopAIKey System API Connection");
+      const res = await service.testSingleKeyTranslation(key.value, "Testing ShopAIKey System API Connection", 'proxy');
       setTestResults(prev => ({ ...prev, [key.id]: res }));
 
       await updateDoc(doc(db, 'systemShopAiKeys', key.id), {

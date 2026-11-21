@@ -13,7 +13,7 @@ export interface TranslationService {
   hasApiKey(): Promise<boolean>;
   summarizeContent?(content: string, type: 'page' | 'document' | 'chapter', signal?: AbortSignal): AsyncGenerator<string>;
   askNotebookQuestion?(documentContext: string, question: string, signal?: AbortSignal): AsyncGenerator<string>;
-  testSingleKeyTranslation(apiKey: string, sampleText: string): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number }>;
+  testSingleKeyTranslation(apiKey: string, sampleText: string, type?: 'proxy' | 'google'): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number; model?: string; errorKind?: string }>;
   translateLayoutBlocks?(blocks: { id: string; text: string }[], signal?: AbortSignal): Promise<Record<string, string>>;
   detectColumns?(imageDataUrl: string, signal?: AbortSignal): Promise<{ columns: number; splits: number[] } | null>;
   ocrLayoutBlocks?(imageDataUrl: string, signal?: AbortSignal): Promise<any[]>;

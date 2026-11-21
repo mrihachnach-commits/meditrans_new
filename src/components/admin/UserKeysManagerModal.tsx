@@ -128,12 +128,13 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
     setTestingKeyId(keyId);
     try {
       const service = new GeminiService(keyValue, engine);
-      const res = await service.testSingleKeyTranslation(keyValue, "Hello! Medical AI Test.");
+      const isProxy = !keyValue.trim().startsWith('AIzaSy') && (engine === 'shopaikey' || keyValue.trim().startsWith('sk-'));
+      const res = await service.testSingleKeyTranslation(keyValue, "Hello! Medical AI Test.", isProxy ? 'proxy' : 'google');
       setTestResult(prev => ({ ...prev, [keyId]: res }));
       
-      // Update status in Firestore
+      // Update status in Firestore (key chỉ tạm hết lượt / proxy bận vẫn là key tốt → không đánh dấu lỗi)
       await updateDoc(doc(db, 'apiKeys', keyId), {
-        status: res.success ? 'active' : 'error',
+        status: res.success || res.errorKind === 'quota' ? 'active' : 'error',
         lastUsed: serverTimestamp()
       });
     } catch (err: any) {

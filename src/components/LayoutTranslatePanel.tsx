@@ -4,7 +4,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { saveAs } from 'file-saver';
 import {
   LayoutTemplate, Play, Square, Download, RefreshCw, AlertTriangle, Loader2, Layers,
-  ImageDown, Cloud, HardDrive, Repeat, X, PencilLine, Save,
+  ImageDown, Cloud, HardDrive, Repeat, X, PencilLine, Save, ScanText,
 } from 'lucide-react';
 import {
   LayoutBlockTranslator,
@@ -20,6 +20,8 @@ import {
   parsePageRange,
   saveLayoutPage,
   translatePageWithLayout,
+  getLayoutOcrFigures,
+  setLayoutOcrFigures,
 } from '../services/layoutTranslationService';
 import { LayoutCloudTarget, loadCloudLayoutPages, saveCloudLayoutPage } from '../services/layoutCloudService';
 
@@ -65,11 +67,15 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const [rangeInput, setRangeInput] = useState('');
   const [showRange, setShowRange] = useState(false);
   const [running, setRunning] = useState(false);
+  /** Đã bấm Dừng, đang chờ các trang dở dang thoát (thường < 1 giây). */
+  const [stopping, setStopping] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; page: number | null }>({ done: 0, total: 0, page: null });
   const [inFlight, setInFlight] = useState<number[]>([]);
   const [exporting, setExporting] = useState(false);
   const [loadingCache, setLoadingCache] = useState(true);
   const [autoFollow, setAutoFollow] = useState(false);
+  /** Dịch cả chữ nằm trong hình / chữ dọc (AI đọc ảnh trang — chậm hơn nhiều). */
+  const [ocrFigures, setOcrFigures] = useState(getLayoutOcrFigures);
   const [cloudPairs, setCloudPairs] = useState<Record<number, LayoutPair[]>>({});
   const [cloudLoading, setCloudLoading] = useState(!!cloud);
   const [rebuilding, setRebuilding] = useState<number | null>(null);
@@ -79,6 +85,8 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const [savingEdit, setSavingEdit] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+  /** Huỷ việc dựng lại trang đang xem từ bản lưu khi lật sang trang khác / đóng bảng. */
+  const rebuildAbortRef = useRef<AbortController | null>(null);
   const resultsRef = useRef(results);
   resultsRef.current = results;
   const cloudPairsRef = useRef(cloudPairs);
@@ -107,6 +115,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     const cache = urlCache.current;
     return () => {
       abortRef.current?.abort();
+      rebuildAbortRef.current?.abort();
       cache.forEach(v => URL.revokeObjectURL(v.url));
     };
   }, []);
@@ -166,10 +175,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     });
   }, [loadingCache, cloudLoading, cloud, pushToCloud]);
 
-  const rebuildFromCloud = useCallback(async (page: number): Promise<LayoutPageResult | null> => {
+  const rebuildFromCloud = useCallback(async (page: number, signal?: AbortSignal): Promise<LayoutPageResult | null> => {
     const pairs = cloudPairsRef.current[page];
     if (!pairs?.length) return null;
-    const res = await renderPageFromPairs(pdfDoc, page, pairs, translator || undefined);
+    const res = await renderPageFromPairs(pdfDoc, page, pairs, translator || undefined, signal);
+    if (signal?.aborted) return null;
     if (res.retranslated && res.pairs?.length) pushToCloud(page, res.pairs); // cập nhật bản lưu theo cách tách khối mới
     await saveLayoutPage(docKey, res);
     const stored = (await loadLayoutPage(docKey, page)) || res; // bản trên ổ đĩa → giải phóng RAM
@@ -180,11 +190,19 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   useEffect(() => {
     if (loadingCache || cloudLoading || running || rebuilding !== null) return;
     if (resultsRef.current[currentPage] || !cloudPairs[currentPage]) return;
+    const ctrl = new AbortController();
+    rebuildAbortRef.current = ctrl;
     setRebuilding(currentPage);
-    rebuildFromCloud(currentPage)
-      .catch(e => console.warn('[Layout] Dựng lại trang thất bại:', e))
-      .finally(() => setRebuilding(null));
+    rebuildFromCloud(currentPage, ctrl.signal)
+      .catch(e => { if (!ctrl.signal.aborted) console.warn('[Layout] Dựng lại trang thất bại:', e); })
+      .finally(() => {
+        if (rebuildAbortRef.current === ctrl) rebuildAbortRef.current = null;
+        setRebuilding(null);
+      });
   }, [currentPage, cloudPairs, loadingCache, cloudLoading, running, rebuilding, rebuildFromCloud]);
+
+  // Lật sang trang khác → huỷ việc dựng lại trang cũ (trước đây vẫn chạy tiếp, lật nhanh nhiều trang → đơ máy)
+  useEffect(() => () => { rebuildAbortRef.current?.abort(); }, [currentPage]);
 
   /* -------- dịch -------- */
   const runPages = useCallback(async (pages: number[], force = false) => {
@@ -198,14 +216,19 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       showToast('Các trang đã chọn đều đã được dịch.', 'info');
       return;
     }
+    rebuildAbortRef.current?.abort(); // dừng việc dựng lại trang đang xem, nhường CPU cho tiến trình dịch
     const controller = new AbortController();
     abortRef.current = controller;
     setRunning(true);
+    setStopping(false);
     setShowRange(false);
 
-    // Dịch song song 2–3 trang (key hệ thống / nhiều key → 3), mỗi key vẫn được giãn nhịp trong GeminiService
+    // Số trang xử lý song song. Proxy (ShopAIKey / key hệ thống): 2 trang — mọi yêu cầu còn đi qua bộ điều tiết chung
+    // (mặc định 2 yêu cầu cùng lúc, tự tạm dừng khi proxy báo quá tải) nên không bao giờ dồn cục lên proxy.
+    // Key Google riêng: 3 trang khi có ≥3 key, còn lại 2.
     const keys: string[] = (translator as any).apiKeys || [];
-    const concurrency = todo.length <= 1 ? 1 : (keys.includes('system_proxy') || keys.length >= 3 ? 3 : 2);
+    const viaProxy = !!(translator as any).usesProxy?.();
+    const concurrency = todo.length <= 1 ? 1 : viaProxy ? 2 : (keys.length >= 3 ? 3 : 2);
     const queue = [...todo];
     let ok = 0;
     let finished = 0;
@@ -220,10 +243,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         setErrors(prev => { const n = { ...prev }; delete n[p]; return n; });
         try {
           if (!force && cloudPairsRef.current[p]?.length) {
-            await rebuildFromCloud(p); // đã có bản dịch lưu trên đám mây → không gọi AI
+            await rebuildFromCloud(p, controller.signal); // đã có bản dịch lưu trên đám mây → không gọi AI
           } else {
             // Trang scan / lớp chữ lỗi được tự nhận diện và dịch bằng OCR bên trong hàm này
             const res = await translatePageWithLayout(pdfDoc, p, translator, controller.signal);
+            if (controller.signal.aborted) throw new Error('Translation aborted');
             await saveLayoutPage(docKey, res);
             const stored = (await loadLayoutPage(docKey, p)) || res; // bản trên ổ đĩa → giải phóng RAM
             setResults(prev => ({ ...prev, [p]: stored }));
@@ -249,6 +273,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     setProgress({ done: 0, total: 0, page: null });
     setInFlight([]);
     setRunning(false);
+    setStopping(false);
     abortRef.current = null;
     onBulkStateChange?.({ running: false, done: finished, total: todo.length });
     if (fatal) showToast('Dừng dịch: không có API Key khả dụng hoặc tài khoản chưa đủ quyền.', 'error');
@@ -414,9 +439,10 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const toolbar = (
     <div className="flex items-center gap-1 min-w-0">
       {running ? (
-        <button onClick={() => abortRef.current?.abort()} className={`${iconBtn} bg-rose-50 text-rose-600 border border-rose-100 hover:bg-rose-100`} title="Dừng dịch">
-          <Square className="w-3 h-3 fill-current" />
-          <span>{progress.total > 1 ? `${progress.done}/${progress.total}` : 'Dừng'}</span>
+        <button onClick={() => { setStopping(true); abortRef.current?.abort(); }} disabled={stopping}
+          className={`${iconBtn} bg-rose-50 text-rose-600 border border-rose-100 hover:bg-rose-100`} title="Dừng dịch">
+          {stopping ? <Loader2 className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3 fill-current" />}
+          <span>{stopping ? 'Đang dừng…' : progress.total > 1 ? `${progress.done}/${progress.total}` : 'Dừng'}</span>
         </button>
       ) : (
         <button onClick={() => runPages([currentPage])} disabled={loadingCache || cloudLoading || hasSaved}
@@ -443,6 +469,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         className={`${iconBtn} border ${autoFollow ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'border-slate-200 text-slate-400 hover:text-slate-600'}`}
         title={autoFollow ? 'Đang bật: tự dịch trang khi lật trang (tốn thêm token)' : 'Tự dịch khi lật trang (đang tắt)'}>
         <Repeat className="w-3.5 h-3.5" /><span className="hidden 2xl:inline">Tự dịch</span>
+      </button>
+      <button onClick={() => { const v = !ocrFigures; setOcrFigures(v); setLayoutOcrFigures(v); }}
+        className={`${iconBtn} border ${ocrFigures ? 'bg-amber-50 border-amber-200 text-amber-700' : 'border-slate-200 text-slate-400 hover:text-slate-600'}`}
+        title={ocrFigures ? 'Đang bật: dịch cả chữ trong hình / chữ dọc (chậm hơn nhiều, tốn thêm token)' : 'Dịch chữ trong hình (đang tắt — nhanh hơn)'}>
+        <ScanText className="w-3.5 h-3.5" /><span className="hidden 2xl:inline">Chữ trong hình</span>
       </button>
       <span className={`inline-flex items-center h-7 px-1 ${cloud?.canWrite ? 'text-emerald-600' : 'text-slate-400'}`} title={storageTitle}>
         {cloud?.canWrite ? <Cloud className="w-3.5 h-3.5" /> : <HardDrive className="w-3.5 h-3.5" />}
