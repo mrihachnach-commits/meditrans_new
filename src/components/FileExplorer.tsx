@@ -82,9 +82,23 @@ interface FileExplorerProps {
   onBulkTranslate?: (file: FileData) => void;
   onOpenGoogleDrive?: () => void;
   onAddToNotebook?: (file: FileData) => void;
+  /** v10.3: thông báo (chia sẻ thành công / lỗi) */
+  showToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate, onOpenGoogleDrive, onAddToNotebook }) => {
+// v10.3: kiểm tra email đơn giản trước khi chia sẻ
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// v10.3: chỉ tải trực tiếp từ URL https Google Drive / Firebase Storage
+const isSafeDownloadUrl = (url: string): boolean => {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && ['drive.google.com', 'docs.google.com', 'firebasestorage.googleapis.com', 'storage.googleapis.com'].includes(u.hostname);
+  } catch {
+    return false;
+  }
+};
+
+export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUploadStart, onLocalFileOpen, onBulkTranslate, onOpenGoogleDrive, onAddToNotebook, showToast }) => {
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'my' | 'shared'>('my');
   const [myFolders, setMyFolders] = useState<FolderData[]>([]);
@@ -147,8 +161,15 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       return;
     }
     setLoading(true);
+    // v10.3: đổi thư mục / chế độ xem → xoá danh sách cũ ngay (trước đây thoáng hiện tệp của thư mục trước)
+    setFiles([]);
+    setFolders([]);
 
     if (viewMode === 'my') {
+      // v10.3: chỉ tắt trạng thái tải khi CẢ hai danh sách (thư mục + tệp) đã về
+      let foldersReady = false;
+      let filesReady = false;
+      const markReady = () => { if (foldersReady && filesReady) setLoading(false); };
       const foldersQuery = query(
         collection(db, `users/${user.uid}/folders`),
         where('parentId', '==', currentFolderId)
@@ -162,7 +183,8 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       const unsubscribeFolders = onSnapshot(foldersQuery, (snapshot) => {
         const folderList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FolderData));
         setFolders(folderList);
-        setLoading(false);
+        foldersReady = true;
+        markReady();
       }, (error) => {
         setLoading(false);
         handleFirestoreError(error, OperationType.GET, `users/${user.uid}/folders`);
@@ -171,7 +193,8 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       const unsubscribeFiles = onSnapshot(filesQuery, (snapshot) => {
         const fileList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FileData));
         setFiles(fileList);
-        setLoading(false);
+        filesReady = true;
+        markReady();
       }, (error) => {
         setLoading(false);
         handleFirestoreError(error, OperationType.GET, `users/${user.uid}/documents`);
@@ -184,9 +207,16 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
     } else {
       // Shared mode - use collectionGroup to find files shared with this user's email
       setFolders([]); // We don't support sharing folders yet for simplicity
+      // v10.3: email luôn lưu/truy vấn dạng chữ thường; rules chỉ chấp nhận email ĐÃ XÁC MINH
+      const myEmail = (user.email || '').trim().toLowerCase();
+      if (!myEmail || !user.emailVerified) {
+        setLoading(false);
+        if (myEmail && !user.emailVerified) showToast?.('Hãy xác minh email (mở liên kết trong hộp thư) để xem tài liệu được chia sẻ.', 'info');
+        return;
+      }
       const q = query(
         collectionGroup(db, 'documents'),
-        where('sharedWith', 'array-contains', user.email)
+        where('sharedWith', 'array-contains', myEmail)
       );
 
       const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -364,6 +394,16 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
 
   const handleShare = async () => {
     if (!user || !showShareModal || !shareEmail.trim()) return;
+    // v10.3: chuẩn hoá chữ thường + kiểm tra định dạng (trước đây "A@Gmail.com" không bao giờ khớp người nhận)
+    const targetEmail = shareEmail.trim().toLowerCase();
+    if (!EMAIL_RE.test(targetEmail)) {
+      showToast?.('Email không hợp lệ.', 'error');
+      return;
+    }
+    if (targetEmail === (user.email || '').toLowerCase()) {
+      showToast?.('Không cần chia sẻ tài liệu cho chính mình.', 'info');
+      return;
+    }
     setIsSharing(true);
     try {
       const docRef = doc(db, `users/${user.uid}/documents`, showShareModal.id);
@@ -371,11 +411,17 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       const snap = await getDoc(docRef);
       if (snap.exists()) {
         const data = snap.data();
-        const currentSharedWith = data.sharedWith || [];
-        if (!currentSharedWith.includes(shareEmail.trim())) {
+        const currentSharedWith: string[] = (data.sharedWith || []).map((e: string) => String(e).toLowerCase());
+        if (currentSharedWith.includes(targetEmail)) {
+          showToast?.(`Tài liệu đã được chia sẻ cho ${targetEmail}.`, 'info');
+        } else if (currentSharedWith.length >= 50) {
+          showToast?.('Mỗi tài liệu chỉ chia sẻ tối đa 50 email.', 'error');
+          return;
+        } else {
           await updateDoc(docRef, {
-            sharedWith: [...currentSharedWith, shareEmail.trim()]
+            sharedWith: [...currentSharedWith, targetEmail]
           });
+          showToast?.(`Đã chia sẻ "${showShareModal.name}" cho ${targetEmail}. Người nhận cần đăng nhập bằng email đã xác minh.`, 'success');
         }
       }
       setShareEmail('');
@@ -725,6 +771,8 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
                               const blob = new Blob([buf], { type: 'application/pdf' });
                               saveAs(blob, file.name);
                             } else if (file.downloadUrl) {
+                              // v10.3: không fetch URL tuỳ ý lấy từ Firestore
+                              if (!isSafeDownloadUrl(file.downloadUrl)) throw new Error('Liên kết tải tệp không hợp lệ');
                               const res = await fetch(file.downloadUrl);
                               const blob = await res.blob();
                               saveAs(blob, file.name);

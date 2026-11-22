@@ -14,8 +14,34 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
+    // v10.3: tài khoản bị khoá (users/{uid}.isBlocked == true) không được đọc/ghi dữ liệu.
+    // Riêng tài liệu users/{uid} của chính mình vẫn đọc được (isSelf) để giao diện hiện thông báo bị khoá.
+    function notBlocked() {
+      return !exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isBlocked', false) != true;
+    }
+
+    function isActiveUser() {
+      return isSignedIn() && notBlocked();
+    }
+
+    function isSelf(userId) {
       return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isOwner(userId) {
+      return isSelf(userId) && notBlocked();
+    }
+
+    // v10.3: chỉ tin email trong token khi email đã được XÁC MINH (chặn đăng ký email/mật khẩu giả email người khác)
+    function hasVerifiedEmail() {
+      return request.auth != null &&
+             'email' in request.auth.token && request.auth.token.email is string &&
+             'email_verified' in request.auth.token && request.auth.token.email_verified == true;
+    }
+
+    function verifiedEmail() {
+      return hasVerifiedEmail() ? request.auth.token.email.lower() : '';
     }
 
     function incoming() {
@@ -33,18 +59,27 @@ service cloud.firestore {
     function isAdmin() {
       return request.auth != null && (
         request.auth.uid == "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
-        (request.auth.token.email != null && request.auth.token.email.lower() == "hoanghiep1296@gmail.com") ||
-        (request.auth.token.email != null && request.auth.token.email.lower() == "mrihachnach@gmail.com") ||
+        (hasVerifiedEmail() && request.auth.token.email.lower() == "hoanghiep1296@gmail.com") ||
+        (hasVerifiedEmail() && request.auth.token.email.lower() == "mrihachnach@gmail.com") ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin') ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
 
+    // v10.3: chỉ chấp nhận email đã xác minh + người dùng không bị khoá
     function isSharedWithMe(data) {
-      let email = (request.auth != null && 'email' in request.auth.token && request.auth.token.email is string) ? request.auth.token.email.lower() : '';
-      return request.auth != null && email != "" && (
+      let email = verifiedEmail();
+      return request.auth != null && email != "" && notBlocked() && (
         data.get('sharedWith', []).hasAny([email])
       );
+    }
+
+    // v10.3: downloadUrl chỉ được là liên kết Google Drive / Firebase Storage (https) hoặc rỗng
+    function isSafeDownloadUrl(url) {
+      return url == '' ||
+             url.matches('^https://(drive|docs)[.]google[.]com/.*') ||
+             url.matches('^https://firebasestorage[.]googleapis[.]com/.*') ||
+             url.matches('^https://storage[.]googleapis[.]com/.*');
     }
 
     // ===============================================================
@@ -73,7 +108,7 @@ service cloud.firestore {
              data.ownerId is string &&
              data.downloadUrl is string && data.downloadUrl.size() <= 2048 &&
              (data.createdAt is timestamp || data.createdAt is string) &&
-             (data.get('sharedWith', []) is list) &&
+             (data.get('sharedWith', []) is list) && data.get('sharedWith', []).size() <= 50 &&
              (data.get('size', 0) is number) &&
              (data.get('type', '') is string) &&
              (data.get('token', null) == null || (data.token is string && data.token.size() <= 128)) &&
@@ -97,7 +132,7 @@ service cloud.firestore {
              (data.get('lastUsed', null) == null || data.lastUsed is timestamp || data.lastUsed is string) &&
              (data.get('updatedAt', null) == null || data.updatedAt is timestamp || data.updatedAt is string) &&
              (data.get('ownerEmail', null) == null || data.ownerEmail is string) &&
-             (data.get('sharedWith', []) is list) &&
+             (data.get('sharedWith', []) is list) && data.get('sharedWith', []).size() <= 50 &&
              (data.get('status', 'active') in ['active', 'error']);
     }
 
@@ -141,7 +176,8 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow list: if isAdmin();
-      allow get: if isOwner(userId) || isAdmin();
+      // v10.3: isSelf (không xét isBlocked) để người bị khoá vẫn đọc được trạng thái của mình
+      allow get: if isSelf(userId) || isAdmin();
       allow create: if isAdmin() || (
         isOwner(userId) && 
         isValidUser(incoming()) && 
@@ -169,7 +205,9 @@ service cloud.firestore {
       match /documents/{docId} {
         allow get: if isOwner(userId) || isSharedWithMe(existing()) || isAdmin();
         allow list: if isOwner(userId) || isAdmin();
-        allow create: if isOwner(userId) && isValidDocument(incoming()) && isValidId(docId);
+        // v10.3: ownerId phải đúng chủ thư mục + downloadUrl an toàn
+        allow create: if isOwner(userId) && isValidDocument(incoming()) && isValidId(docId) &&
+                         incoming().ownerId == userId && isSafeDownloadUrl(incoming().downloadUrl);
         allow update: if (isOwner(userId) && isValidDocument(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'folderId', 'sharedWith'])) || isAdmin();
         allow delete: if isOwner(userId) || isAdmin();
 
@@ -192,11 +230,19 @@ service cloud.firestore {
     }
 
     match /apiKeys/{keyId} {
-      allow get: if isSignedIn() && (existing().ownerId == request.auth.uid || isSharedWithMe(existing()) || isAdmin());
-      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || (request.auth.token.email != null && resource.data.get('sharedWith', []).hasAny([request.auth.token.email.lower()])) || isAdmin());
-      allow create: if isSignedIn() && (incoming().ownerId == request.auth.uid || isAdmin()) && isValidApiKey(incoming());
-      allow update: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()) && isValidApiKey(incoming()));
-      allow delete: if (isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin()));
+      // v10.3: email chia sẻ phải đã xác minh; người bị khoá không dùng được; ownerId bất biến khi cập nhật
+      allow get: if isSignedIn() && ((isActiveUser() && existing().ownerId == request.auth.uid) || isSharedWithMe(existing()) || isAdmin());
+      allow list: if isSignedIn() && ((isActiveUser() && resource.data.ownerId == request.auth.uid) || isSharedWithMe(resource.data) || isAdmin());
+      allow create: if isSignedIn() && ((isActiveUser() && incoming().ownerId == request.auth.uid) || isAdmin()) && isValidApiKey(incoming());
+      allow update: if (isSignedIn() && ((isActiveUser() && existing().ownerId == request.auth.uid) || isAdmin()) &&
+                        isValidApiKey(incoming()) && incoming().ownerId == existing().ownerId);
+      allow delete: if (isSignedIn() && ((isActiveUser() && existing().ownerId == request.auth.uid) || isAdmin()));
+    }
+
+    // v10.4: lượng dùng AI hệ thống (máy chủ ghi bằng Admin SDK); người dùng chỉ xem được của mình
+    match /aiUsage/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow write: if false;
     }
 
     match /systemShopAiKeys/{keyId} {

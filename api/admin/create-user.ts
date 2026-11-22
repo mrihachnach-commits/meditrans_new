@@ -1,6 +1,6 @@
 import admin from "firebase-admin";
 import { firebaseConfig, getAdminApp, firestoreRest, CustomRequest } from "../../lib/firebaseAdmin.js";
-import { checkAdmin } from "../_utils.js";
+import { checkAdmin, sendApiError } from "../_utils.js";
 
 export default async function handler(req: CustomRequest, res: any) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -8,8 +8,12 @@ export default async function handler(req: CustomRequest, res: any) {
   try {
     await checkAdmin(req);
     
-    const { email, password, displayName, role } = req.body;
+    const { email, password, displayName, role } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: "Email và mật khẩu là bắt buộc" });
+    // v10.3: kiểm tra kiểu dữ liệu đầu vào
+    if (typeof email !== "string" || typeof password !== "string" || (displayName != null && typeof displayName !== "string")) {
+      return res.status(400).json({ error: "Dữ liệu không hợp lệ" });
+    }
 
     let uid = "";
     try {
@@ -28,16 +32,23 @@ export default async function handler(req: CustomRequest, res: any) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, displayName: displayName || email.split('@')[0], returnSecureToken: true })
       });
-      const signUpData: any = await signUpResponse.json();
-      if (!signUpResponse.ok) throw new Error(signUpData.error?.message || "Lỗi tạo tài khoản");
+      // v10.3: JSON.parse an toàn
+      const signUpData: any = await signUpResponse.json().catch(() => ({}));
+      if (!signUpResponse.ok) {
+        // v10.3: chỉ trả mã lỗi Firebase dạng hằng (VD EMAIL_EXISTS), không trả chuỗi thô
+        const code = String(signUpData?.error?.message || "").match(/^[A-Z_]+/)?.[0];
+        throw { status: 400, error: code ? `Lỗi tạo tài khoản: ${code}` : "Lỗi tạo tài khoản" };
+      }
       uid = signUpData.localId;
     }
     
-    const userData = { uid, email, displayName: displayName || email.split('@')[0], role: role || "user", createdAt: new Date().toISOString() };
+    // v10.3: role chỉ nhận 'user' | 'admin'
+    const userData = { uid, email, displayName: displayName || email.split('@')[0], role: role === "admin" ? "admin" : "user", createdAt: new Date().toISOString() };
     await firestoreRest.setDoc("users", uid, userData, req.idToken);
     
     return res.status(200).json({ success: true, uid, userData });
   } catch (err: any) {
-    return res.status(err.status || 500).json({ error: err.error || err.message, details: err.details });
+    // v10.3: không trả err.message thô
+    return sendApiError(res, err);
   }
 }

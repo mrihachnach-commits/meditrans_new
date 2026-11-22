@@ -25,6 +25,7 @@ import {
 } from '../services/layoutTranslationService';
 import { LayoutCloudTarget, loadCloudLayoutPages, saveCloudLayoutPage } from '../services/layoutCloudService';
 import { isFirestoreQuotaBlocked } from '../services/firestoreQuota';
+import { checkNumeric, describeNumericIssue } from '../services/numericQa';
 
 interface LayoutTranslatePanelProps {
   pdfDoc: PDFDocumentProxy;
@@ -43,8 +44,9 @@ interface LayoutTranslatePanelProps {
   /** Vùng cuộn của trình xem PDF bên trái → cuộn đồng bộ hai bên. */
   syncScrollEl?: HTMLElement | null;
   fullScreen?: boolean;
-  /** Yêu cầu dịch hàng loạt từ Cài đặt ("Dịch toàn bộ giữ định dạng"). Đổi id để kích hoạt. */
-  bulkRequest?: { id: number; pages: number[] } | null;
+  /** Yêu cầu dịch hàng loạt từ Cài đặt ("Dịch toàn bộ giữ định dạng"). Đổi id để kích hoạt.
+   *  v10.3: kèm docKey — yêu cầu của tài liệu khác bị bỏ qua. */
+  bulkRequest?: { id: number; pages: number[]; docKey?: string } | null;
   onBulkStateChange?: (s: { running: boolean; done: number; total: number }) => void;
 }
 
@@ -56,6 +58,9 @@ function friendlyError(err: any): string {
   if (/json|hợp lệ/i.test(msg)) return 'AI trả về dữ liệu không đúng định dạng. Hãy bấm "Dịch lại".';
   return msg.slice(0, 160) || 'Lỗi không xác định';
 }
+
+/** v10.3: chuẩn hoá khoảng trang trước khi gọi parsePageRange ("1 - 5", "1–5", "1—5" → "1-5"). */
+const normalizeRangeInput = (input: string) => input.replace(/\s*[-–—]\s*/g, '-');
 
 const iconBtn = 'inline-flex items-center justify-center gap-1 h-7 px-2 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all disabled:opacity-40 disabled:cursor-not-allowed';
 
@@ -82,8 +87,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const [rebuilding, setRebuilding] = useState<number | null>(null);
   const [noticeHidden, setNoticeHidden] = useState<number | null>(null);
   /** Bảng sửa bản dịch của trang đang xem. */
-  const [editor, setEditor] = useState<{ page: number; items: LayoutPair[]; ocr: LayoutPair[]; filter: string } | null>(null);
+  const [editor, setEditor] = useState<{ page: number; items: LayoutPair[]; ocr: LayoutPair[]; filter: string; onlyNumeric?: boolean; issues?: Record<string, string> } | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+  /** v10.3: số khối chưa có bản dịch khi dựng lại trang từ bản lưu KHÔNG gọi AI (xem → không tốn token). */
+  const [untranslatedByPage, setUntranslatedByPage] = useState<Record<number, number>>({});
+  const [fillingPage, setFillingPage] = useState<number | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   /** Huỷ việc dựng lại trang đang xem từ bản lưu khi lật sang trang khác / đóng bảng. */
@@ -159,25 +167,37 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloudKey]);
 
-  const pushingRef = useRef<Set<number>>(new Set());
+  /** v10.3: lượt gửi đang chạy của từng trang — gửi bắt buộc (force, vd. lưu bản sửa) được XẾP SAU lượt đang chạy
+   *  thay vì bị bỏ qua (trước đây bản sửa có thể không được đồng bộ mà vẫn báo "đã đồng bộ"). */
+  const pushingRef = useRef<Map<number, Promise<boolean>>>(new Map());
   const pushFailedRef = useRef<Set<number>>(new Set());
-  const pushToCloud = useCallback(async (page: number, pairs?: LayoutPair[], force = false) => {
-    if (!stableCloud?.canWrite || !pairs?.length) return;
-    if (pushingRef.current.has(page)) return; // đang gửi trang này → không gửi trùng
-    if (!force && pushFailedRef.current.has(page)) return; // lỗi rồi → không thử lại liên tục trong phiên
-    if (isFirestoreQuotaBlocked()) return; // hết hạn mức ghi hôm nay → chỉ lưu trên máy
-    pushingRef.current.add(page);
+  /** v10.3: trả về true nếu bản dịch đã thực sự lên đám mây. */
+  const pushToCloud = useCallback(async (page: number, pairs?: LayoutPair[], force = false): Promise<boolean> => {
+    if (!stableCloud?.canWrite || !pairs?.length) return false;
+    const inflight = pushingRef.current.get(page);
+    if (inflight && !force) return inflight; // đang gửi trang này → không gửi trùng
+    if (!force && pushFailedRef.current.has(page)) return false; // lỗi rồi → không thử lại liên tục trong phiên
+    const doPush = async (): Promise<boolean> => {
+      if (isFirestoreQuotaBlocked()) return false; // hết hạn mức ghi hôm nay → chỉ lưu trên máy
+      try {
+        await saveCloudLayoutPage(stableCloud, page, pairs);
+        if (isFirestoreQuotaBlocked()) return false; // vừa hết hạn mức → chưa lưu được, lần sau mở lại sẽ đồng bộ
+        remotePagesRef.current.add(page);
+        pushFailedRef.current.delete(page);
+        setCloudPairs(prev => ({ ...prev, [page]: pairs }));
+        return true;
+      } catch (e) {
+        pushFailedRef.current.add(page);
+        console.warn(`[Layout] Không lưu được trang ${page} lên đám mây:`, e);
+        return false;
+      }
+    };
+    const next = (inflight ? inflight.catch(() => false).then(doPush) : doPush());
+    pushingRef.current.set(page, next);
     try {
-      await saveCloudLayoutPage(stableCloud, page, pairs);
-      if (isFirestoreQuotaBlocked()) return; // vừa hết hạn mức → chưa lưu được, lần sau mở lại sẽ đồng bộ
-      remotePagesRef.current.add(page);
-      pushFailedRef.current.delete(page);
-      setCloudPairs(prev => ({ ...prev, [page]: pairs }));
-    } catch (e) {
-      pushFailedRef.current.add(page);
-      console.warn(`[Layout] Không lưu được trang ${page} lên đám mây:`, e);
+      return await next;
     } finally {
-      pushingRef.current.delete(page);
+      if (pushingRef.current.get(page) === next) pushingRef.current.delete(page);
     }
   }, [stableCloud]);
 
@@ -194,12 +214,17 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     });
   }, [loadingCache, cloudLoading, stableCloud, pushToCloud]);
 
-  const rebuildFromCloud = useCallback(async (page: number, signal?: AbortSignal): Promise<LayoutPageResult | null> => {
+  // noAi: dựng lại CHỈ từ bản dịch đã lưu (xuất PDF không bao giờ gọi AI / tốn token)
+  const rebuildFromCloud = useCallback(async (page: number, signal?: AbortSignal, noAi = false): Promise<LayoutPageResult | null> => {
     const pairs = cloudPairsRef.current[page];
     if (!pairs?.length) return null;
-    const res = await renderPageFromPairs(pdfDoc, page, pairs, translator || undefined, signal);
+    const res = await renderPageFromPairs(pdfDoc, page, pairs, noAi ? undefined : (translator || undefined), signal);
+    if (noAi && res.untranslated) untranslatedRef.current += res.untranslated;
     if (signal?.aborted) return null;
-    if (res.retranslated && res.pairs?.length) pushToCloud(page, res.pairs, true); // cập nhật bản lưu theo cách tách khối mới
+    // v10.3: ghi nhận số khối chưa dịch (dựng không AI) để hiện nút "Dịch bù"
+    setUntranslatedByPage(prev => ({ ...prev, [page]: noAi ? (res.untranslated || 0) : 0 }));
+    // v10.3: dựng lại KHÔNG AI (xem / xuất PDF) thì không ghi đè bản lưu đám mây
+    if ((res.retranslated || res.composed) && res.pairs?.length && !noAi) pushToCloud(page, res.pairs, true); // cập nhật bản lưu theo cách tách khối mới
     await saveLayoutPage(docKey, res);
     const stored = (await loadLayoutPage(docKey, page)) || res; // bản trên ổ đĩa → giải phóng RAM
     setResults(prev => ({ ...prev, [page]: stored }));
@@ -213,7 +238,8 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     rebuildAbortRef.current = ctrl;
     const page = currentPage;
     setRebuilding(page);
-    rebuildFromCloud(page, ctrl.signal)
+    // v10.3: chỉ XEM trang đã lưu → dựng lại không gọi AI (trước đây âm thầm tốn token); khối thiếu → nút "Dịch bù"
+    rebuildFromCloud(page, ctrl.signal, true)
       .catch(e => {
         if (ctrl.signal.aborted || /aborted/i.test(String(e?.message))) return;
         console.warn('[Layout] Dựng lại trang thất bại:', e);
@@ -225,6 +251,30 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         setRebuilding(null);
       });
   }, [currentPage, cloudPairs, loadingCache, cloudLoading, running, rebuilding, rebuildFromCloud]);
+
+  /** v10.3: người dùng bấm "Dịch bù" → dựng lại trang có gọi AI cho các khối còn thiếu bản dịch. */
+  const handleFillMissing = useCallback(async () => {
+    const page = currentPage;
+    if (!translator) { showToast('Chưa có API Key để dịch. Vui lòng thêm Key trong Cài đặt.', 'error'); return; }
+    if (fillingPage !== null || running) return;
+    rebuildAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    rebuildAbortRef.current = ctrl;
+    setFillingPage(page);
+    setRebuilding(page);
+    try {
+      const r = await rebuildFromCloud(page, ctrl.signal, false);
+      if (r) showToast(`Đã dịch bù trang ${page}.`, 'success');
+    } catch (e: any) {
+      if (!(ctrl.signal.aborted || /aborted/i.test(String(e?.message)))) {
+        showToast(`Không dịch bù được trang ${page}: ${friendlyError(e)}`, 'error');
+      }
+    } finally {
+      if (rebuildAbortRef.current === ctrl) rebuildAbortRef.current = null;
+      setFillingPage(null);
+      setRebuilding(null);
+    }
+  }, [currentPage, translator, fillingPage, running, rebuildFromCloud, showToast]);
 
   // Lật sang trang khác → huỷ việc dựng lại trang cũ (trước đây vẫn chạy tiếp, lật nhanh nhiều trang → đơ máy)
   useEffect(() => () => { rebuildAbortRef.current?.abort(); }, [currentPage]);
@@ -312,19 +362,24 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   useEffect(() => {
     if (!bulkRequest || bulkRequest.id === lastBulkId.current || loadingCache || cloudLoading) return;
     lastBulkId.current = bulkRequest.id;
+    // v10.3: yêu cầu của tài liệu khác (đã đổi file) → bỏ qua
+    if (bulkRequest.docKey && bulkRequest.docKey !== docKey) return;
     if (abortRef.current) { showToast('Đang có tiến trình dịch giữ định dạng chạy.', 'info'); return; }
-    runPages(bulkRequest.pages);
-  }, [bulkRequest, loadingCache, cloudLoading, runPages, showToast]);
+    // v10.3: kẹp số trang trong phạm vi tài liệu hiện tại
+    const pages = Array.from(new Set(bulkRequest.pages.filter(p => Number.isInteger(p) && p >= 1 && p <= numPages)));
+    if (pages.length) runPages(pages);
+  }, [bulkRequest, loadingCache, cloudLoading, runPages, showToast, docKey, numPages]);
 
   useEffect(() => {
-    if (!autoFollow || loadingCache || running) return;
+    // v10.3: chờ tải xong bản lưu đám mây (cloudLoading) — trước đây có thể dịch lại bằng AI trang đã có bản lưu
+    if (!autoFollow || loadingCache || cloudLoading || running) return;
     if (resultsRef.current[currentPage] || cloudPairsRef.current[currentPage] || errors[currentPage]) return;
     const t = setTimeout(() => runPages([currentPage]), 600);
     return () => clearTimeout(t);
-  }, [autoFollow, currentPage, loadingCache, running, errors, runPages]);
+  }, [autoFollow, currentPage, loadingCache, cloudLoading, running, errors, runPages]);
 
   const handleRunRange = () => {
-    const pages = parsePageRange(rangeInput, numPages);
+    const pages = parsePageRange(normalizeRangeInput(rangeInput), numPages); // v10.3: chuẩn hoá dấu gạch
     if (pages.length === 0) {
       showToast(`Khoảng trang không hợp lệ. Ví dụ: 1-3, 5 (tối đa ${numPages}).`, 'error');
       return;
@@ -340,14 +395,18 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   };
 
   /* -------- sửa bản dịch -------- */
-  const openEditor = () => {
+  const openEditor = (onlyNumeric = false) => {
     const pairs = resultsRef.current[currentPage]?.pairs || cloudPairsRef.current[currentPage];
     if (!pairs?.length) { showToast('Trang này chưa có bản dịch để sửa.', 'info'); return; }
+    const issues: Record<string, string> = {};
+    for (const it of resultsRef.current[currentPage]?.numericIssues || []) issues[it.s] = it.why;
     setEditor({
       page: currentPage,
       items: pairs.filter(p => !isOcrKey(p.s)).map(p => ({ ...p })),
       ocr: pairs.filter(p => isOcrKey(p.s)),
       filter: '',
+      onlyNumeric: onlyNumeric && Object.keys(issues).length > 0,
+      issues,
     });
   };
 
@@ -362,8 +421,12 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       const stored = (await loadLayoutPage(docKey, editor.page)) || res;
       setResults(prev => ({ ...prev, [editor.page]: stored }));
       setCloudPairs(prev => ({ ...prev, [editor.page]: res.pairs || pairs }));
-      if (cloud?.canWrite) await pushToCloud(editor.page, res.pairs || pairs, true);
-      showToast(cloud?.canWrite ? `Đã lưu bản sửa trang ${editor.page} (đã đồng bộ lên tài khoản).` : `Đã lưu bản sửa trang ${editor.page} trên máy này.`, 'success');
+      // v10.3: báo đúng kết quả đồng bộ (trước đây luôn báo "đã đồng bộ")
+      const synced = cloud?.canWrite ? await pushToCloud(editor.page, res.pairs || pairs, true) : false;
+      setUntranslatedByPage(prev => ({ ...prev, [editor.page]: 0 }));
+      if (cloud?.canWrite && synced) showToast(`Đã lưu bản sửa trang ${editor.page} (đã đồng bộ lên tài khoản).`, 'success');
+      else if (cloud?.canWrite) showToast(`Đã lưu bản sửa trang ${editor.page} trên máy này; chưa đồng bộ được lên tài khoản (sẽ thử lại sau).`, 'info');
+      else showToast(`Đã lưu bản sửa trang ${editor.page} trên máy này.`, 'success');
       setEditor(null);
     } catch (e: any) {
       showToast(`Không lưu được bản sửa: ${e?.message || e}`, 'error');
@@ -375,27 +438,73 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   /* -------- xuất -------- */
   const baseName = useMemo(() => (fileName || 'tai-lieu').replace(/\.pdf$/i, ''), [fileName]);
 
+  const untranslatedRef = useRef(0);
   const handleExport = async () => {
     const allDone = Array.from(new Set([...Object.keys(results), ...Object.keys(cloudPairs)].map(Number))).sort((a, b) => a - b);
-    const wanted = rangeInput.trim() ? parsePageRange(rangeInput, numPages).filter(p => allDone.includes(p)) : allDone;
+    // v10.3: chuẩn hoá khoảng trang + phân biệt "khoảng không hợp lệ" với "chưa có trang dịch trong khoảng"
+    let wanted = allDone;
+    let notDoneInRange: number[] = [];
+    if (rangeInput.trim()) {
+      const inRange = parsePageRange(normalizeRangeInput(rangeInput), numPages);
+      if (inRange.length === 0) {
+        showToast(`Khoảng trang "${rangeInput.trim()}" không hợp lệ. Ví dụ: 1-3, 5 (tối đa ${numPages}). Để trống để xuất tất cả trang đã dịch.`, 'error');
+        return;
+      }
+      wanted = inRange.filter(p => allDone.includes(p));
+      notDoneInRange = inRange.filter(p => !allDone.includes(p));
+      if (wanted.length === 0) {
+        showToast(`Chưa có trang nào trong khoảng "${rangeInput.trim()}" được dịch giữ định dạng.`, 'error');
+        return;
+      }
+    }
     if (wanted.length === 0) {
       showToast('Chưa có trang nào được dịch để xuất.', 'error');
       return;
     }
     setExporting(true);
+    untranslatedRef.current = 0;
     try {
       const pages: LayoutPageResult[] = [];
+      // v10.3: một trang lỗi không làm hỏng cả lần xuất — ghi lại trang bỏ qua và báo trong thông báo
+      const failed: number[] = [];
+      const scannedSkipped: number[] = [];
       for (const p of wanted) {
-        const r = resultsRef.current[p] || (await rebuildFromCloud(p));
-        if (r && !r.scanned) pages.push(r);
+        try {
+          const r = resultsRef.current[p] || (await rebuildFromCloud(p, undefined, true));
+          if (!r) { failed.push(p); continue; }
+          if (r.scanned && !r.blank) { scannedSkipped.push(p); continue; }
+          if (r.scanned) continue; // trang trắng
+          pages.push(r);
+        } catch (err) {
+          console.warn(`[Layout] Bỏ qua trang ${p} khi xuất PDF:`, err);
+          failed.push(p);
+        }
       }
-      if (pages.length === 0) throw new Error('Không có trang hợp lệ để xuất.');
+      const fmt = (arr: number[]) => arr.length > 8 ? `${arr.slice(0, 8).join(', ')}…` : arr.join(', ');
+      const skippedNote = (failed.length ? ` Bỏ qua ${failed.length} trang lỗi (${fmt(failed)}).` : '')
+        + (scannedSkipped.length ? ` Bỏ qua ${scannedSkipped.length} trang scan chưa dịch được (${fmt(scannedSkipped)}).` : '');
+      if (pages.length === 0) throw new Error('Không có trang hợp lệ để xuất.' + skippedNote);
+      // v10.4: còn trang chưa dịch / trang scan / khối thiếu bản dịch / khối lệch số liệu → hỏi lại trước khi xuất,
+      // liệt kê rõ từng loại (trước đây chỉ báo thoáng qua sau khi đã xuất)
+      const numericPages = pages.filter(r => r.numericIssues?.length).map(r => r.pageNumber);
+      const notDoneAll = rangeInput.trim() ? notDoneInRange : [];
+      const untranslatedPages = Object.entries(untranslatedByPage).filter(([p, n]) => n > 0 && wanted.includes(+p)).map(([p]) => +p);
+      const problems: string[] = [];
+      if (notDoneAll.length) problems.push(`• ${notDoneAll.length} trang trong khoảng chưa dịch (không có trong file): ${fmt(notDoneAll)}`);
+      if (scannedSkipped.length) problems.push(`• ${scannedSkipped.length} trang scan chưa dịch được (bị bỏ khỏi file): ${fmt(scannedSkipped)}`);
+      if (failed.length) problems.push(`• ${failed.length} trang lỗi khi dựng lại (bị bỏ khỏi file): ${fmt(failed)}`);
+      if (untranslatedPages.length || untranslatedRef.current) problems.push(`• Trang còn khối chưa có bản dịch (giữ chữ gốc): ${untranslatedPages.length ? fmt(untranslatedPages) : `${untranslatedRef.current} khối`}`);
+      if (numericPages.length) problems.push(`• ${numericPages.length} trang có khối lệch số liệu so với bản gốc, chưa duyệt: ${fmt(numericPages)}`);
+      if (problems.length && !window.confirm(`Bản dịch chưa hoàn chỉnh:\n\n${problems.join('\n')}\n\nVẫn xuất ${pages.length} trang?`)) {
+        showToast('Đã huỷ xuất PDF.', 'info');
+        return;
+      }
       // v9.0: luôn xuất MỘT file PDF duy nhất cho toàn bộ các trang (trước đây chia 150 trang/file).
       // Ảnh trang được đọc lần lượt từ ổ đĩa và nhúng thẳng vào PDF nên vẫn nhẹ bộ nhớ.
       if (pages.length > 60) showToast(`Đang ghép ${pages.length} trang thành 1 file PDF, vui lòng chờ…`, 'info');
       const blob = await exportLayoutPdf(pages);
       saveAs(blob, `MediTrans_${baseName}_ban-dich-giu-dinh-dang.pdf`);
-      showToast(`Đã xuất 1 file PDF gồm ${pages.length} trang.`, 'success');
+      showToast(`Đã xuất 1 file PDF gồm ${pages.length} trang.` + skippedNote + (untranslatedRef.current ? ` (${untranslatedRef.current} khối chưa có bản dịch lưu sẵn — mở trang đó và bấm "Dịch bù".)` : ''), (failed.length || scannedSkipped.length) ? 'info' : 'success');
     } catch (e: any) {
       showToast(`Lỗi xuất PDF: ${e?.message || e}`, 'error');
     } finally {
@@ -455,6 +564,10 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       : current && current.overflowCount > 0
         ? { tone: 'warn', text: `${current.overflowCount} khối chữ quá chật, có thể lấn khung. Nên xem lại.` }
         : null;
+  // v10.3: trang dựng từ bản lưu còn khối chưa dịch → mời "Dịch bù" (chỉ gọi AI khi người dùng bấm)
+  const missingHere = untranslatedByPage[currentPage] || 0;
+  // v10.4: khối lệch số liệu / đơn vị / dấu so với bản gốc → mời duyệt
+  const numericHere = current?.numericIssues?.length || 0;
 
   const storageTitle = cloud?.canWrite
     ? 'Bản dịch được lưu lên đám mây theo tài liệu (mở trên máy khác vẫn còn)'
@@ -480,12 +593,12 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         <Layers className="w-3.5 h-3.5" /><span className="hidden 2xl:inline">Nhiều trang</span>
       </button>
       {hasSaved && !running && (
-        <button onClick={handleRetranslate} className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Dịch lại trang này">
+        <button onClick={handleRetranslate} aria-label="Dịch lại trang này" className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Dịch lại trang này">
           <RefreshCw className="w-3.5 h-3.5" />
         </button>
       )}
       {hasSaved && !running && (
-        <button onClick={openEditor} className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Sửa bản dịch trang này (không tốn token)">
+        <button onClick={() => openEditor()} className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Sửa bản dịch trang này (không tốn token)">
           <PencilLine className="w-3.5 h-3.5" /><span className="hidden xl:inline">Sửa</span>
         </button>
       )}
@@ -505,7 +618,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       <div className="w-px h-4 bg-slate-200 mx-0.5" />
       {current && (
         <button onClick={() => saveAs(current.blob, `MediTrans_${baseName}_trang-${currentPage}_ban-dich.jpg`)}
-          className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Tải ảnh trang này">
+          aria-label="Tải ảnh trang này" className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Tải ảnh trang này">
           <ImageDown className="w-3.5 h-3.5" />
         </button>
       )}
@@ -536,7 +649,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         <div className="absolute top-2 right-3 z-30 w-[300px] max-w-[calc(100%-1.5rem)] bg-white rounded-xl shadow-xl border border-slate-200 p-3 space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-700">Dịch / xuất nhiều trang</span>
-            <button onClick={() => setShowRange(false)} className="p-1 rounded hover:bg-slate-100 text-slate-400"><X className="w-3.5 h-3.5" /></button>
+            <button onClick={() => setShowRange(false)} aria-label="Đóng" title="Đóng" className="p-1 rounded hover:bg-slate-100 text-slate-400"><X className="w-3.5 h-3.5" /></button>
           </div>
           <div className="flex gap-1.5">
             <input value={rangeInput} onChange={e => setRangeInput(e.target.value)} autoFocus
@@ -553,13 +666,36 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       )}
 
       {/* Cảnh báo trang (nổi) */}
-      {notice && noticeHidden !== currentPage && (
-        <div className={`absolute top-2 left-3 z-20 max-w-[min(420px,calc(100%-1.5rem))] flex items-start gap-2 px-3 py-2 rounded-xl shadow-md text-[11px] border ${notice.tone === 'error' ? 'bg-rose-50 text-rose-700 border-rose-100' : 'bg-amber-50 text-amber-800 border-amber-100'}`}>
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-          <span className="flex-1">{notice.text}</span>
-          <button onClick={() => setNoticeHidden(currentPage)} className="opacity-60 hover:opacity-100"><X className="w-3 h-3" /></button>
-        </div>
-      )}
+      <div className="absolute top-2 left-3 z-20 max-w-[min(420px,calc(100%-1.5rem))] flex flex-col gap-2 pointer-events-none">
+        {notice && noticeHidden !== currentPage && (
+          <div className={`pointer-events-auto flex items-start gap-2 px-3 py-2 rounded-xl shadow-md text-[11px] border ${notice.tone === 'error' ? 'bg-rose-50 text-rose-700 border-rose-100' : 'bg-amber-50 text-amber-800 border-amber-100'}`}>
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <span className="flex-1">{notice.text}</span>
+            <button onClick={() => setNoticeHidden(currentPage)} aria-label="Ẩn thông báo" title="Ẩn thông báo" className="opacity-60 hover:opacity-100"><X className="w-3 h-3" /></button>
+          </div>
+        )}
+        {/* v10.4: bản dịch lệch số liệu so với bản gốc → duyệt */}
+        {numericHere > 0 && current && !running && (
+          <div className="pointer-events-auto flex items-center gap-2 px-3 py-2 rounded-xl shadow-md text-[11px] border bg-rose-50 text-rose-800 border-rose-100">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span className="flex-1">{numericHere} khối có số liệu / đơn vị / dấu khác bản gốc, cần duyệt</span>
+            <button onClick={() => openEditor(true)} className={`${iconBtn} h-6 px-2 bg-rose-600 text-white hover:bg-rose-700`} title="Mở bảng sửa, chỉ hiện các khối lệch số liệu (không tốn token)">
+              Xem &amp; sửa
+            </button>
+          </div>
+        )}
+        {/* v10.3: khối chưa có bản dịch (dựng lại không tốn token) → nút Dịch bù */}
+        {missingHere > 0 && current && !running && (
+          <div className="pointer-events-auto flex items-center gap-2 px-3 py-2 rounded-xl shadow-md text-[11px] border bg-sky-50 text-sky-800 border-sky-100">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span className="flex-1">{missingHere} khối chưa có bản dịch</span>
+            <button onClick={handleFillMissing} disabled={fillingPage !== null || !translator}
+              className={`${iconBtn} h-6 px-2 bg-sky-600 text-white hover:bg-sky-700`} title="Gọi AI dịch các khối còn thiếu (tốn token)">
+              {fillingPage === currentPage ? <Loader2 className="w-3 h-3 animate-spin" /> : null}Dịch bù
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Bảng sửa bản dịch */}
       {editor && (
@@ -570,7 +706,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
               <span className="text-sm font-bold text-slate-800 flex-1">
                 Sửa bản dịch trang {editor.page}{editor.ocr.length ? ' (có OCR)' : ''}
               </span>
-              <button onClick={() => setEditor(null)} disabled={savingEdit} className="p-1 rounded hover:bg-slate-100 text-slate-400"><X className="w-4 h-4" /></button>
+              <button onClick={() => setEditor(null)} disabled={savingEdit} aria-label="Đóng bảng sửa" title="Đóng" className="p-1 rounded hover:bg-slate-100 text-slate-400"><X className="w-4 h-4" /></button>
             </div>
             <div className="px-4 py-2 border-b border-slate-100 space-y-1.5">
               <input value={editor.filter} onChange={e => setEditor(ed => ed && { ...ed, filter: e.target.value })}
@@ -585,9 +721,18 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
                 const src = p.s.replace(/<\/?\d+>/g, '');
                 const f = editor.filter.trim().toLowerCase();
                 if (f && !src.toLowerCase().includes(f) && !p.v.toLowerCase().includes(f)) return null;
+                const flagged = editor.issues?.[p.s];
+                if (editor.onlyNumeric && !flagged) return null;
+                // Đối chiếu lại ngay khi sửa (đoạn vắt cột được kiểm tra trên cả đoạn khi vẽ lại)
+                const live = flagged ? checkNumeric(p.s, p.v) : null;
                 return (
-                  <div key={i} className="rounded-xl border border-slate-200 p-2.5 bg-slate-50/50">
+                  <div key={i} className={`rounded-xl border p-2.5 ${flagged ? (live ? 'border-rose-200 bg-rose-50/40' : 'border-emerald-200 bg-emerald-50/40') : 'border-slate-200 bg-slate-50/50'}`}>
                     <p className="text-[11px] text-slate-500 leading-snug mb-1.5 select-text">{src}</p>
+                    {flagged && (
+                      <p className={`text-[11px] leading-snug mb-1.5 ${live ? 'text-rose-700' : 'text-emerald-700'}`}>
+                        {live ? (/Đã dịch lại/.test(flagged) ? flagged : describeNumericIssue(live)) : 'Số liệu đã khớp bản gốc.'}
+                      </p>
+                    )}
                     <textarea value={p.v} rows={Math.min(8, Math.max(2, Math.ceil(p.v.length / 70)))}
                       onChange={e => {
                         const v = e.target.value;
@@ -599,7 +744,14 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
               })}
             </div>
             <div className="px-4 py-3 border-t border-slate-100 flex items-center gap-2">
-              <span className="text-[11px] text-slate-400 flex-1">{editor.items.length} khối chữ</span>
+              <span className="text-[11px] text-slate-400 flex-1">
+                {editor.items.length} khối chữ
+                {editor.issues && Object.keys(editor.issues).length > 0 && (
+                  <button onClick={() => setEditor(ed => ed && { ...ed, onlyNumeric: !ed.onlyNumeric })} className="ml-2 underline text-rose-600">
+                    {editor.onlyNumeric ? 'Hiện tất cả' : `Chỉ khối lệch số liệu (${Object.keys(editor.issues).length})`}
+                  </button>
+                )}
+              </span>
               <button onClick={() => setEditor(null)} disabled={savingEdit} className={`${iconBtn} h-8 px-3 border border-slate-200 text-slate-600 hover:bg-slate-50`}>Huỷ</button>
               <button onClick={saveEditor} disabled={savingEdit} className={`${iconBtn} h-8 px-3 bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm`}>
                 {savingEdit ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} Lưu & vẽ lại

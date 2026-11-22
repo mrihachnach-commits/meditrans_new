@@ -1,5 +1,5 @@
 import { firebaseConfig, getAdminApp, CustomRequest } from "../../lib/firebaseAdmin.js";
-import { checkAdmin } from "../_utils.js";
+import { checkAdmin, sendApiError } from "../_utils.js";
 
 export default async function handler(req: CustomRequest, res: any) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
@@ -27,11 +27,13 @@ export default async function handler(req: CustomRequest, res: any) {
       }
     } catch (e: any) {
       results.adminSdk.status = "error";
-      results.adminSdk.message = e.message;
+      // v10.3: chỉ ghi log, không trả chi tiết
+      console.error("[diagnostics] Admin SDK error:", e?.message);
     }
 
     return res.status(200).json(results);
   } catch (err: any) {
-    return res.status(err.status || 500).json({ error: err.error || "Diagnostics failed", message: err.details || err.message });
+    // v10.3: không trả err.message thô
+    return sendApiError(res, err, "Diagnostics failed");
   }
 }

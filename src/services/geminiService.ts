@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import { dlog } from '../utils/dlog';
 import { TranslationService, TranslationOptions } from "./translationService";
 import { cleanLatex } from "../utils/textFormatting";
 import { auth } from "../firebase";
@@ -253,7 +254,7 @@ export class GeminiService implements TranslationService {
   private static negotiateReasoning(model: string, tried: string | undefined, errText: string): boolean {
     if (!tried || !/reasoning/i.test(errText)) return false;
     const listed = (errText.match(/valid values are:?\s*([a-z ,|]+)/i)?.[1] || '').toLowerCase().split(/[\s,|]+/).filter(Boolean);
-    const order = ['minimal', 'none', 'low'];
+    const order = tried === 'none' ? ['none', 'minimal', 'low'] : ['minimal', 'none', 'low'];
     const pos = order.indexOf(tried);
     const next = order.slice(pos + 1).find(v => !listed.length || listed.includes(v))
       ?? (listed.includes('low') && tried !== 'low' ? 'low' : null);
@@ -262,12 +263,28 @@ export class GeminiService implements TranslationService {
     return true;
   }
 
-  /** reasoning_effort cho proxy kiểu OpenAI (chỉ với model Gemini có thinking). */
+  /** v10.4: model OpenAI có "suy nghĩ" (gpt-5.x, gpt-6.x, o-series) — không nhận temperature, dùng max_completion_tokens. */
+  public static isOpenAIReasoningModel(model: string): boolean {
+    return /^(gpt-5|gpt-6|o\d)/i.test((model || '').trim());
+  }
+  /** v10.4: chỉnh body gửi proxy cho model OpenAI có suy nghĩ (bỏ temperature, max_tokens → max_completion_tokens). */
+  private static adaptOpenAIBody(body: any): any {
+    if (!GeminiService.isOpenAIReasoningModel(body.model)) return body;
+    delete body.temperature;
+    if (body.max_tokens != null) { body.max_completion_tokens = body.max_tokens; delete body.max_tokens; }
+    return body;
+  }
+
+  /** reasoning_effort cho proxy kiểu OpenAI (model Gemini có thinking + model OpenAI có suy nghĩ). */
   private static reasoningFor(model: string): string | undefined {
     const chosen = GeminiService.reasoningChoice.get(model);
     if (chosen !== undefined) return chosen ?? undefined;
     if (GeminiService.reasoningUnsupported) return undefined;
     const m = (model || '').toLowerCase();
+    // v10.4: TẮT suy nghĩ cho gpt-6.x / gpt-5.1+ ("none"); gpt-5 / gpt-5-mini đời đầu chỉ có "minimal".
+    // Proxy từ chối → negotiateReasoning tự lùi none → low.
+    if (/^gpt-6/.test(m) || /^gpt-5\.\d/.test(m)) return 'none';
+    if (/^gpt-5/.test(m)) return 'minimal';
     if (/gemini-2\.5-flash(?!-lite)/.test(m)) return 'none';
     const ver = m.match(/gemini-(\d+(?:\.\d+)?)/);
     if (ver && parseFloat(ver[1]) >= 3) return m.includes('pro') ? 'low' : 'minimal';
@@ -294,7 +311,7 @@ export class GeminiService implements TranslationService {
       }
     });
     
-    console.log(`[MediTrans] GeminiService: ${this.apiKeys.length} keys loaded. Model: ${this.modelName}`);
+    dlog(`[MediTrans] GeminiService: ${this.apiKeys.length} keys loaded. Model: ${this.modelName}`);
   }
 
   /** Loại key theo kho key của người dùng (nhãn "Google Gemini" / "ShopAIKey" lúc thêm key). */
@@ -355,7 +372,8 @@ export class GeminiService implements TranslationService {
   public isFastProxyModel(engine?: string): boolean {
     if (!this.usesProxy()) return false;
     const m = this.mapModelForOpenAI(engine || this.modelName);
-    return !GeminiService.reasoningFor(m);
+    const r = GeminiService.reasoningFor(m);
+    return !r || r === 'none'; // v10.4: gpt-6-luna tắt suy nghĩ = model nhanh
   }
   /** Cách chia trang dịch thường thành các phần chạy song song. */
   public parallelPlan(engine?: string): { minChars: number; maxParts: number; targetChars: number } {
@@ -421,7 +439,7 @@ export class GeminiService implements TranslationService {
     try {
       const isProxy = this.isCurrentKeyProxy(key);
       // Ghi đúng model THỰC SỰ được gửi (trước đây in tên engine lưu trong máy, vd. "gemini-flash-lite-latest", gây hiểu nhầm)
-      console.log(`[MediTrans] Using key: ...${key.substring(key.length - 4)} (${isProxy ? 'ShopAIKey/Proxy' : 'Google Gemini'}) — engine "${this.modelName}" → model ${isProxy ? this.mapModelForOpenAI(this.modelName) : this.googleModel(key)}`);
+      dlog(`[MediTrans] Using key: ...${key.substring(key.length - 4)} (${isProxy ? 'ShopAIKey/Proxy' : 'Google Gemini'}) — engine "${this.modelName}" → model ${isProxy ? this.mapModelForOpenAI(this.modelName) : this.googleModel(key)}`);
       if (isProxy) {
         return { ai: null, key };
       }
@@ -463,7 +481,7 @@ export class GeminiService implements TranslationService {
       
       setTimeout(() => {
         this.exhaustedKeys.delete(exhaustedKey);
-        console.log(`[MediTrans] Key ...${exhaustedKey.slice(-4)} recovered.`);
+        dlog(`[MediTrans] Key ...${exhaustedKey.slice(-4)} recovered.`);
       }, waitTime);
     }
     
@@ -475,13 +493,21 @@ export class GeminiService implements TranslationService {
   /**
    * v8.0 — model cho ShopAIKey / key hệ thống, chọn theo CHỨC NĂNG (không theo tên engine cũ lưu trong máy):
    *  - Dịch thường + dịch giữ định dạng: gpt-4.1-mini
-   *  - OCR (đọc ảnh trang scan / chữ trong hình / nhận diện cột) + dịch chuyên sâu: gemini-3.1-flash-lite
+   *  - OCR (đọc ảnh trang scan / chữ trong hình / nhận diện cột): gemini-3.1-flash-lite
    * Ô "Model Proxy" trong Cài đặt: ô Dịch thường ghi đè cho dịch thường, ô Chuyên sâu ghi đè cho chuyên sâu.
    * Dịch giữ định dạng và OCR luôn cố định (JSON / toạ độ khung ổn định, không bị cài đặt cũ làm hỏng).
    */
+  
   public static readonly PROXY_NORMAL_MODEL = 'gpt-4.1-mini';
+  // v10.4: gpt-6-luna (tắt suy nghĩ) là lựa chọn trong Cài đặt; thử thật chậm hơn gpt-4.1-mini 2–3 lần → mặc định giữ như cũ.
   public static readonly PROXY_DEEP_MODEL = 'gemini-3.1-flash-lite';
   public static readonly PROXY_OCR_MODEL = 'gemini-3.1-flash-lite';
+  /** Model chọn được cho dịch giữ định dạng / OCR (phải nằm trong danh sách cho phép của api/ai/chat.ts). */
+  public static readonly PROXY_MODEL_CHOICES = ['gpt-4.1-mini', 'gpt-6-luna', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite', 'gpt-4o-mini', 'gpt-4.1'];
+  public static currentOcrModel(): string {
+    const v = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_proxyModelOcr') : null)?.trim() || '';
+    return GeminiService.PROXY_MODEL_CHOICES.includes(v) ? v : GeminiService.PROXY_OCR_MODEL;
+  }
   /** Mã chức năng nội bộ (truyền thay cho tên model). */
   private static readonly LAYOUT_MODEL = '__layout_fixed__';
   private static readonly OCR_MODEL = '__ocr_fixed__';
@@ -491,9 +517,11 @@ export class GeminiService implements TranslationService {
   }
 
   private mapModelForOpenAI(modelName: string): string {
-    if (modelName === GeminiService.LAYOUT_MODEL) return GeminiService.PROXY_NORMAL_MODEL;
-    if (modelName === GeminiService.OCR_MODEL) return GeminiService.PROXY_OCR_MODEL;
     const ls = (k: string) => (typeof window !== 'undefined' ? localStorage.getItem(k) : null)?.trim() || '';
+    // v10.4: dịch giữ định dạng / OCR giữ định dạng có ô chọn model riêng trong Cài đặt (chỉ các model được phép)
+    const pick = (k: string, def: string) => { const v = ls(k); return GeminiService.PROXY_MODEL_CHOICES.includes(v) ? v : def; };
+    if (modelName === GeminiService.LAYOUT_MODEL) return pick('mediTrans_proxyModelLayout', GeminiService.PROXY_NORMAL_MODEL);
+    if (modelName === GeminiService.OCR_MODEL) return pick('mediTrans_proxyModelOcr', GeminiService.PROXY_OCR_MODEL);
     if (GeminiService.isDeepEngine(modelName)) return ls('mediTrans_customOpenAIModelDeep') || GeminiService.PROXY_DEEP_MODEL;
     return ls('mediTrans_customOpenAIModelNormal') || ls('mediTrans_customOpenAIModel') || GeminiService.PROXY_NORMAL_MODEL;
   }
@@ -677,6 +705,7 @@ export class GeminiService implements TranslationService {
     };
     const reasoning = GeminiService.reasoningFor(mappedModel);
     if (reasoning) body.reasoning_effort = reasoning;
+    GeminiService.adaptOpenAIBody(body);
 
     let requestUrl = cleanBaseUrl;
     let authHeaderValue = `Bearer ${key.trim()}`;
@@ -691,7 +720,7 @@ export class GeminiService implements TranslationService {
       authHeaderValue = `Bearer ${token}`;
     }
 
-    console.log(`[MediTrans] Calling Stream (${requestUrl}) using model: ${mappedModel}`);
+    dlog(`[MediTrans] Calling Stream (${requestUrl}) using model: ${mappedModel}`);
 
     await proxyGate.acquire(signal);
     try {
@@ -823,6 +852,7 @@ export class GeminiService implements TranslationService {
     };
     const reasoning = GeminiService.reasoningFor(mappedModel);
     if (reasoning) body.reasoning_effort = reasoning;
+    GeminiService.adaptOpenAIBody(body);
     if (jsonMode && !GeminiService.jsonModeUnsupported) body.response_format = { type: 'json_object' };
 
     let requestUrl = cleanBaseUrl;
@@ -838,7 +868,7 @@ export class GeminiService implements TranslationService {
       authHeaderValue = `Bearer ${token}`;
     }
 
-    console.log(`[MediTrans] Calling Non-Stream (${requestUrl}) using model: ${mappedModel}`);
+    dlog(`[MediTrans] Calling Non-Stream (${requestUrl}) using model: ${mappedModel}`);
 
     await proxyGate.acquire(signal);
     let data: any;
@@ -992,11 +1022,11 @@ export class GeminiService implements TranslationService {
       const response = await fetch(this.getProxyBaseUrl(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cleanKey}` },
-        body: JSON.stringify({
+        body: JSON.stringify(GeminiService.adaptOpenAIBody({
           model: this.mapModelForOpenAI(this.modelName),
           messages: [{ role: 'user', content: 'hi' }],
-          max_tokens: 5
-        })
+          max_tokens: 16
+        }))
       });
       return !(response.status === 401 || response.status === 403);
     } catch (e) {
@@ -1063,7 +1093,7 @@ Example of the expected shape:
     const { imageBuffer, pageNumber, signal, model } = options;
     const requestModel = model || this.modelName;
     
-    console.log(`[MediTrans] Starting stream translation for page: ${pageNumber} using model: ${requestModel}`);
+    dlog(`[MediTrans] Starting stream translation for page: ${pageNumber} using model: ${requestModel}`);
     const totalStartTime = Date.now();
 
     if (signal?.aborted) {
@@ -1116,7 +1146,7 @@ Example of the expected shape:
             }
           }
           
-          console.log(`[MediTrans] Translation for page: ${pageNumber} finished via ShopAIKey/Proxy in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
+          dlog(`[MediTrans] Translation for page: ${pageNumber} finished via ShopAIKey/Proxy in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
           return;
         } catch (error: any) {
           if (signal?.aborted || error.message === "Translation aborted") {
@@ -1158,16 +1188,16 @@ Example of the expected shape:
           prompt,
         ], signal ? ({ signal } as any) : undefined);
 
-        console.log(`[MediTrans] API request sent. Model: ${requestModel}. Wait time for stream start...`);
+        dlog(`[MediTrans] API request sent. Model: ${requestModel}. Wait time for stream start...`);
         let fullText = "";
         let chunkCount = 0;
         for await (const chunk of response.stream) {
           if (signal?.aborted) {
-            console.log("[MediTrans] Stream aborted by signal");
+            dlog("[MediTrans] Stream aborted by signal");
             break; 
           }
           if (chunkCount === 0) {
-            console.log(`[MediTrans] Stream started after ${Date.now() - fetchStartTime}ms`);
+            dlog(`[MediTrans] Stream started after ${Date.now() - fetchStartTime}ms`);
           }
           chunkCount++;
           
@@ -1191,7 +1221,7 @@ Example of the expected shape:
           throw new Error("Model returned no text.");
         }
         
-        console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
+        dlog(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
         break;
 
       } catch (error: any) {
@@ -1238,7 +1268,7 @@ Example of the expected shape:
     const { imageBuffer, pageNumber, signal, model } = options;
     const requestModel = model || this.modelName;
     
-    console.log(`[MediTrans] Starting non-stream translation for page: ${pageNumber} using model: ${requestModel}`);
+    dlog(`[MediTrans] Starting non-stream translation for page: ${pageNumber} using model: ${requestModel}`);
     const totalStartTime = Date.now();
     
     if (signal?.aborted) throw new Error("Translation aborted");
@@ -1295,7 +1325,7 @@ Example of the expected shape:
         const response = await result.response;
         let text = response.text() || "";
         const resultText = text.replace(/(\s*\.\s*){4,}/g, ' ... ');
-        console.log(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
+        dlog(`[MediTrans] Translation for page: ${pageNumber} finished in ${((Date.now() - totalStartTime) / 1000).toFixed(2)}s`);
         return resultText;
       } catch (error: any) {
         if (signal?.aborted) throw new Error("Translation aborted");
@@ -1511,6 +1541,11 @@ Rules:
    */
   async ocrLayoutBlocks(imageDataUrl: string, signal?: AbortSignal, opts: { mode?: 'full' | 'extra'; regions?: number[][]; retryEmpty?: boolean } = {}): Promise<any[]> {
     const extra = opts.mode === 'extra';
+    // v10.4: model GPT không quen định dạng box_2d của Gemini → nhắc rõ thứ tự (y trước x) và thang 0–1000
+    const gptBoxHint = /^(gpt|o\d)/i.test(GeminiService.currentOcrModel())
+      ? `
+COORDINATES: box_2d is [ymin, xmin, ymax, xmax] — the VERTICAL position (y, from the top edge) comes FIRST, then the horizontal position (x, from the left edge). Use a 0-1000 scale for both axes (0 = top/left edge, 1000 = bottom/right edge), NOT pixels. Measure each box carefully against the page: a block in the right column has xmin > 500; a footer near the bottom has ymin > 900.`
+      : '';
     const scope = extra
       ? `This page already has a normal text layer. Return ONLY: (1) text that is part of the IMAGES/photos/scans/diagrams inside these regions (box_2d [ymin,xmin,ymax,xmax] 0-1000): ${JSON.stringify(opts.regions || [])} — e.g. labels, annotations, measurements, words burned into ultrasound/X-ray/CT images, legends inside figures. Return EVERY label of a diagram/drawing (hand-written labels included), each label as its own block with a tight box around only that label's letters (never merge neighbouring labels, never a box covering arrows or the drawing); text written diagonally/slanted: give \"dir\":\"diag\". And (2) any text rotated 90° (vertical text) anywhere on the page. Do NOT return the normal horizontal page text (paragraphs, headings, captions outside the images). If there is no such text, return {"blocks":[]}.`
       : `Detect EVERY text block on the page image: titles, headings, paragraphs, each list item (separately), figure/table captions, each table cell (separately), labels and text inside images/figures, vertical (rotated) text, running headers, footers, page numbers. Treat each text column separately. Do NOT merge blocks from different columns. Pages that are mostly images (X-ray, mammogram, ultrasound, photos) STILL have text: figure captions ("Figure 1 – …"), side tabs with vertical words, running headers/footers, page numbers — return all of them.${opts.retryEmpty ? ' IMPORTANT: a previous attempt wrongly returned no blocks for this page. Look carefully at the whole image, especially the small caption lines below each picture, the vertical tab on the left/right edge and the footer; return every readable text block.' : ''}`;
@@ -1527,7 +1562,7 @@ For each block return:
 - "align": "left" | "center" | "right" | "justify"
 - "dir": "up" if the text is rotated and reads bottom-to-top, "down" if it reads top-to-bottom; omit for normal horizontal text. For rotated text, "lines" counts the lines across the block.
 Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bottom).
-Boxes must enclose the text itself: a caption below a picture gets the box of the caption lines, never a box on the picture. Grey/blank rectangles are hidden pictures: ignore them.${extra ? '' : glossaryCompact()}`;
+Boxes must enclose the text itself: a caption below a picture gets the box of the caption lines, never a box on the picture. Grey/blank rectangles are hidden pictures: ignore them.${gptBoxHint}${extra ? '' : glossaryCompact()}`;
     const prompt = extra
       ? 'Return only text inside the given image regions and rotated text, with boxes and Vietnamese translations. JSON only.'
       : 'OCR this page into text blocks with boxes and Vietnamese translations. JSON only.';

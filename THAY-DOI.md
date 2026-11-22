@@ -642,3 +642,151 @@ Tái hiện trên trình duyệt thật với dòng "Halliwell, was published [6
   - không mượn chỗ bên trái làm lệch so với số trang.
 - **Câu lệnh dịch:** giữ nguyên tên tổ chức / khoa phòng / thử nghiệm / nhóm nghiên cứu.
 - ENGINE_VERSION = v29.
+
+## v10.2 — Sách "Kỹ thuật Chẩn đoán Hình ảnh Tuyến vú cho KTV X-quang": rà soát toàn bộ bộ dựng trang
+
+Lỗi tìm thấy và sửa tận gốc:
+- **Bìa dịch cả chữ ẩn** ("Covertemplate", "Michael R.B. Evans / Editors", "Clinical Medicine Covers T3_HB", "Second Edition"
+  của mẫu bìa cũ — có trong file nhưng bị ảnh đè lên). Mới: `hiddenText.ts` ghi lại từng lệnh vẽ ký tự khi pdf.js vẽ trang,
+  vẽ thêm một lượt "màu mã" cho từng dòng chữ → dòng nào bị ảnh che, bị cắt, nằm ngoài khung trang hoặc cùng màu nền bị bỏ,
+  chỉ dịch chữ nhìn thấy. Dòng không xác định được (font vẽ bằng nét, lớp OCR ẩn của bản scan) giữ như cũ.
+- **Chữ trên nền ảnh/gradient xoá không sạch** (vệt dọc ở tên tác giả trên bìa): dùng bản nền không chữ khi chữ thật sự biến
+  mất trong bản đó, không đòi tỉ lệ "mực" theo màu nền phổ biến.
+- **Tên sách cỡ lớn tràn xuống ảnh**: chữ trưng bày (> 3% chiều cao trang) được thu nhỏ tới 45% thay vì 68%.
+- **Đoạn văn vỡ vụn khi có cụm in đậm** ("descriptive epidemiology, …" / câu in đậm nghiêng giữa đoạn): trước đây đổi
+  đậm/thường là ngắt khối → mỗi mẩu một cỡ chữ, hở khoảng lớn, cột trái tràn. Nay dòng có cụm đậm cùng cỡ, dòng trước chạy đủ
+  khổ và câu chưa dứt → cùng đoạn (tr.42: 8 mẩu → 2 đoạn; tr.44: 7 mẩu → 3 đoạn).
+- **Tiêu đề mục 3 dòng bị tách** ("Notes on Epidemiological" / "Data on BC in Europe…"): luật tách nhãn hình xếp chồng không áp
+  cho tiêu đề (cỡ lớn hơn thân bài hoặc có số mục bên trái).
+- **Dòng [21] đè chữ**: dòng thân bài cột trái bị nối với số mục "10." của cột tài liệu tham khảo bên phải (khác cỡ chữ, khe cột
+  không dò ra). Tách theo cỡ chữ chính của phần đã gom.
+- **Tài liệu tham khảo nửa dịch nửa không**: thêm "vùng tham khảo" — trang có ≥ 3 mục trích dẫn chắc chắn thì mọi khối cùng cỡ,
+  thẳng mép với chúng và có dấu hiệu trích dẫn (năm, DOI, link, et al, ed.) đều giữ nguyên bản gốc, không phụ thuộc thứ tự đọc.
+- **Chú thích Fig. 1.1 bị cắt 3 khối**: (1) dòng chú thích cùng hàng với nhãn biểu đồ ("EU 27") bị coi là ô bảng — nay ô bảng
+  phải cùng họ font; (2) chú thích căn trái không đều mép phải bị coi là ngắt đoạn — nay chỉ ngắt khi từ đầu dòng sau vừa chỗ
+  trống cuối dòng trước. Cũng sửa chú thích dài ở Atlas (tr.150, 200) từng bị hở giữa chừng.
+- ENGINE_VERSION v30 → các trang đã dịch được dựng lại theo bản mới, không tốn token.
+
+Kiểm thử: `tests/layout-regression/` — bộ hồi quy so ảnh + so cấu trúc khối 21 trang của 4 sách (có lớp chữ và scan).
+So với v10.1: 9 trang thay đổi, đều là cải thiện ở trên; 12 trang còn lại giống hệt từng điểm ảnh.
+
+Hạn chế còn lại: đoạn văn vắt qua cột/trang vẫn dịch thành 2 khối (mỗi cột một khối, câu bị cắt giữa chừng được AI nối nghĩa
+nhưng không chuyển chữ thừa từ cột này sang cột kia); chữ ẩn bằng chế độ "invisible" (render mode 3) chưa lọc để không bỏ nhầm
+lớp OCR của sách scan.
+
+### v10.2.1 — Xuất PDF / mở lại trang không gọi AI khi bộ máy đổi cách tách khối
+Nguyên nhân tốn token khi xuất PDF: trang chưa có ảnh trên máy (hoặc ảnh cũ của phiên bản bộ máy trước) được dựng lại từ bản
+dịch đã lưu; khối nào không khớp nguyên văn câu gốc đã lưu (do bản mới gộp các mẩu đoạn cũ thành một đoạn) bị gửi AI "dịch bù".
+Nay ghép lại bản dịch của khối mới từ bản dịch đã lưu của các mẩu cũ (đúng thứ tự, phủ ≥ 90% câu gốc) → không gọi AI; bản lưu
+trên đám mây được cập nhật theo cách tách khối mới để lần sau khớp thẳng. Chỉ khối thật sự chưa từng được dịch mới gọi AI.
+- **Xuất PDF không bao giờ gọi AI**: trang chưa có ảnh được dựng lại chỉ từ bản dịch đã lưu; khối nào không có bản dịch lưu sẵn
+  được báo số lượng trong thông báo (mở trang đó để dịch bù).
+- **Bớt log thừa**: đồng bộ key (in cả danh sách 21 key mỗi lần thay đổi), "Using key", "Calling Non-Stream", "Cache Hit",
+  "Prefetched" chỉ in khi bật gỡ lỗi (`localStorage.setItem('meditrans_debug','1')`). Vẫn giữ dòng "Token: vào…, ra…" để theo dõi chi phí.
+- **Lỗi "Cannot use the same canvas during multiple render()"** khi lật trang nhanh: huỷ lần vẽ cũ ngay trước khi vẽ (sau bước tải trang).
+
+### v10.3 — Kiểm thử 16 cuốn sách (368 trang), sửa lỗi dàn trang tận gốc, bảo mật, lỗi nhỏ của web
+Bộ dò tự động chấm từng trang dịch (khối vụn, chữ đè, co chữ quá mức, khoảng dòng lệch, tràn khung), chạy 3 lượt trên 16 cuốn.
+Kết quả lượt đầu → lượt cuối: khối vụn 172 → 46, chữ đè 50 → 30 (đa số là báo nhầm của bộ dò), co chữ < 80% 36 → 28,
+giãn dòng lệch 33 → 29, tràn khung 5 → 3. Sau lượt cuối sửa thêm 3 lỗi (khe cột bị che, chỉ mục, chú thích 2 nửa lệch cỡ).
+
+**Dàn trang (theo loại lỗi)**
+- *Đoạn vắt cột bị cắt câu*: đoạn chạy từ cuối cột trái sang đầu cột phải (cả chú thích hình 2 cột) nay được nối thành một
+  đoạn để dịch liền mạch, rồi chia bản dịch lại cho hai khung theo tỉ lệ (Thyroid Ablation tr.17).
+- *Hai cột bị dính thành một dòng*: khe cột hẹp hoặc bị khung chữ ngang trang che giờ vẫn dò được; dòng chạy ngang qua khe
+  (bảng, tiêu đề) không bị cắt nhầm (Parathyroid tr.137, Pitfalls tr.12, Ablation tr.92).
+- *Ô bảng có đường kẻ bị gộp*: nhận đường kẻ ngang của bảng, không gộp dòng vượt qua đường kẻ (CT tr.220).
+- *Chữ đè lên khối khác*: bước kiểm tra cuối trước khi vẽ, khối nào lấn sang khối khác thì co lại đúng khung gốc.
+- *Đoạn bị gộp nhầm / tách nhầm*: sửa luật dòng ngắn, dòng căn giữa, đổi kiểu chữ đậm-thường (Thyroid tr.27, Abdominal tr.73).
+- *Cỡ chữ không đều*: nhãn, chú thích một dòng cùng loại trên trang dùng chung một cỡ; 2 nửa chú thích hình cùng cỡ.
+- *Trang chỉ mục (Index)*: giữ nguyên bản gốc để số trang tra cứu còn đúng, không tốn token.
+- ENGINE_VERSION v31: trang đã dịch được dựng lại theo bản mới từ bản dịch đã lưu, không gọi AI.
+
+**Bảo mật**
+- Firestore rules: bắt buộc email đã xác minh; người bị khoá không đọc/ghi được; siết quyền sửa trường nhạy cảm; link tải
+  chỉ cho phép tên miền tin cậy.
+- `api/drive/download`: bắt buộc đăng nhập Firebase, token Google gửi qua header (không lộ trên URL), kiểm tra fileId,
+  tắt CORS, chống đoán kiểu nội dung.
+- `api/ai/chat`: bắt buộc đăng nhập, danh sách model cho phép, giới hạn max_tokens, giới hạn 120 lượt/phút mỗi người.
+- Lọc HTML trong phần hiển thị Markdown; thêm header bảo mật (vercel.json); pdf.js tắt eval.
+
+**Lỗi nhỏ của web (26 lỗi)**: đổi file khi đang dịch không còn lẫn bản dịch; tải bản dịch đã lưu đúng file; nút "Dịch bù" cho
+khối chưa dịch; đồng bộ đám mây báo đúng thành công/thất bại; log gỡ lỗi chỉ in khi bật; và các lỗi giao diện khác.
+
+**Việc chủ web cần làm khi triển khai**
+1. Deploy `firestore.rules` mới (`firebase deploy --only firestore:rules`).
+2. Báo người dùng xác minh email (rules mới chặn tài khoản chưa xác minh); kiểm tra mẫu email xác minh và Authorized domains.
+3. Đặt biến môi trường Vercel `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` (tuỳ chọn `SYSTEM_AI_ALLOWED_MODELS`,
+   `SYSTEM_AI_RATE_PER_MIN`), rồi deploy API và giao diện cùng lúc.
+4. Còn mở: key dùng chung vẫn đọc được bởi người được chia sẻ (cần proxy phía server). Nên nâng pdfjs ≥ 4.2.67.
+
+Hạn chế còn lại: đoạn vắt qua trang vẫn dịch thành 2 phần; đoạn mỗi câu một dòng chạy kín cột có thể bị gộp; ô bảng quá chật
+phải co chữ riêng; bản dịch đã lưu của các mẩu cũ được dùng lại nguyên trạng (không dịch lại).
+
+## v10.4 — Bảng, công thức, kiểm tra số liệu y khoa, giới hạn AI theo Firestore
+
+### A. Bảng trong sách CT tim (các bảng 4.1–4.3, 5.7, 5.8, 6.1, 9.1, bảng 18 đoạn SCCT) và bảng viết tắt
+Bộ nhận diện bảng được làm lại theo **khung đường kẻ**:
+- **Nhận bảng có đường kẻ:** dòng nằm giữa đường kẻ trên và dưới, đi ngược lên gặp cặp "đường kẻ trên + đường kẻ dưới hàng tiêu đề", giữa khung có hàng nhiều ô. Đường kẻ dưới tiêu đề trang hoặc ngăn chú thích chân trang không bị nhận nhầm.
+- **Gộp đúng ô nhiều dòng:** trong ô, hai dòng chỉ nối khi có dấu hiệu câu chạy tiếp (dòng sau viết thường, dòng trước kết thúc bằng dấu phẩy/giới từ) **hoặc dòng trước đã chạy kín ô** (chữ đầu dòng sau không đủ chỗ ở cuối dòng trước): "Proximal Right / Coronary Artery (pRCA)", "Borderline-intermediate / 10-year ASCVD risk (5–20%)".
+- **Mỗi mục một dòng:** cột dạng danh sách (dòng trên còn thừa chỗ vẫn xuống dòng, dòng dưới viết hoa đầu) thì mỗi dòng viết hoa là một mục riêng ("Diabetes / Proteinuria / Hypertension", "Limited urticaria / Cutaneous edema…").
+- **Không gộp ngang qua cột:** khe trống ≥ 3,5 cỡ chữ thẳng mép với ô ở dòng kề là sang cột khác, kể cả khi ô sau viết thường ("descending artery" | "artery (LCx)" bảng 18 đoạn SCCT). Tiêu đề cột gộp nhầm ("Atypical Nonanginal", "Sex Chest pain", 10 cột Bảng 6.1) được tách theo mép trái trùng khít với ô bên dưới.
+- **Cả bảng một cỡ chữ:** mọi ô của một bảng dùng chung cỡ (một ô quá dài không kéo cả bảng xuống quá 20% so với đa số ô). Ô bảng **được dùng hết bề ngang trống của ô** (tới cột bên phải / mép bảng) thay vì chỉ bề ngang dòng gốc, nên chữ to hơn.
+- **Ô giữ đúng hàng:** ô không chảy dồn lên khi thu nhỏ; nếu bản dịch thêm dòng và sát đường kẻ hàng thì dồn lên chỗ trống trong cùng ô, không tràn qua đường kẻ.
+- **Ô chữ ngắn được dịch:** Age/Sex/Women/Men/Mild/Moderate/Severe/Grade/Condition… có từ điển ô cố định (Tuổi, Giới, Nữ, Nam, Nhẹ…). "Mild" trước đây bị nhận nhầm là số La Mã nên không dịch (đã sửa: chỉ nhận số La Mã đúng cú pháp). Ô "Age/Sex" cạnh ô khác không còn bị coi là "ô viết tắt" giữ nguyên.
+- Chỉ số trên (ª, ᵇ) và chú thích chân bảng tách riêng từng dòng.
+- Bảng viết tắt không đường kẻ (≥ 5 ô cùng cột): các ô cùng cột dùng chung cỡ chữ.
+
+### B. Công thức giữ nguyên bản gốc (tr.12)
+Khối là công thức (ký hiệu toán, dấu =, chữ Hy Lạp, phân số dựng bằng ký tự điều khiển…) và các mẩu chữ thuộc công thức (chỉ số dưới, mẫu số) **không dịch, không vẽ lại** → giữ nguyên từng điểm ảnh. Đã quét 16 cuốn sách: chỉ công thức thật bị nhận.
+
+### C. Đoạn dàn đều có khoảng trắng rộng / dãy số (tr.35, 68)
+Dòng căn đều có dãy số ("25–49%, 50–69%, 70–99%") hoặc khoảng trắng giãn rộng không còn bị cắt thành nhiều khối.
+
+### D. Kiểm tra số liệu y khoa (theo góp ý ChatGPT, đã điều chỉnh)
+- Mỗi khối dịch xong được so số / đơn vị / dấu so sánh với bản gốc **theo cụm đại lượng** (dấu + số + đơn vị, ví dụ `≤|0.05|` hay `|5|mg`), không chỉ so tập hợp số.
+- Không báo lỗi giả với cách viết hợp lệ: 0.05 ↔ 0,05; 1,000 ↔ 1.000 ↔ 1 000; ≤ ↔ "nhỏ hơn hoặc bằng", "không quá"; ≥ ↔ "ít nhất", "từ X trở lên"; % ↔ "phần trăm"; mL ↔ ml; "first" ↔ "thứ nhất"…
+- Lệch → **dịch lại đúng 1 lần**. Bản mới chỉ được nhận nếu khớp số liệu; nếu vẫn lệch thì **giữ bản dịch đầu**, ghi lý do ("thiếu 0.05", "đổi ≤ thành <"…) và đưa vào danh sách cần duyệt.
+- Giao diện: dải đỏ "N khối có số liệu / đơn vị / dấu khác bản gốc, cần duyệt" + nút "Xem & sửa" (lọc riêng khối lệch, trạng thái cập nhật khi sửa).
+- Xuất PDF: hỏi xác nhận nếu còn trang chưa dịch, trang còn khối chưa dịch hoặc khối lệch số liệu.
+
+### E. Câu gốc trùng nhau ở nhiều vị trí
+Khi dựng lại trang từ dữ liệu đã lưu, cùng một câu gốc xuất hiện nhiều lần ("No significant abnormality was detected") được ghép **theo thứ tự xuất hiện** (lần 1 ↔ bản dịch 1, lần 2 ↔ bản dịch 2), không dùng chung một bản dịch. Trong một trang, các ô ngắn giống hệt nhau dùng cùng bản dịch (nhất quán). Bộ nhớ dịch (TM) bỏ các bản "dịch" giống hệt gốc và **tự xoá khi bảng thuật ngữ thay đổi**.
+
+### F. Bảo mật và giới hạn
+- **Giới hạn AI bằng Firestore** (`aiUsage/{uid}`): dùng **transaction**, không đọc–cộng–ghi rời rạc. Giới hạn: số lượt/phút, **số yêu cầu đồng thời** (mặc định 6), **token/ngày** (mặc định 5 triệu, có đặt trước theo ước tính rồi trừ lại theo số token thật sau khi gọi). Tranh chấp transaction → thử lại 4 lần rồi từ chối 429. Firestore lỗi/hết hạn mức → chuyển sang bộ đếm trong bộ nhớ, không chặn người dùng. Admin chính không bị giới hạn ngày. Test trên Firestore emulator: 30 yêu cầu đồng thời → đúng 6 qua.
+- HTML từ Markdown: bộ lọc theo **danh sách cho phép** (thẻ, thuộc tính, style an toàn, URL http/https/mailto/tel/ảnh raster) — 24 mẫu XSS bị chặn.
+- Lưu bản dịch giữ định dạng lên cloud: chia thành nhiều phần ≤ 900 KB, **không cắt bỏ cặp câu nào**.
+- Đệm ảnh trong RAM giới hạn 300 MB / 6 file; IndexedDB đầy thì dọn đệm cũ rồi ghi lại.
+- Ngày hết hạn cấp độ không hợp lệ → coi như hết hạn, hiển thị "Ngày hết hạn không hợp lệ".
+
+### G. Việc chủ web cần làm
+1. Deploy `firestore.rules` (thêm `aiUsage`).
+2. (Tuỳ chọn) biến môi trường Vercel: `SYSTEM_AI_RATE_PER_MIN` (120), `SYSTEM_AI_MAX_CONCURRENT` (6), `SYSTEM_AI_DAILY_TOKENS` (5000000).
+3. Redeploy. Trang đã dịch bằng bản cũ: bấm "Dịch lại" để áp dụng cách dựng bảng mới (ENGINE v32).
+
+### H. Góp ý ChatGPT: đã làm / chưa làm
+- **Đã làm:** #16 kiểm tra số liệu (theo 3 điều chỉnh của chị), #5 ngày hết hạn không hợp lệ, #12 giới hạn đệm RAM, #4 lọc HTML, #7 lưu cloud không cắt, #10 xác nhận trước khi xuất, #11 (xuất theo khoảng trang đã có sẵn), #8 xoá TM khi đổi thuật ngữ, #2/#14 giới hạn AI theo Firestore + token.
+- **#9 ghép theo câu gốc:** giữ cách ghép theo nguyên văn câu + ENGINE_VERSION, bổ sung ghép theo thứ tự cho câu trùng (mục E). Đây là trường hợp kiểm thử, không phải lỗi đã xác nhận.
+- **Chưa làm:** #6, #15, #19, #20, #21 — cần thay đổi kiến trúc lớn hoặc ảnh hưởng dữ liệu người dùng hiện có, nên để đợt sau.
+- **Giới hạn của kiểm tra số liệu:** phát hiện được số/đơn vị/dấu bị mất hoặc đổi, nhưng **không** phát hiện được số đúng mà gắn nhầm ngữ cảnh khác (ví dụ đảo độ nhạy ↔ độ đặc hiệu) vì cần hiểu ngữ nghĩa câu.
+
+### I. Bộ hồi quy
+Thêm vào bộ hồi quy: CT tim tr.12, 35, 44, 48, 56, 57, 68, 73, 103, 108 (số trang theo file PDF) và "Chẩn đoán HA vú" tr.25 (bảng viết tắt).
+
+## v10.5 — Danh sách lồng nhiều cấp, ngắt dòng cân bằng, chọn model riêng (gpt-6-luna tuỳ chọn)
+
+### 1. Model dịch: gpt-6-luna là lựa chọn (mặc định giữ gpt-4.1-mini)
+- Thử thật: gpt-6-luna chậm hơn gpt-4.1-mini 2–3 lần cho cùng độ dài bản dịch (8–16 s so với 4–7 s), dù phần lớn lượt gọi đã có 0 token suy nghĩ → **mặc định dịch thường / giữ định dạng giữ gpt-4.1-mini, chuyên sâu giữ gemini-3.1-flash-lite**; gpt-6-luna chọn được trong Cài đặt (ô Model Proxy).
+- Khi chọn gpt-6-luna (hoặc gpt-5.x): gửi `reasoning_effort: "none"` (tắt suy nghĩ; proxy không nhận thì tự lùi "minimal" → "low"), bỏ `temperature`, dùng `max_completion_tokens` — cả ở trình duyệt và `api/ai/chat.ts`. Model tắt suy nghĩ vẫn được chia nhiều phần song song.
+- OCR giữ gemini-3.1-flash-lite.
+
+### 2. Danh sách lồng nhiều cấp (CT tim tr.133)
+- Chỉ số trên ("mm²") không còn làm cắt đôi dòng ("<6 mm²" | "for the left main coronary").
+- Khối đã có ≥ 2 dòng thẳng mép mà dòng sau lùi ra trái = mục cấp trên mới ("…PCI may be deferred." | "<4 mm² for proximal…") → mỗi mục giữ đúng cấp thụt lề, cỡ chữ bình thường. Đã thêm trang này vào bộ hồi quy.
+
+### 3. Trình bày như sách in + chọn model riêng
+- **Ngắt dòng cân bằng cả đoạn** (kiểu Knuth–Plass rút gọn) cho đoạn căn đều: giữ nguyên số dòng nhưng chia đều khoảng trống, hết dòng giãn rộng. Dòng nào vẫn phải giãn quá 4 lần khoảng trắng thường thì để căn trái.
+- Thân bài 2 cột không còn bị giãn sang khe cột (chỉ ô bảng / mục cùng cột mới được dùng chỗ trống bên phải).
+- Nhãn hình căn phải ngắn ("lumen" → "lòng mạch") mà bên trái là nét hình → tràn sang vùng trắng bên phải, giữ cỡ chữ như các nhãn khác.
+- Cài đặt → Cấu hình Proxy Engine: thêm 2 ô chọn model riêng cho **Dịch giữ định dạng** (mặc định gpt-4.1-mini) và **OCR giữ định dạng** (mặc định gemini-3.1-flash-lite). Model có suy nghĩ tự được tắt suy nghĩ; chọn model GPT cho OCR thì có thêm hướng dẫn toạ độ khung chữ.

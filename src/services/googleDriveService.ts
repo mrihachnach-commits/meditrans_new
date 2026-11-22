@@ -1,3 +1,5 @@
+// v10.3: log chẩn đoán chỉ in khi bật meditrans_debug
+import { dlog } from '../utils/dlog';
 /**
  * Google Drive Service
  * Manages Google Drive OAuth tokens, uploading files to Drive, 
@@ -46,7 +48,7 @@ export async function connectGoogleDrive(): Promise<string> {
     let token: string | undefined;
 
     if (activeUser) {
-      console.log(`[GoogleDriveService] Obtaining Drive access token for active user: ${activeUser.email} (UID: ${activeUser.uid})`);
+      dlog(`[GoogleDriveService] Obtaining Drive access token for active user: ${activeUser.email} (UID: ${activeUser.uid})`);
       
       // Try linking Google Provider to current user
       try {
@@ -342,7 +344,7 @@ export async function uploadFileToDrive(
         cachedToken = null;
         sessionStorage.removeItem('google_drive_oauth_token');
         if (retryCount === 0) {
-          console.log('[GoogleDriveService] Token expired, requesting interactive auth...');
+          dlog('[GoogleDriveService] Token expired, requesting interactive auth...');
           const newToken = await getGoogleOAuthToken(true);
           return performUpload(newToken, 1);
         }
@@ -383,7 +385,7 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
   // Step 1: Check Multi-Layer Smart Cache (RAM + IndexedDB)
   const cachedBuffer = await getFileBufferCache(fileId);
   if (cachedBuffer && cachedBuffer.byteLength > 0) {
-    console.log(`[MediTrans AI] Instantaneous load from Multi-Layer Cache for file ${fileId} (<10ms)`);
+    dlog(`[MediTrans AI] Instantaneous load from Multi-Layer Cache for file ${fileId} (<10ms)`);
     return cachedBuffer;
   }
 
@@ -408,13 +410,20 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
   };
 
   const proxyFetch = async (): Promise<ArrayBuffer> => {
+    // v10.3: proxy yêu cầu Firebase ID token (Authorization) + OAuth token Google ở header riêng (X-Google-Token)
+    const idToken = await auth.currentUser?.getIdToken().catch(() => null);
+    if (!idToken) throw new Error('Server streaming proxy: chưa đăng nhập Firebase');
     const proxyUrl = `/api/drive/download?fileId=${encodeURIComponent(fileId)}`;
     const res = await fetch(proxyUrl, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${idToken}`, 'X-Google-Token': token },
       signal: controllerB.signal
     });
     if (!res.ok) {
-      if (res.status === 401) cachedToken = null;
+      // v10.3: chỉ xoá token Google khi máy chủ báo lỗi token Google (không phải lỗi token Firebase)
+      if (res.status === 401) {
+        const body = await res.json().catch(() => null);
+        if (body?.code === 'AUTH_GOOGLE') cachedToken = null;
+      }
       throw new Error(`Server streaming proxy fetch failed with status ${res.status}`);
     }
     const buf = await res.arrayBuffer();
@@ -437,7 +446,7 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
             isDone = true;
             controllerB.abort(); // Cancel loser channel
             const elapsed = Date.now() - startTime;
-            console.log(`[Dual-Channel Racing] Channel A (Google CDN Direct) WON in ${elapsed}ms for file ${fileId}`);
+            dlog(`[Dual-Channel Racing] Channel A (Google CDN Direct) WON in ${elapsed}ms for file ${fileId}`);
             resolve(buf);
           }
         },
@@ -460,7 +469,7 @@ export async function downloadDriveFileAsArrayBuffer(fileId: string): Promise<Ar
             isDone = true;
             controllerA.abort(); // Cancel loser channel
             const elapsed = Date.now() - startTime;
-            console.log(`[Dual-Channel Racing] Channel B (Server Streaming Proxy) WON in ${elapsed}ms for file ${fileId}`);
+            dlog(`[Dual-Channel Racing] Channel B (Server Streaming Proxy) WON in ${elapsed}ms for file ${fileId}`);
             resolve(buf);
           }
         },

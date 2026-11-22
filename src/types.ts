@@ -58,7 +58,9 @@ export function getEffectiveUserLevel(user: Partial<UserProfile> | null | undefi
       expDate = user.levelExpiresAt;
     }
 
-    if (expDate && expDate.getTime() < Date.now()) {
+    // v10.4: ngày hết hạn hỏng (chuỗi sai định dạng, kiểu lạ) → coi như ĐÃ HẾT HẠN (trước đây NaN → giữ cấp VIP vĩnh viễn)
+    if (!expDate || isNaN(expDate.getTime())) return 1;
+    if (expDate.getTime() < Date.now()) {
       return 1; // Expired VIP level reverts to Level 1
     }
   }
@@ -86,7 +88,8 @@ export function formatLevelExpiration(expiresAt: any): { text: string; isExpired
   }
 
   if (!expDate || isNaN(expDate.getTime())) {
-    return { text: 'Vĩnh viễn', isExpired: false, daysLeft: null };
+    // v10.4: có giá trị nhưng không đọc được → báo lỗi, không hiển thị "Vĩnh viễn"
+    return { text: 'Ngày hết hạn không hợp lệ', isExpired: true, daysLeft: 0 };
   }
 
   const diffMs = expDate.getTime() - Date.now();

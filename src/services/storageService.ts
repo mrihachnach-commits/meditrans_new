@@ -1,10 +1,45 @@
+// v10.3: log chẩn đoán chỉ in khi bật meditrans_debug
+import { dlog } from '../utils/dlog';
 const DB_NAME = 'MediTransCacheDB';
 const DB_VERSION = 2;
 
 // Memory RAM Cache for instantaneous re-opening (<1ms)
+// v10.4: có giới hạn (LRU theo dung lượng) — trước đây giữ mọi file đã mở trong RAM đến khi đóng tab
+const RAM_CACHE_MAX_BYTES = 300 * 1024 * 1024;
+const RAM_CACHE_MAX_FILES = 6;
 const fileBufferMemoryCache = new Map<string, ArrayBuffer>();
+function ramCachePut(fileId: string, buf: ArrayBuffer) {
+  fileBufferMemoryCache.delete(fileId); // đưa lên cuối (mới dùng nhất)
+  if (buf.byteLength > RAM_CACHE_MAX_BYTES) return; // file quá lớn: chỉ giữ ở IndexedDB
+  fileBufferMemoryCache.set(fileId, buf);
+  let total = 0;
+  for (const b of fileBufferMemoryCache.values()) total += b.byteLength;
+  for (const [k, b] of fileBufferMemoryCache) {
+    if (total <= RAM_CACHE_MAX_BYTES && fileBufferMemoryCache.size <= RAM_CACHE_MAX_FILES) break;
+    if (k === fileId) continue;
+    fileBufferMemoryCache.delete(k);
+    total -= b.byteLength;
+  }
+}
+
+// v10.3: mở IndexedDB MỘT lần và dùng lại (trước đây mỗi lần đọc/ghi lại mở kết nối mới)
+let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDB(): Promise<IDBDatabase> {
+  if (dbPromise) return dbPromise;
+  dbPromise = openDBOnce().then((db) => {
+    // Kết nối bị đóng (trình duyệt dọn / phiên bản mới) → lần sau mở lại
+    db.onclose = () => { dbPromise = null; };
+    db.onversionchange = () => { try { db.close(); } catch { /* */ } dbPromise = null; };
+    return db;
+  }).catch((e) => {
+    dbPromise = null;
+    throw e;
+  });
+  return dbPromise;
+}
+
+function openDBOnce(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof window === 'undefined' || !window.indexedDB) {
       return reject(new Error('IndexedDB not supported'));
@@ -34,15 +69,40 @@ export async function saveFileBufferCache(fileId: string, buffer: ArrayBuffer): 
   if (!fileId || !buffer || buffer.byteLength === 0) return;
   
   // 1. RAM Memory Cache
-  fileBufferMemoryCache.set(fileId, buffer);
+  ramCachePut(fileId, buffer);
 
   // 2. IndexedDB Persistent Cache
-  try {
+  // v10.4: hết dung lượng trình duyệt → xoá các file đệm cũ rồi thử lại một lần (trước đây lỗi bị nuốt, đệm ngừng hoạt động)
+  const put = async () => {
     const db = await openDB();
-    const tx = db.transaction('fileBuffers', 'readwrite');
-    tx.objectStore('fileBuffers').put(buffer, fileId);
-  } catch (e) {
-    console.warn('[StorageService] Failed to save binary buffer to IndexedDB:', e);
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('fileBuffers', 'readwrite');
+      tx.objectStore('fileBuffers').put(buffer, fileId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  };
+  try {
+    await put();
+  } catch (e: any) {
+    if (e?.name === 'QuotaExceededError' || /quota/i.test(String(e?.message))) {
+      try {
+        const db = await openDB();
+        await new Promise<void>((resolve) => {
+          const tx = db.transaction('fileBuffers', 'readwrite');
+          tx.objectStore('fileBuffers').clear();
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+        await put();
+        console.info('[StorageService] Bộ nhớ trình duyệt đầy: đã xoá đệm file cũ để lưu file hiện tại.');
+      } catch (e2) {
+        console.warn('[StorageService] Bộ nhớ trình duyệt đầy, không lưu được đệm file (file vẫn mở bình thường):', e2);
+      }
+    } else {
+      console.warn('[StorageService] Failed to save binary buffer to IndexedDB:', e);
+    }
   }
 }
 
@@ -55,7 +115,8 @@ export async function getFileBufferCache(fileId: string): Promise<ArrayBuffer | 
   // Layer 1: RAM Cache (Instant 0ms)
   if (fileBufferMemoryCache.has(fileId)) {
     const ramBuf = fileBufferMemoryCache.get(fileId)!;
-    console.log(`[StorageService] RAM Memory Cache hit for file: ${fileId} (0ms)`);
+    ramCachePut(fileId, ramBuf); // đánh dấu mới dùng
+    dlog(`[StorageService] RAM Memory Cache hit for file: ${fileId} (0ms)`);
     return ramBuf.slice(0); // Return a slice to prevent ArrayBuffer detaching issues
   }
 
@@ -68,9 +129,9 @@ export async function getFileBufferCache(fileId: string): Promise<ArrayBuffer | 
     return new Promise((resolve) => {
       req.onsuccess = () => {
         if (req.result) {
-          console.log(`[StorageService] IndexedDB Cache hit for file: ${fileId} (~5ms)`);
+          dlog(`[StorageService] IndexedDB Cache hit for file: ${fileId} (~5ms)`);
           const buf = req.result as ArrayBuffer;
-          fileBufferMemoryCache.set(fileId, buf);
+          ramCachePut(fileId, buf);
           resolve(buf.slice(0));
         } else {
           resolve(null);
@@ -184,9 +245,11 @@ export async function getActiveDocSession(): Promise<ActiveDocSession | null> {
 }
 
 export async function clearActiveDocSession(): Promise<void> {
+  // v10.3: huỷ lần lưu phiên đang chờ TRƯỚC khi await (tránh timer chạy trong lúc chờ và ghi lại phiên vừa xoá)
+  if (sessionSaveTimer) { clearTimeout(sessionSaveTimer); sessionSaveTimer = null; }
+  pendingSession = null;
   try {
     const db = await openDB();
-    if (sessionSaveTimer) { clearTimeout(sessionSaveTimer); sessionSaveTimer = null; pendingSession = null; }
     lastSavedBuffer = null;
     const tx = db.transaction('sessions', 'readwrite');
     tx.objectStore('sessions').delete('activeSession');
@@ -196,8 +259,31 @@ export async function clearActiveDocSession(): Promise<void> {
   }
 }
 
+// v10.3: gộp các lần lưu bản dịch liên tiếp (bản dịch stream cập nhật state rất dày) — ghi sau 1 giây im lặng.
+// Đổi sang tài liệu khác → ghi ngay bản đang chờ của tài liệu cũ (không mất dữ liệu).
+let pendingTranslations: { docKey: string; translations: any } | null = null;
+let translationsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushTranslationsCache(): void {
+  if (translationsSaveTimer) { clearTimeout(translationsSaveTimer); translationsSaveTimer = null; }
+  const p = pendingTranslations;
+  pendingTranslations = null;
+  if (p) void writeTranslationsCache(p.docKey, p.translations);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', flushTranslationsCache);
+}
+
 export async function saveTranslationsCache(docKey: string, translations: any): Promise<void> {
   if (!docKey) return;
+  if (pendingTranslations && pendingTranslations.docKey !== docKey) flushTranslationsCache();
+  pendingTranslations = { docKey, translations };
+  if (translationsSaveTimer) clearTimeout(translationsSaveTimer);
+  translationsSaveTimer = setTimeout(flushTranslationsCache, 1000);
+}
+
+async function writeTranslationsCache(docKey: string, translations: any): Promise<void> {
   try {
     const db = await openDB();
     const tx = db.transaction('translations', 'readwrite');
@@ -209,6 +295,8 @@ export async function saveTranslationsCache(docKey: string, translations: any): 
 
 export async function getTranslationsCache(docKey: string): Promise<any> {
   if (!docKey) return {};
+  // v10.3: bản đang chờ ghi của chính tài liệu này là mới nhất
+  if (pendingTranslations && pendingTranslations.docKey === docKey) return pendingTranslations.translations;
   try {
     const db = await openDB();
     const tx = db.transaction('translations', 'readonly');

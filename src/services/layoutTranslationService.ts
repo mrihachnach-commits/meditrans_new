@@ -3,9 +3,12 @@
  * Kết nối pdf.js ↔ layoutEngine ↔ GeminiService, lưu đệm IndexedDB và xuất PDF dạng ảnh.
  */
 import { isReferenceLine } from '../utils/translateBoost';
-import { glossaryExact } from './medicalGlossary';
+import { glossaryExact, getGlossaryText } from './medicalGlossary';
+import { findColumnChains, joinChainText, splitChainTranslation } from './columnChain';
+import { checkNumeric, describeNumericIssue } from './numericQa';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { OPS } from 'pdfjs-dist';
+import { recordGlyphs, codedTextHook, findHiddenItems, type GlyphCall } from './hiddenText';
 import { PDFDocument } from 'pdf-lib';
 import {
   analyzeColumns,
@@ -17,10 +20,12 @@ import {
   rotatedBlocksFromItems,
   OcrBlock,
   buildBlocks,
+  markFormulaBlocks,
   normalizeItems,
   paintTranslatedPage,
   FontStyleInfo,
   LayoutBlock,
+  findHRules,
   PaintReport,
   RawTextItem,
 } from './layoutEngine';
@@ -201,6 +206,10 @@ export interface LayoutPageResult {
   textLayer?: { x: number; y: number; w: number; s: number; t: string }[];
   createdAt: number;
   pairs?: LayoutPair[]; // dữ liệu bản dịch để lưu đám mây / dựng lại ảnh
+  /** v10.4: số khối đã tự dịch lại vì lệch số liệu và bản mới đã khớp. */
+  numericRetried?: number;
+  /** v10.4: khối có bản dịch lệch số liệu / đơn vị / dấu so với bản gốc (s = câu gốc như trong pairs). */
+  numericIssues?: { s: string; why: string }[];
 }
 
 // v9.4: 2100 px ≈ 270–300 dpi với khổ sách 7–7,7 inch (trước 1700 px ≈ 220 dpi, in kém nét)
@@ -401,7 +410,10 @@ async function rasterizePage(pdfDoc: PDFDocumentProxy, pageNumber: number, signa
       return rotated ? n + (it.str.match(/\p{L}/gu)?.length ?? 0) : n;
     }, 0);
 
-    await renderPage(page, ctx, viewport, signal);
+    // v10.2: ghi lại từng lệnh vẽ ký tự để nhận ra chữ ẩn (bị che, ngoài trang, cùng màu nền)
+    const glyphs: GlyphCall[] = [];
+    const unhook = recordGlyphs(ctx, glyphs);
+    try { await renderPage(page, ctx, viewport, signal); } finally { unhook(); }
     await yieldToUI();
     checkAbort(signal);
 
@@ -437,6 +449,32 @@ async function rasterizePage(pdfDoc: PDFDocumentProxy, pageNumber: number, signa
 
     const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
     let items = normalizeItems(rawItems, viewport.transform, styleResolver(page, textContent.styles));
+    // v10.2: bỏ chữ ẩn (mẫu bìa "Covertemplate", tên biên tập viên của mẫu cũ, chữ ngoài vùng cắt…) — chỉ dịch chữ nhìn thấy
+    if (!scanned && items.length) {
+      let coded: ImageData | null = null;
+      if (figures.length > 0 || ops.vector) {
+        const vc = document.createElement('canvas');
+        vc.width = canvas.width; vc.height = canvas.height;
+        try {
+          const vctx = vc.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
+          vctx.fillStyle = '#ffffff';
+          vctx.fillRect(0, 0, vc.width, vc.height);
+          const un = codedTextHook(vctx, items);
+          try { await renderPage(page, vctx, viewport, signal); } finally { un(); }
+          coded = vctx.getImageData(0, 0, vc.width, vc.height);
+        } catch (e) {
+          if (signal?.aborted) throw e;
+          coded = null;
+        } finally {
+          vc.width = 0; vc.height = 0;
+        }
+        await yieldToUI();
+        checkAbort(signal);
+      }
+      const hidden = findHiddenItems(items, glyphs, canvas.width, canvas.height, coded, clean ?? img);
+      if (hidden.size && hidden.size < items.length) items = items.filter((_, k) => !hidden.has(k));
+      else if (hidden.size === items.length) items = [];
+    }
     // v9.6: chữ xoay 90° trong lớp chữ (tab dọc "MAMMOGRAPHY") → khối riêng, dịch và vẽ lại dọc đúng chỗ
     const rotBlocks = !scanned && rotatedLetters >= 3 ? rotatedBlocksFromItems(rawItems, viewport.transform, styleResolver(page, textContent.styles)) : [];
     // Lớp chữ hỏng bảng mã vẫn cho đúng VỊ TRÍ, CỠ CHỮ, FONT (có chân/không chân, đậm, nghiêng), MÀU
@@ -457,7 +495,10 @@ export async function analyzePage(
     // Hỏi AI số cột (nếu cần) nằm NGOÀI khoá CPU để trang khác vẫn xử lý được trong lúc chờ mạng
     const gutters = r.scanned ? undefined : await resolveGutters(pdfDoc, pageNumber, r.canvas, r.items, advisor, signal);
     checkAbort(signal);
-    const blocks: LayoutBlock[] = r.scanned ? [] : [...buildBlocks(r.items, r.canvas.width, r.canvas.height, gutters), ...r.rotBlocks];
+    // v10.3: đường kẻ ngang (hàng bảng) lấy từ bản vẽ không chữ → không nối dòng vắt qua đường kẻ
+    const rules = !r.scanned && r.clean ? findHRules(r.clean) : [];
+    const blocks: LayoutBlock[] = r.scanned ? [] : [...buildBlocks(r.items, r.canvas.width, r.canvas.height, gutters, rules), ...r.rotBlocks];
+    markFormulaBlocks(blocks); // v10.4: công thức toán giữ nguyên xi bản gốc
     return { ...r, blocks };
   } catch (e) {
     releaseAnalyzed(r);
@@ -651,24 +692,31 @@ async function finishPage(
   ocr?: OcrBlock[],
   extraOcr?: OcrBlock[],
   signal?: AbortSignal,
+  notes?: Record<string, string>,
 ): Promise<LayoutPageResult> {
   try {
     return await withCpu(async () => {
       const { canvas, ctx, blocks, scanned, widthPt, heightPt } = analyzed;
       let report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [] };
+      let numericIssues: { s: string; why: string }[] = [];
       const pairs: LayoutPair[] = [];
       if (ocr?.length) pairs.push({ s: OCR_PAIR_KEY, v: JSON.stringify(slimOcr(ocr)) });
       if (extraOcr?.length) pairs.push({ s: OCR_EXTRA_KEY, v: JSON.stringify(slimOcr(extraOcr)) });
       if (!scanned) {
         report = paintTranslatedPage(ctx, blocks, translations, analyzed.clean, analyzed.img);
+        // v10.4: câu gốc lặp lại ở nhiều vị trí trên trang mà bản dịch KHÁC nhau → lưu đủ từng bản theo thứ tự xuất hiện
+        // (trước đây chỉ lưu bản đầu, mở lại thì mọi vị trí dùng chung bản đầu)
         const seen = new Set<string>();
         for (const b of blocks) {
           const v = translations[b.id];
           const key = normKey(b.text);
-          if (!b.translatable || !v || seen.has(key)) continue;
-          seen.add(key);
+          if (!b.translatable || !v) continue;
+          const pk = key + '\u0000' + normKey(v);
+          if (seen.has(key) && seen.has(pk)) continue;
+          seen.add(key); seen.add(pk);
           pairs.push({ s: key, v: normKey(v) });
         }
+        numericIssues = findNumericIssues(blocks, translations, notes);
       }
       await yieldToUI();
       const blob: Blob = await new Promise((resolve, reject) =>
@@ -692,11 +740,37 @@ async function finishPage(
         createdAt: Date.now(),
         pairs,
         ocr: !!ocr?.length || !!extraOcr?.length,
+        numericIssues: numericIssues.length ? numericIssues : undefined,
+        numericRetried: Object.values(notes || {}).filter(n => /bản mới khớp/.test(n)).length || undefined,
       };
     }, signal);
   } finally {
     releaseAnalyzed(analyzed);
   }
+}
+
+/**
+ * v10.4: khối có bản dịch lệch số liệu so với bản gốc. Đoạn vắt cột được đối chiếu trên cả đoạn (bản dịch được chia lại theo
+ * tỉ lệ nên một con số có thể rơi sang khung bên kia mà vẫn đúng).
+ */
+function findNumericIssues(blocks: LayoutBlock[], translations: Record<string, string>, notes?: Record<string, string>) {
+  const out: { s: string; why: string }[] = [];
+  const done = new Set<string>();
+  const tr = blocks.filter(b => b.translatable && translations[b.id] && translations[b.id] !== b.text);
+  for (const [, chain] of findColumnChains(tr)) {
+    chain.forEach(b => done.add(b.id));
+    const src = chain.map(b => b.text).join(' ');
+    const dst = chain.map(b => translations[b.id]).join(' ');
+    const r = checkNumeric(src, dst);
+    const note = notes?.[chain[0].id];
+    if (r) chain.forEach(b => out.push({ s: normKey(b.text), why: note || describeNumericIssue(r) }));
+  }
+  for (const b of tr) {
+    if (done.has(b.id)) continue;
+    const r = checkNumeric(b.text, translations[b.id]);
+    if (r) out.push({ s: normKey(b.text), why: notes?.[b.id] || describeNumericIssue(r) });
+  }
+  return out;
 }
 
 /**
@@ -737,6 +811,36 @@ const COMMON_EN = new Set(('the and of with for in on to by from or not see also
   'management follow up note notes key points general principles clinical differential lesion lesions mass masses ' +
   'cyst cysts tumor tumors cancer disease diseases signs sign symptoms pathology physiology development').split(' '));
 
+/**
+ * v10.4: ô bảng / nhãn 1–3 từ rất hay gặp → dịch trên máy, THỐNG NHẤT trong cả sách (trước đây ô "Age", "Sex", "Mild" AI để
+ * nguyên tiếng Anh, còn "Women/Men" lúc "Nữ/Nam" lúc "Phụ nữ/Đàn ông" giữa các bảng cùng trang). Chỉ khớp NGUYÊN Ô.
+ * Bảng thuật ngữ của người dùng (Cài đặt) vẫn được ưu tiên trước.
+ */
+const CELL_VI: Record<string, string> = {
+  'age': 'Tuổi', 'age (years)': 'Tuổi (năm)', 'sex': 'Giới', 'gender': 'Giới', 'women': 'Nữ', 'men': 'Nam', 'female': 'Nữ',
+  'male': 'Nam', 'females': 'Nữ', 'males': 'Nam', 'mild': 'Nhẹ', 'moderate': 'Trung bình', 'severe': 'Nặng',
+  'low': 'Thấp', 'high': 'Cao', 'very low': 'Rất thấp', 'very high': 'Rất cao', 'intermediate': 'Trung gian',
+  'yes': 'Có', 'no': 'Không', 'none': 'Không', 'total': 'Tổng', 'mean': 'Trung bình', 'median': 'Trung vị',
+  'range': 'Khoảng', 'normal': 'Bình thường', 'abnormal': 'Bất thường', 'grade': 'Mức độ', 'condition': 'Tình trạng',
+  'medication': 'Thuốc', 'dose': 'Liều', 'typical dose': 'Liều điển hình', 'typical range': 'Khoảng thường gặp',
+  'positive': 'Dương tính', 'negative': 'Âm tính', 'present': 'Có', 'absent': 'Không có', 'unknown': 'Không rõ',
+  'other': 'Khác', 'others': 'Khác', 'not required': 'Không cần', 'children': 'Trẻ em', 'adults': 'Người lớn',
+  'sensitivity': 'Độ nhạy', 'specificity': 'Độ đặc hiệu', 'value': 'Giá trị', 'parameter': 'Thông số',
+  'parameters': 'Thông số', 'result': 'Kết quả', 'results': 'Kết quả', 'description': 'Mô tả', 'score': 'Điểm',
+  'points': 'Điểm', 'category': 'Phân loại', 'risk': 'Nguy cơ', 'dyspnea': 'Khó thở', 'chest pain': 'Đau ngực',
+  'typical angina': 'Đau thắt ngực điển hình', 'atypical angina': 'Đau thắt ngực không điển hình',
+  'atypical': 'Không điển hình', 'nonanginal': 'Không do thắt ngực', 'nonanginal pain': 'Đau ngực không do thắt ngực',
+  'hypersensitivity': 'Quá mẫn', 'chemo-toxic': 'Độc hóa học', 'chemotoxic': 'Độc hóa học',
+};
+export function localCell(text: string): string | undefined {
+  const t = text.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim();
+  if (t.length > 30) return undefined;
+  const v = CELL_VI[t.toLowerCase()];
+  if (!v) return undefined;
+  const L = t.match(/\p{L}/gu) || [];
+  return L.length >= 2 && L.every(ch => ch === ch.toUpperCase()) ? v.toUpperCase() : v;
+}
+
 /** Bản dịch trùng nguyên văn câu gốc tiếng Anh (AI bỏ quên) — không tính tên riêng, số, tài liệu tham khảo. */
 function isUntranslated(src: string, v: string): boolean {
   const plain = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -752,32 +856,88 @@ function isUntranslated(src: string, v: string): boolean {
 }
 
 /**
+ * v10.4: đối chiếu số liệu / đơn vị / dấu. Khối lệch được dịch lại ĐÚNG MỘT lần; bản mới chỉ được nhận khi khớp hoàn toàn,
+ * còn không thì GIỮ bản dịch đầu và ghi lý do để người dùng duyệt (không vòng lặp, không tự sửa số).
+ */
+async function numericRetry(
+  translator: LayoutBlockTranslator, blocks: LayoutBlock[], out: Record<string, string>,
+  plan: { chars: number; blocks: number }, signal?: AbortSignal, notes?: Record<string, string>,
+) {
+  const numBad = blocks.filter(b => b.translatable && out[b.id] && checkNumeric(b.text, out[b.id]));
+  if (!numBad.length) return;
+  try {
+    const again = await Promise.all(chunkBlocks(numBad, plan.blocks, plan.chars).map(chunk =>
+      translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal)));
+    const fresh: Record<string, string> = Object.assign({}, ...again);
+    for (const b of numBad) {
+      const first = checkNumeric(b.text, out[b.id])!;
+      const v2 = fresh[b.id];
+      if (v2 && !isUntranslated(b.text, v2) && !checkNumeric(b.text, v2)) {
+        if (notes) notes[b.id] = `Đã dịch lại 1 lần do ${describeNumericIssue(first).replace(/^Bản dịch /, 'bản đầu ')}; bản mới khớp số liệu.`;
+        out[b.id] = v2;
+      } else if (notes) {
+        notes[b.id] = `${describeNumericIssue(first)}. Đã dịch lại 1 lần nhưng vẫn lệch → giữ bản dịch đầu, cần duyệt.`;
+      }
+    }
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    console.warn('[Layout] Dịch lại khối lệch số liệu thất bại:', e);
+  }
+}
+
+/**
  * Dịch danh sách khối: các phần (chunk) của một trang gửi SONG SONG; khối AI bỏ sót được dịch bù một lần
  * (trước đây khối bị sót giữ nguyên tiếng Anh).
  */
 async function translateBlocks(
-  translator: LayoutBlockTranslator, blocks: LayoutBlock[], signal?: AbortSignal,
+  translator: LayoutBlockTranslator, blocks: LayoutBlock[], signal?: AbortSignal, notes?: Record<string, string>,
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   if (!blocks.length) return out;
   // Tiêu đề mục thông dụng (References, Conclusions…) dịch ngay trên máy, không gửi AI
   const local: Record<string, string> = {};
   let inRefs = false;
+  const refZone = referenceZone(blocks);
+  const indexPage = isIndexPage(blocks);
   for (const b of blocks) {
     const h = localHeading(b.text);
     if (h) { local[b.id] = h; inRefs = /tham khảo|đọc thêm/i.test(h); continue; }
+    if (indexPage) { local[b.id] = b.text; continue; }
     // v9.4: mục TÀI LIỆU THAM KHẢO giữ nguyên bản gốc (chuẩn trích dẫn) — không gửi AI, không dịch nửa vời
-    if (isReferenceBlock(b.plain, inRefs)) { local[b.id] = b.text; continue; }
+    if (isReferenceBlock(b.plain, inRefs) || refZone.has(b.id)) { local[b.id] = b.text; continue; }
     // v9.4: bộ nhớ dịch — chuỗi lặp lại (tiêu đề đầu trang, tên sách, tên mục) dùng lại đúng bản dịch đã có
     const tm = tmGet(b.text);
     if (tm) { local[b.id] = tm; continue; }
     // v9.6: khối chỉ là một thuật ngữ trong bảng ("MAMMOGRAPHY" ở tab dọc) → dịch trên máy theo bảng thuật ngữ
-    const g = glossaryExact(b.text);
+    const g = glossaryExact(b.text) ?? localCell(b.text);
     if (g) local[b.id] = g;
   }
   blocks = blocks.filter(b => !local[b.id]);
   if (!blocks.length) return local;
   Object.assign(out, local);
+  // v10.3: đoạn vắt cột (cuối cột trái → đầu cột phải) dịch thành MỘT câu liền, rồi chia lại cho từng khung
+  const chains = findColumnChains(blocks);
+  const chainInfo = new Map<string, { chain: LayoutBlock[]; offsets: number[] }>();
+  if (chains.size) {
+    const member = new Set<string>();
+    for (const [, c] of chains) c.slice(1).forEach(b => member.add(b.id));
+    blocks = blocks.filter(b => !member.has(b.id)).map(b => {
+      const c = chains.get(b.id);
+      if (!c) return b;
+      const j = joinChainText(c);
+      chainInfo.set(b.id, { chain: c, offsets: j.offsets });
+      return { ...b, text: j.text, plain: j.text.replace(/<\/?\d+>/g, ''), lineCount: c.reduce((n, x) => n + x.lineCount, 0) };
+    });
+  }
+  const splitChains = () => {
+    for (const [id, ci] of chainInfo) {
+      const v = out[id];
+      if (!v) continue;
+      const parts = splitChainTranslation(v, ci.chain, ci.offsets);
+      if (parts.some(p => !p.trim())) continue; // bản dịch quá ngắn để chia → giữ nguyên cả đoạn ở khung đầu
+      ci.chain.forEach((b, k) => { out[b.id] = parts[k]; });
+    }
+  };
   // Phần ~3500 ký tự (ít lặp hướng dẫn hệ thống → ít token) gửi song song tối đa 3 phần: thời gian chờ AI ≈ phần dài nhất thay vì cả trang
   // (AI viết ra càng dài càng lâu; một trang chữ dày gửi một lần mất 20–40 giây)
   // v8.4: model nhanh không "suy nghĩ" (gpt-4.1-mini) → phần nhỏ hơn, 4 phần song song (≈ nhanh gấp đôi mỗi trang)
@@ -819,11 +979,24 @@ async function translateBlocks(
       console.warn('[Layout] Dịch bù khối bị sót thất bại:', e);
     }
   }
+  await numericRetry(translator, blocks, out, plan, signal, notes);
   // Không dịch được khối nào → báo lỗi thật (trước đây trang vẫn được lưu như "đã dịch" nhưng toàn chữ gốc)
   if (Object.keys(out).length === Object.keys(local).length) throw lastError || new Error('AI không trả về bản dịch nào cho trang này.');
   // Ghi nhớ bản dịch của các chuỗi ngắn (tiêu đề, đầu trang) để các trang sau dùng lại y hệt
-  for (const b of blocks) { const v = out[b.id]; if (v && !isUntranslated(b.text, v)) tmPut(b, v); }
+  // v10.4: cùng một ô / nhãn ngắn xuất hiện nhiều lần trên trang (các bảng "Women/Men") → dùng MỘT bản dịch
+  {
+    const first = new Map<string, string>();
+    for (const b of blocks) {
+      const v = out[b.id];
+      if (!v || chainInfo.has(b.id) || !tmEligible(b) || b.text.split(/\s+/).length > 6) continue;
+      const k = tmNorm(b.text);
+      const f = first.get(k);
+      if (f === undefined) first.set(k, v); else out[b.id] = f;
+    }
+  }
+  for (const b of blocks) { const v = out[b.id]; if (v && !chainInfo.has(b.id) && !isUntranslated(b.text, v) && tmNorm(v) !== tmNorm(b.text)) tmPut(b, v); }
   tmSave();
+  splitChains();
   return out;
 }
 
@@ -908,14 +1081,76 @@ export function isReferenceBlock(plain: string, afterRefHeading: boolean): boole
   return /\b(19|20)\d{2}[a-z]?\b/.test(t) && /^(\[?\d{1,3}[.)\]]?\s+)?[A-ZÀ-Ý][\p{L}'’-]+,?\s+[A-Z]/u.test(t);
 }
 
+/**
+ * v10.2: VÙNG tài liệu tham khảo của trang (không phụ thuộc thứ tự đọc): khi trang có ≥ 3 mục trích dẫn chắc chắn,
+ * mọi khối cùng cỡ chữ, thẳng mép trái với các mục đó và có dấu hiệu trích dẫn (năm, DOI, link, "et al", "ed.")
+ * cũng là mục tham khảo — trước đây chỉ mục có "Tác giả + năm" được giữ, mục là tên tổ chức / tài liệu
+ * ("I numeri del cancro…", "Principles of Epidemiology…, CDC") bị dịch → danh mục nửa dịch nửa không.
+ */
+/**
+ * v10.3: trang CHỈ MỤC (Index) — ≥ 60% khối là mục "thuật ngữ, 12, 45–47". Bố cục giữ nguyên nên số trang vẫn đúng;
+ * dịch chỉ mục làm mục dài ra, xuống dòng lệch, chồng dòng (Chest tr.317, Clark tr.383) và tốn token vô ích
+ * → giữ nguyên chữ gốc như tài liệu tham khảo (chỉ dịch tiêu đề "Index").
+ */
+export function isIndexPage(blocks: LayoutBlock[]): boolean {
+  const t = blocks.filter(b => b.translatable && !b.rotate && !b.fromOcr);
+  if (t.length < 12) return false;
+  // "thuật ngữ, 12", "pneumonia, 56–57, 60" (chữ ngay trước dấu phẩy — ô bảng số "BMI ≤ 25, 100" không tính)
+  const entry = (b: LayoutBlock) => !b.leader && b.lineCount <= 4 &&
+    /[\p{L})\]’'],\s*\d{1,4}(?:\s*[–-]\s*\d{1,4})?(?:\s*,\s*\d{1,4}(?:\s*[–-]\s*\d{1,4})?)*\s*[,.]?\s*$/u.test(b.plain.trim());
+  const sub = (b: LayoutBlock) => b.lineCount <= 2 && b.plain.trim().length <= 60; // mục con / dòng gãy của mục
+  const n = t.filter(entry).length;
+  if (n >= 0.45 * t.length && t.filter(b => entry(b) || sub(b)).length >= 0.8 * t.length) return true;
+  // các mục chỉ mục bị gom thành khối nhiều dòng (sách Chẩn đoán hình ảnh vú) → dựa vào mật độ "thuật ngữ, 123"
+  const all = t.map(b => b.plain).join(' ');
+  const refs = (all.match(/[\p{L})\]’'],\s*\d{1,4}\b/gu) || []).length;
+  const words = all.split(/\s+/).length;
+  return refs >= 20 && refs >= 0.08 * words;
+}
+
+export function referenceZone(blocks: LayoutBlock[]): Set<string> {
+  const out = new Set<string>();
+  const strong = blocks.filter(b => b.lineCount >= 1 && isReferenceBlock(b.plain, true) && /\p{L}{3}/u.test(b.plain));
+  if (strong.length < 3) return out;
+  const cue = /\b(19|20)\d{2}[a-z]?\b|\bdoi\b|https?:\/\/|www\.|\bet al\b|\b\d+(st|nd|rd|th) ed\b|\bed\.|\bisbn\b|\b\d+\s*\(\d+\)\s*:/i;
+  for (const b of blocks) {
+    if (b.bold && !strong.includes(b)) continue;
+    const peers = strong.filter(r => r !== b && Math.abs(r.size - b.size) < 0.06 * r.size && Math.abs(r.x0 - b.x0) < 1.2 * r.size);
+    const peerCount = strong.includes(b) ? peers.length + 1 : peers.length;
+    if (peerCount >= 2 && cue.test(b.plain)) out.add(b.id);
+  }
+  return out;
+}
+
 const TM_KEY = 'mediTrans_layoutTM';
 const TM_MAX = 4000;
 let tm: Map<string, string> | null = null;
 let tmDirty = false;
 const tmNorm = (t: string) => t.replace(/\s+/g, ' ').trim();
+// v10.4: bộ nhớ dịch gắn với phiên bản bảng thuật ngữ — người dùng sửa thuật ngữ trong Cài đặt thì bản dịch đã nhớ (có thể
+// theo thuật ngữ cũ) hết hiệu lực, các trang sau dịch lại theo thuật ngữ mới.
+const TM_VER_KEY = 'mediTrans_layoutTM_glossary';
+let glossaryFpCache: { text: string; fp: string } | null = null;
+function glossaryFingerprint(): string {
+  const text = getGlossaryText();
+  if (glossaryFpCache?.text === text) return glossaryFpCache.fp;
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
+  const fp = (h >>> 0).toString(36) + ':' + text.length;
+  glossaryFpCache = { text, fp };
+  return fp;
+}
+let tmFp: string | null = null;
 function tmLoad(): Map<string, string> {
-  if (tm) return tm;
+  const fp = glossaryFingerprint();
+  if (tm && tmFp === fp) return tm;
+  try {
+    const stored = localStorage.getItem(TM_VER_KEY);
+    if (stored !== null && stored !== fp) { localStorage.removeItem(TM_KEY); }
+    if (stored !== fp) localStorage.setItem(TM_VER_KEY, fp);
+  } catch { /* */ }
   try { tm = new Map(JSON.parse(localStorage.getItem(TM_KEY) || '[]')); } catch { tm = new Map(); }
+  tmFp = fp;
   return tm!;
 }
 /** Chuỗi được ghi nhớ: ngắn (≤ 160 ký tự, ≤ 2 dòng), có chữ cái, không phải câu dài. */
@@ -926,7 +1161,9 @@ function tmEligible(b: LayoutBlock): boolean {
 function tmGet(text: string): string | undefined {
   const t = tmNorm(text);
   if (t.length > 160) return undefined;
-  return tmLoad().get(t);
+  const v = tmLoad().get(t);
+  // v10.4: bản ghi cũ lưu nguyên văn tiếng Anh ("Age" → "Age") → bỏ qua để dịch lại
+  return v !== undefined && tmNorm(v) === t && /\p{L}{2}/u.test(t) ? undefined : v;
 }
 function tmPut(b: LayoutBlock, v: string) {
   if (!tmEligible(b)) return;
@@ -999,15 +1236,19 @@ export async function translatePageWithLayout(
       const missing: LayoutBlock[] = [];
       for (const b of analyzed.blocks) {
         const v = ocrTranslation(ocr, b);
-        const g = glossaryExact(b.plain);
+        const g = glossaryExact(b.plain) ?? localCell(b.plain);
         // AI để nguyên tiếng Anh (thường gặp với chữ IN HOA / chữ dọc như "MAMMOGRAPHY") → bảng thuật ngữ hoặc dịch bù
         if (g && (!v || normKey(v).toLowerCase() === normKey(b.plain).toLowerCase())) translations[b.id] = g;
         else if (v && !(b.translatable && isUntranslated(b.text, v))) translations[b.id] = v;
         else if (b.translatable) missing.push(b);
       }
-      Object.assign(translations, await translateBlocks(translator, missing, signal)); // khối AI quên dịch → dịch bù
+      const notes: Record<string, string> = {};
+      Object.assign(translations, await translateBlocks(translator, missing, signal, notes)); // khối AI quên dịch → dịch bù
+      // v10.4: bản dịch OCR lệch số liệu → dịch lại theo chữ đã đọc (1 lần)
+      const plan = (translator as any).layoutChunkPlan?.() || { chars: 3500, blocks: 40, parallel: 3 };
+      await numericRetry(translator, analyzed.blocks.filter(b => !missing.includes(b)), translations, plan, signal, notes);
       checkAbort(signal);
-      return await finishPage(analyzed, pageNumber, translations, ocr, undefined, signal);
+      return await finishPage(analyzed, pageNumber, translations, ocr, undefined, signal, notes);
     }
 
     // Trang có lớp chữ nhưng có ẢNH (chữ trong hình) hoặc CHỮ XOAY → OCR bổ sung riêng các vùng đó.
@@ -1025,7 +1266,8 @@ export async function translatePageWithLayout(
       })
       : Promise.resolve([]);
     const textTargets = analyzed.scanned ? [] : analyzed.blocks.filter(b => b.translatable);
-    const [textTr, extra] = await Promise.all([translateBlocks(translator, textTargets, signal), extraPromise]);
+    const notes: Record<string, string> = {};
+    const [textTr, extra] = await Promise.all([translateBlocks(translator, textTargets, signal, notes), extraPromise]);
     checkAbort(signal);
 
     const translations: Record<string, string> = { ...textTr };
@@ -1043,7 +1285,7 @@ export async function translatePageWithLayout(
         for (const b of analyzed.blocks) if (b.fromOcr) { const v = ocrTranslation(wanted, b); if (v) translations[b.id] = v; }
       }
     }
-    return await finishPage(analyzed, pageNumber, translations, undefined, extraKept, signal);
+    return await finishPage(analyzed, pageNumber, translations, undefined, extraKept, signal, notes);
   } catch (e) {
     releaseAnalyzed(analyzed);
     throw e;
@@ -1060,7 +1302,7 @@ export async function renderPageFromPairs(
   pairs: LayoutPair[],
   translator?: LayoutBlockTranslator,
   signal?: AbortSignal,
-): Promise<LayoutPageResult & { retranslated?: number }> {
+): Promise<LayoutPageResult & { retranslated?: number; composed?: number; untranslated?: number }> {
   await ensureLayoutFonts();
   let analyzed = await analyzePage(pdfDoc, pageNumber, translator, signal);
   try {
@@ -1087,29 +1329,70 @@ export async function renderPageFromPairs(
     let extraOcr = parseOcr(OCR_EXTRA_KEY);
     if (ocr) analyzed = applyOcr(analyzed, ocr);
     else if (extraOcr) { const r = addExtraOcr(analyzed, extraOcr); analyzed = r.analyzed; extraOcr = r.kept; }
-    const lookup = new Map(pairs.filter(p => !isOcrKey(p.s)).map(p => [normKey(p.s), p.v]));
+    // v10.4: một câu gốc có thể có nhiều bản dịch (câu lặp ở nhiều vị trí, mỗi chỗ dịch theo ngữ cảnh) → lần xuất hiện thứ k
+    // dùng bản thứ k; hết thì dùng bản cuối. Bản lưu cũ chỉ có một bản → mọi vị trí dùng bản đó như trước.
+    const byKey = new Map<string, string[]>();
+    for (const p of pairs) {
+      if (isOcrKey(p.s)) continue;
+      const k = normKey(p.s);
+      const arr = byKey.get(k);
+      if (arr) arr.push(p.v); else byKey.set(k, [p.v]);
+    }
+    const used = new Map<string, number>();
+    const lookup = {
+      get(k: string): string | undefined {
+        const arr = byKey.get(k);
+        if (!arr) return undefined;
+        const i = used.get(k) || 0;
+        used.set(k, i + 1);
+        return arr[Math.min(i, arr.length - 1)];
+      },
+    };
     // Bản lưu trước khi nhận diện chữ hoa đầu đoạn: câu gốc thiếu chữ cái đầu ("he ACR…") → vẫn ghép được
     const lookupLoose = (b: LayoutBlock) => {
       if (!b.dropCap) return undefined;
       const tail = normKey(b.text).replace(/^\p{L}\s?/u, '');
       return lookup.get(tail);
     };
+    // v10.2: bộ máy mới GỘP các mẩu cũ thành một đoạn (đoạn có cụm in đậm, chú thích hình) → ghép lại từ bản dịch đã lưu
+    // của các mẩu đó theo đúng thứ tự, KHÔNG gọi AI dịch lại (trước đây xuất PDF / mở lại trang sau khi cập nhật bị tốn token)
+    const plainOf = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim();
+    const pieces = pairs.filter(p => !isOcrKey(p.s) && p.v).map(p => ({ src: plainOf(p.s).replace(/[-‐]$/, ''), v: plainOf(p.v) })).filter(p => p.src.length >= 2);
+    const compose = (b: LayoutBlock): string | undefined => {
+      const target = plainOf(b.plain || b.text);
+      if (target.length < 20) return undefined;
+      const hits: { at: number; len: number; v: string }[] = [];
+      for (const p of pieces) {
+        if (p.src.length >= target.length) continue;
+        const at = target.indexOf(p.src);
+        if (at >= 0 && !hits.some(h => at < h.at + h.len && h.at < at + p.src.length)) hits.push({ at, len: p.src.length, v: p.v });
+      }
+      if (hits.length < 2) return undefined;
+      const covered = hits.reduce((n, h) => n + h.len, 0);
+      if (covered < 0.9 * target.replace(/\s/g, '').length) return undefined;
+      return hits.sort((a, c) => a.at - c.at).map(h => h.v).join(' ');
+    };
     const translations: Record<string, string> = {};
     const missing: LayoutBlock[] = [];
+    let composed = 0;
+    const indexPage = !analyzed.scanned && isIndexPage(analyzed.blocks);
     for (const b of analyzed.blocks) {
+      if (indexPage && b.translatable && !localHeading(b.text)) { translations[b.id] = b.text; continue; } // v10.3: chỉ mục giữ bản gốc
       // Bản lưu cũ (trước khi có thẻ màu) được ghép theo câu gốc không thẻ
       let v = lookup.get(normKey(b.text)) ?? lookup.get(normKey(b.plain)) ?? lookupLoose(b);
+      if (!v && b.translatable) { v = compose(b); if (v) composed++; }
       // Bản lưu cũ để nguyên tiêu đề "References"… → dịch trên máy (không tốn token)
-      const h = localHeading(b.text) ?? glossaryExact(b.text);
+      const h = localHeading(b.text) ?? glossaryExact(b.text) ?? localCell(b.text);
       if (h && (!v || isUntranslated(b.text, v) || normKey(v).toLowerCase() === normKey(b.plain).toLowerCase())) v = h;
       if (v) translations[b.id] = v;
       else if (b.translatable) missing.push(b);
     }
     // Bản lưu cũ được tạo khi bộ máy còn tách khối khác → các khối mới không khớp: chỉ dịch bù những khối này
     let retranslated = 0;
+    const notes: Record<string, string> = {};
     if (translator && missing.length && !analyzed.scanned) {
       try {
-        Object.assign(translations, await translateBlocks(translator, missing, signal));
+        Object.assign(translations, await translateBlocks(translator, missing, signal, notes));
         retranslated = missing.length;
       } catch (e) {
         if (signal?.aborted) throw e;
@@ -1117,8 +1400,8 @@ export async function renderPageFromPairs(
       }
     }
     checkAbort(signal);
-    const res = await finishPage(analyzed, pageNumber, translations, ocr, ocr ? undefined : extraOcr, signal);
-    return { ...res, retranslated };
+    const res = await finishPage(analyzed, pageNumber, translations, ocr, ocr ? undefined : extraOcr, signal, notes);
+    return { ...res, retranslated, composed, untranslated: translator ? 0 : missing.length };
   } catch (e) {
     releaseAnalyzed(analyzed);
     throw e;
@@ -1302,7 +1585,7 @@ function openLayoutDBOnce(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v29'; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
+const ENGINE_VERSION = 'v33'; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch

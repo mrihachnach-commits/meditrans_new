@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { dlog } from './utils/dlog';
 import React, { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import * as pdfjs from 'pdfjs-dist';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
@@ -29,6 +30,30 @@ const PDFJS_WORKER_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_
 const PDFJS_CMAP_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/cmaps/`;
 
 pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+
+// v10.3: tuỳ chọn chung cho MỌI pdfjs.getDocument — tắt eval (CVE-2024-4367 của pdf.js 3.11.174: PDF độc có thể chạy mã qua font)
+const PDFJS_SAFE_OPTIONS = { isEvalSupported: false } as const;
+
+// v10.3: admin chính — UID cố định, hoặc email chính NHƯNG chỉ khi email đã xác minh
+// (đăng ký email/mật khẩu bằng email của người khác không còn được coi là admin)
+const PRIMARY_ADMIN_UID = "4cFbfQhPMpgStJXZ9EpAVcd90i33";
+const PRIMARY_ADMIN_EMAILS = ["hoanghiep1296@gmail.com", "mrihachnach@gmail.com"];
+const isPrimaryAdminUser = (u: { uid?: string; email?: string | null; emailVerified?: boolean } | null | undefined): boolean => {
+  if (!u) return false;
+  if (u.uid === PRIMARY_ADMIN_UID) return true;
+  return !!u.emailVerified && PRIMARY_ADMIN_EMAILS.includes((u.email || '').toLowerCase());
+};
+
+// v10.3: chỉ cho phép tải PDF qua URL https của Google Drive / Firebase Storage (downloadUrl lưu trong Firestore)
+const isSafeDownloadUrl = (url: string): boolean => {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'https:') return false;
+    return ['drive.google.com', 'docs.google.com', 'firebasestorage.googleapis.com', 'storage.googleapis.com'].includes(u.hostname);
+  } catch {
+    return false;
+  }
+};
 
 import { 
   Upload, 
@@ -97,6 +122,10 @@ import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+// v10.3: gửi email xác minh sau khi đăng ký
+import { sendEmailVerification } from 'firebase/auth';
+// v10.3: làm sạch HTML sau rehype-raw (chặn script/iframe/on*/javascript:)
+import rehypeSafeHtml from './utils/rehypeSafeHtml';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 import { saveAs } from 'file-saver';
 import { clsx, type ClassValue } from 'clsx';
@@ -312,7 +341,7 @@ const TranslationMarkdown = memo(({ content, page, isStreaming, onCancel, fontSi
       className="markdown-body select-text pb-60 md:pb-0"
       style={fontStyle}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSafeHtml]}>
         {processedContent}
       </ReactMarkdown>
 
@@ -357,6 +386,8 @@ export default function App() {
   const currentPageRef = useRef<number>(1);
   const [activeTranslation, setActiveTranslation] = useState<{page: number, content: string, status: string} | null>(null);
   const translatingPagesRef = useRef<Set<number>>(new Set());
+  // v10.3: trang dịch lỗi trong chế độ tự dịch/dịch trước → không tự thử lại liên tục (bấm Dịch thủ công để thử lại)
+  const autoFailedPagesRef = useRef<Set<number>>(new Set());
   const abortControllerRef = useRef<AbortController | null>(null);
   const bulkAbortControllerRef = useRef<AbortController | null>(null);
   const fileIdRef = useRef<number>(1);
@@ -367,7 +398,10 @@ export default function App() {
 
   // Lưu bản dịch 1 trang lên Firestore: bỏ qua khi nội dung y hệt lần trước, im lặng khi hết hạn mức ghi miễn phí
   // (bản dịch vẫn nằm trong đệm IndexedDB trên máy)
+  // v10.3: chỉ chủ tài liệu (hoặc admin) mới ghi được — người xem tài liệu được chia sẻ trước đây bị permission-denied mỗi trang
+  const userRoleRef = useRef<'admin' | 'user' | null>(null);
   const savePageToCloud = useCallback((ownerId: string, docId: string, page: number, content: string) => {
+    if (auth.currentUser?.uid !== ownerId && userRoleRef.current !== 'admin') return;
     guardedWrite(
       () => setDoc(doc(db, 'users', ownerId, 'documents', docId, 'pages', page.toString()), {
         content, status: 'success', updatedAt: serverTimestamp()
@@ -688,7 +722,10 @@ export default function App() {
   // Tab "Giữ định dạng" được giữ mounted sau lần mở đầu để việc dịch nhiều trang không bị huỷ khi chuyển tab
   const [layoutPanelMounted, setLayoutPanelMounted] = useState(false);
   const [layoutToolbarEl, setLayoutToolbarEl] = useState<HTMLDivElement | null>(null);
-  const [layoutBulkRequest, setLayoutBulkRequest] = useState<{ id: number; pages: number[] } | null>(null);
+  // v10.3: khoá tài liệu của bảng "Giữ định dạng" (dùng chung cho key, docKey và yêu cầu dịch toàn bộ)
+  const layoutDocKey = `${fileId || `${currentFileName || 'local'}::${String((pdfDoc as any)?.fingerprints?.[0] || '').slice(0, 16)}`}::${numPages}`;
+  // v10.3: yêu cầu kèm docKey → bảng bỏ qua yêu cầu của tài liệu khác (trước đây yêu cầu cũ tự chạy trên PDF mở sau)
+  const [layoutBulkRequest, setLayoutBulkRequest] = useState<{ id: number; pages: number[]; docKey?: string } | null>(null);
   const [layoutBulkState, setLayoutBulkState] = useState<{ running: boolean; done: number; total: number }>({ running: false, done: 0, total: 0 });
   // Dịch thường ưu tiên lớp chữ (không gửi ảnh) khi trang có chữ thật và không có bảng
   const [textFirst, setTextFirst] = useState<boolean>(() => localStorage.getItem('mediTrans_textFirst') !== 'false');
@@ -710,14 +747,27 @@ export default function App() {
   // Initialize summary range when numPages changes
   useEffect(() => {
     if (numPages > 0) {
-      setSummaryRange(prev => ({ ...prev, to: Math.min(numPages, prev.from + 4) }));
+      // v10.3: kẹp from ≤ to ≤ numPages sau khi đổi tài liệu (tài liệu mới ngắn hơn tài liệu cũ)
+      setSummaryRange(prev => {
+        const from = Math.min(Math.max(1, prev.from), numPages);
+        return { from, to: Math.min(numPages, from + 4) };
+      });
     }
   }, [numPages]);
 
-  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  // v10.3: showToast ổn định (useCallback) + giữ timeout trong ref, xoá timeout cũ trước khi hiện toast mới
+  // (trước đây toast mới bị toast cũ tắt sớm); toast dài hiện lâu hơn
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
-  };
+    const duration = Math.min(9000, Math.max(3000, message.length * 45));
+    toastTimerRef.current = setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, duration);
+  }, []);
+  useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
 
   // Test Firebase connection
   useEffect(() => {
@@ -769,7 +819,64 @@ export default function App() {
     return path.join(' / ');
   };
 
+  /**
+   * v10.3: dọn dẹp chung MỌI lần đổi tài liệu (mở file cục bộ / từ Explorer / từ Drive / đóng file):
+   *  - tăng thế hệ tài liệu (fileIdRef) để kết quả dịch muộn của tài liệu cũ bị bỏ qua,
+   *  - huỷ dịch trang hiện tại, dịch trước VÀ dịch toàn bộ (trước đây dịch toàn bộ vẫn chạy và ghi vào tài liệu mới),
+   *  - xoá yêu cầu dịch giữ định dạng toàn bộ đang chờ (trước đây tự chạy trên PDF mở sau),
+   *  - xoá bản dịch đang hiển thị NGAY (cùng lượt render với đổi fileId → không lưu nhầm bản dịch cũ vào khoá mới).
+   * Trả về số thế hệ mới để các bước bất đồng bộ phía sau kiểm tra.
+   */
+  const beginFileSwitch = (): number => {
+    fileIdRef.current += 1;
+    const gen = fileIdRef.current;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    preTranslateControllersRef.current.forEach(controller => controller.abort());
+    preTranslateControllersRef.current.clear();
+    if (bulkAbortControllerRef.current) {
+      bulkAbortControllerRef.current.abort();
+      bulkAbortControllerRef.current = null;
+    }
+    setIsBulkTranslating(false);
+    setBulkTranslateStatus('idle');
+    setBulkTranslateProgress(0);
+    translatingPagesRef.current.clear();
+    autoFailedPagesRef.current.clear();
+    pageCacheRef.current.clear();
+    setLayoutBulkRequest(null);
+    setLayoutBulkState({ running: false, done: 0, total: 0 });
+    translationsRef.current = {};
+    setTranslations({});
+    setActiveTranslation(null);
+    setIsTranslating(false);
+    setCurrentPage(1);
+    setCurrentJob(1);
+    setAutoTranslate(false);
+    return gen;
+  };
+
+  /** v10.3: nạp bản dịch đã đệm trên máy SAU khi đã xoá, chỉ áp dụng nếu vẫn đang mở đúng tài liệu đó. */
+  const loadCachedTranslationsFor = (keys: Array<string | null | undefined>, gen: number) => {
+    void (async () => {
+      for (const key of keys) {
+        if (!key) continue;
+        const cached = await getTranslationsCache(key);
+        if (fileIdRef.current !== gen) return;
+        if (cached && Object.keys(cached).length > 0) {
+          // Bản dịch mới hơn (vừa dịch / từ đám mây) đã có trong state được ưu tiên
+          setTranslations(prev => ({ ...cached, ...prev }));
+          return;
+        }
+      }
+    })();
+  };
+
   const handleLocalFileOpen = async (localFile: File) => {
+    // v10.3: dọn tài liệu cũ trước (huỷ dịch toàn bộ, xoá bản dịch, …)
+    const gen = beginFileSwitch();
     setIsPdfLoading(true);
     setPdfError(null);
     setShowExplorer(false);
@@ -785,34 +892,26 @@ export default function App() {
     const docId = `local_${localFile.name.replace(/[^a-zA-Z0-9]/g, '_')}_${localFile.size}`;
     setFileId(docId);
     setFileOwnerId(user?.uid || null);
-
-    // Increment fileId to invalidate all pending translations
-    fileIdRef.current += 1;
-    
-    // Abort all pending translations
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    
-    preTranslateControllersRef.current.forEach(controller => controller.abort());
-    preTranslateControllersRef.current.clear();
-    translatingPagesRef.current.clear();
+    // v10.3: phiên đang mở là file cục bộ này (trước đây còn giữ fileData/Drive của tài liệu cũ)
+    activeFileDataRef.current = null;
+    activeDriveFileRef.current = null;
+    activeFileBufferRef.current = null;
+    localFile.arrayBuffer().then(buf => {
+      if (fileIdRef.current === gen) activeFileBufferRef.current = buf;
+    }).catch(() => { /* chỉ để lưu phiên */ });
 
     setFile(localFile);
-    setTranslations({});
-    setCurrentPage(1);
-    setCurrentJob(1);
-    setAutoTranslate(false);
+    // v10.3: nạp bản dịch đã đệm (trước đây file cục bộ không bao giờ nạp lại bản dịch đệm)
+    loadCachedTranslationsFor([docId], gen);
 
     try {
       if (fileUrl) URL.revokeObjectURL(fileUrl);
       const url = URL.createObjectURL(localFile);
       setFileUrl(url);
       
-      console.log(`[MediTrans AI] Loading local PDF: ${localFile.name}`);
+      dlog(`[MediTrans AI] Loading local PDF: ${localFile.name}`);
 
-      const loadingTask = pdfjs.getDocument({
+      const loadingTask = pdfjs.getDocument({ ...PDFJS_SAFE_OPTIONS, // v10.3: tắt eval (CVE-2024-4367)
         url,
         cMapUrl: PDFJS_CMAP_URL,
         cMapPacked: true,
@@ -821,6 +920,8 @@ export default function App() {
       });
 
       const pdf = await loadingTask.promise;
+      // v10.3: người dùng đã mở tài liệu khác trong lúc tải → bỏ bản này
+      if (fileIdRef.current !== gen) { pdf.destroy().catch(() => {}); return; }
       setPdfDoc(pdf);
       setNumPages(pdf.numPages);
     } catch (error: any) {
@@ -911,7 +1012,11 @@ export default function App() {
   useEffect(() => {
     const updateStatus = () => {
       if (translationService.current instanceof GeminiService) {
-        setServiceStatus((translationService.current as GeminiService).getStatusInfo());
+        const next = (translationService.current as GeminiService).getStatusInfo();
+        // v10.3: chỉ cập nhật state khi có trường thay đổi (trước đây App render lại mỗi 2 giây)
+        setServiceStatus(prev => (prev && next &&
+          prev.model === next.model && prev.totalKeys === next.totalKeys &&
+          prev.activeKeys === next.activeKeys && prev.lastUsedSuffix === next.lastUsedSuffix) ? prev : next);
       }
     };
     const interval = setInterval(updateStatus, 2000);
@@ -1006,6 +1111,7 @@ export default function App() {
 
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [userRole, setUserRole] = useState<'admin' | 'user' | null>(null);
+  useEffect(() => { userRoleRef.current = userRole; }, [userRole]);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [currentUserProfile, setCurrentUserProfile] = useState<UserProfile | null>(null);
@@ -1167,7 +1273,7 @@ export default function App() {
       const usableKeys = userKeys.filter(k => !k.disabled && isKeyShopAIKey(k));
       const exists = usableKeys.some(k => k.id === selectedKeyId);
       if ((!selectedKeyId || !exists) && usableKeys.length > 0) {
-        console.log(`[MediTrans AI] Auto-selecting first available key: ${usableKeys[0].name}`);
+        dlog(`[MediTrans AI] Auto-selecting first available key: ${usableKeys[0].name}`);
         setSelectedKeyId(usableKeys[0].id);
       }
     } else if (selectedKeyId && !isKeysLoading) {
@@ -1205,14 +1311,16 @@ export default function App() {
     try {
       // 1. Check Vault Keys 
       let activeVaultCount = 0;
+      let checkedVaultCount = 0;
       let currentVaultKeyResults = null;
 
       if (user && userKeys.length > 0) {
+        // v10.3: cùng quy tắc với isKeyShopAIKey — mọi key có giá trị (không phụ thuộc tiền tố sk- / tên engine)
         const vaultKeysToCheck = userKeys.filter(k => {
           if (k.id === 'system_proxy' || k.isSystem || k.id.startsWith('system_')) return false;
-          const vEng = (k.engine || 'gemini').toLowerCase();
-          return vEng === 'gemini' || vEng.includes('gemini') || vEng.includes('shopaikey') || vEng.includes('openai') || k.value?.startsWith('sk-') || k.value?.startsWith('AIzaSy');
+          return !!k.value?.trim();
         });
+        checkedVaultCount = vaultKeysToCheck.length;
         
         // Run checks in parallel
         const checkPromises = vaultKeysToCheck.map(async (vKey) => {
@@ -1256,7 +1364,8 @@ export default function App() {
           isVaultKey: !!currentVaultKeyResults,
           vaultKeyName: currentVaultKeyResults?.name || '',
           totalActive: activeVaultCount,
-          totalChecked: (userKeys.filter(k => k.engine === (selectedEngine.startsWith('gemini') ? 'gemini' : selectedEngine)).length)
+          // v10.3: mẫu số = số key đã kiểm tra (trước đây lọc theo engine 'gemini' → ShopAIKey luôn hiện "x/0")
+          totalChecked: checkedVaultCount
         });
         
         // Auto-hide after 10 seconds
@@ -1290,14 +1399,13 @@ export default function App() {
           }
           
           // CRITICAL: Always check if this specific email or UID should be admin
-          const isAdminUser = currentUser.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
-                              currentUser.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
-                              currentUser.email?.toLowerCase() === "mrihachnach@gmail.com";
+          // v10.3: email admin chỉ được tin khi đã xác minh
+          const isAdminUser = isPrimaryAdminUser(currentUser);
           
-          console.log(`[Auth] User logged in: ${currentUser.email} (UID: ${currentUser.uid}). Admin check: ${isAdminUser}`);
+          dlog(`[Auth] User logged in: ${currentUser.email} (UID: ${currentUser.uid}). Admin check: ${isAdminUser}`);
           
           if (!userSnap || !userSnap.exists()) {
-            console.log(`[Auth] Creating new user profile for ${currentUser.email}`);
+            dlog(`[Auth] Creating new user profile for ${currentUser.email}`);
             try {
               await setDoc(userRef, {
                 uid: currentUser.uid,
@@ -1315,7 +1423,7 @@ export default function App() {
             setUserRole(isAdminUser ? 'admin' : 'user');
           } else {
             const data = userSnap.data();
-            console.log(`[Auth] Existing user profile found. DB Role: ${data?.role}`);
+            dlog(`[Auth] Existing user profile found. DB Role: ${data?.role}`);
             
             // Check if user is blocked
             if (data?.isBlocked && !isAdminUser) {
@@ -1330,7 +1438,7 @@ export default function App() {
             let currentRole = data?.role || 'user';
             // If it's an admin user but role is not admin in DB, update it
             if (isAdminUser && currentRole !== 'admin') {
-              console.log(`[Auth] Upgrading user ${currentUser.email} to admin role in DB`);
+              dlog(`[Auth] Upgrading user ${currentUser.email} to admin role in DB`);
               try {
                 await updateDoc(userRef, { role: 'admin' });
               } catch (updateError: any) {
@@ -1345,11 +1453,10 @@ export default function App() {
           console.error("Error fetching user data from Firestore:", error);
           
           // Fallback if Firestore is completely blocked
-          const isAdminUser = currentUser.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
-                              currentUser.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
-                              currentUser.email?.toLowerCase() === "mrihachnach@gmail.com";
+          // v10.3: email admin chỉ được tin khi đã xác minh
+          const isAdminUser = isPrimaryAdminUser(currentUser);
           
-          console.log(`[Auth] Firestore fallback triggered. Forcing admin: ${isAdminUser}`);
+          dlog(`[Auth] Firestore fallback triggered. Forcing admin: ${isAdminUser}`);
           if (isAdminUser) {
             setUserRole('admin');
           } else {
@@ -1405,9 +1512,11 @@ export default function App() {
           setIsPdfLoading(true);
           setCurrentFileName(activeSession.fileName);
           setFileId(activeSession.fileId || null);
+          // v10.3: file cục bộ luôn thuộc người đang đăng nhập (trước đây fileOwnerId không được khôi phục)
+          setFileOwnerId(auth.currentUser?.uid || null);
           setIsLocalOnly(true);
           try {
-            const loadingTask = pdfjs.getDocument({
+            const loadingTask = pdfjs.getDocument({ ...PDFJS_SAFE_OPTIONS, // v10.3: tắt eval (CVE-2024-4367)
               data: activeSession.fileBuffer.slice(0), // pdf.js chuyển (detach) buffer sang worker → đưa bản sao, giữ bản gốc để lưu phiên
               cMapUrl: PDFJS_CMAP_URL,
               cMapPacked: true,
@@ -1449,9 +1558,8 @@ export default function App() {
         setCurrentUserProfile({ uid: snap.id, ...data } as UserProfile);
         
         // CRITICAL: Admins are immune to blocking to prevent accidental lockout
-        const isAdminUser = user.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
-                            user.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
-                            user.email?.toLowerCase() === "mrihachnach@gmail.com";
+        // v10.3: email admin chỉ được tin khi đã xác minh
+        const isAdminUser = isPrimaryAdminUser(user);
 
         if (data?.isBlocked && !isAdminUser) {
           console.warn("User has been blocked remotely. Logging out...");
@@ -1461,10 +1569,8 @@ export default function App() {
         }
 
         const effectiveRole = (isAdminUser || data?.role === 'admin') ? 'admin' : (data?.role || 'user');
-        if (effectiveRole !== userRole) {
-          console.log(`[Auth Listener] Setting effective userRole: ${effectiveRole}`);
-          setUserRole(effectiveRole);
-        }
+        // v10.3: cập nhật dạng hàm → không cần userRole trong deps (trước đây đổi role là huỷ/đăng ký lại listener)
+        setUserRole(prev => (prev === effectiveRole ? prev : effectiveRole));
       }
     }, (error) => {
       console.warn("User profile snapshot listener failed:", error);
@@ -1474,7 +1580,7 @@ export default function App() {
     return () => {
       unsubscribeUser();
     };
-  }, [user, userRole]);
+  }, [user]);
 
   // Real-time listener for System ShopAIKeys (Admin only)
   useEffect(() => {
@@ -1501,9 +1607,8 @@ export default function App() {
           const ownerId = d.ownerId;
           if (!ownerId) return;
           if (!map[ownerId]) map[ownerId] = { freeCount: 0, shopAiCount: 0 };
-          const val = (d.value || '').trim();
-          const eng = (d.engine || '').toLowerCase();
-          const isShop = !val.startsWith('AIzaSy') && (val.startsWith('sk-') || eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy'));
+          // v10.3: cùng quy tắc với isKeyShopAIKey (mọi key trừ key Google AIzaSy… là ShopAIKey)
+          const isShop = isKeyShopAIKey({ value: d.value, engine: d.engine });
           if (isShop) {
             map[ownerId].shopAiCount++;
           } else {
@@ -1570,17 +1675,20 @@ export default function App() {
       setIsOwnedKeysLoaded(true);
     });
     return () => unsubscribe();
-  }, [user, isLocalOnly]);
+    // v10.3: bỏ phụ thuộc isLocalOnly (mở file cục bộ không được làm mất key)
+  }, [user]);
 
   useEffect(() => {
     const userEmail = user?.email?.trim().toLowerCase();
-    if (!user || !userEmail || isLocalOnly) {
+    // v10.3: không phụ thuộc isLocalOnly (mở file cục bộ từng làm ẩn key được chia sẻ);
+    // chia sẻ theo email chỉ có hiệu lực khi email đã xác minh (rules) → chưa xác minh thì không truy vấn
+    if (!user || !userEmail || !user.emailVerified) {
       setSharedKeys([]);
       setIsSharedKeysLoaded(true);
       return;
     }
     
-    console.log(`[MediTrans] Listening for shared keys for: ${userEmail}`);
+    dlog(`[MediTrans] Listening for shared keys for: ${userEmail}`);
     const q = query(
       collection(db, 'apiKeys'), 
       where('sharedWith', 'array-contains', userEmail)
@@ -1588,7 +1696,7 @@ export default function App() {
     
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const keys = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      console.log(`[MediTrans] Found ${keys.length} shared keys`);
+      dlog(`[MediTrans] Found ${keys.length} shared keys`);
       setSharedKeys(keys);
       setIsSharedKeysLoaded(true);
     }, (error) => {
@@ -1596,7 +1704,7 @@ export default function App() {
       setIsSharedKeysLoaded(true);
     });
     return () => unsubscribe();
-  }, [user, isLocalOnly]);
+  }, [user]);
 
   // Keys are now handled by useMemo and direct effects
 
@@ -1612,9 +1720,8 @@ export default function App() {
       const user = result.user;
 
       const userRef = doc(db, 'users', user.uid);
-      const isAdminUser = user.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
-                          user.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
-                          user.email?.toLowerCase() === "mrihachnach@gmail.com";
+      // v10.3: email admin chỉ được tin khi đã xác minh (Google luôn xác minh)
+      const isAdminUser = isPrimaryAdminUser(user);
       try {
         await setDoc(userRef, {
           uid: user.uid,
@@ -1634,7 +1741,7 @@ export default function App() {
         setGoogleOAuthToken(credential.accessToken);
         try {
           await getOrCreateMediTransFolder(credential.accessToken);
-          console.log('[MediTrans] MediTrans AI folder verified/created on Google Drive.');
+          dlog('[MediTrans] MediTrans AI folder verified/created on Google Drive.');
         } catch (folderErr) {
           console.warn('[MediTrans] Could not verify/create MediTrans AI folder on Drive during login:', folderErr);
         }
@@ -1687,10 +1794,8 @@ export default function App() {
         // 3. Create Firestore user document explicitly (to ensure immediate availability)
         const userRef = doc(db, 'users', newUser.uid);
         
-        // Check if UID/Email should be admin
-        const isAdminUser = newUser.uid === "4cFbfQhPMpgStJXZ9EpAVcd90i33" ||
-                            newUser.email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
-                            newUser.email?.toLowerCase() === "mrihachnach@gmail.com";
+        // v10.3: tài khoản email/mật khẩu mới chưa xác minh email → KHÔNG bao giờ ghi role 'admin' chỉ dựa vào email
+        const isAdminUser = isPrimaryAdminUser(newUser);
         
         try {
           await setDoc(userRef, {
@@ -1702,13 +1807,20 @@ export default function App() {
             role: isAdminUser ? 'admin' : 'user',
             isBlocked: false
           }, { merge: true });
-          console.log(`[Signup] Firestore document created for ${newUser.email}`);
+          dlog(`[Signup] Firestore document created for ${newUser.email}`);
         } catch (fsError) {
           console.error("[Signup] Firestore profile creation failed:", fsError);
           // If this fails, onAuthStateChanged fallback will try it again
         }
-        
-        showToast("Đăng ký thành công!", 'success');
+
+        // v10.3: gửi email xác minh — tài liệu/key được chia sẻ theo email chỉ dùng được sau khi xác minh
+        try {
+          await sendEmailVerification(newUser);
+          showToast(`Đăng ký thành công! Đã gửi email xác minh tới ${newUser.email}. Vui lòng mở email và bấm liên kết xác minh, sau đó đăng nhập lại.`, 'success');
+        } catch (verifyErr) {
+          console.warn("[Signup] sendEmailVerification failed:", verifyErr);
+          showToast("Đăng ký thành công! Chưa gửi được email xác minh — vui lòng thử lại sau.", 'info');
+        }
       } else {
         await signInWithEmailAndPassword(auth, cleanEmail, authPassword);
       }
@@ -1959,7 +2071,7 @@ export default function App() {
       });
       
       setAllUsers(fetchedUsers);
-      console.log(`[MediTrans AI] Directly fetched ${fetchedUsers.length} users from Firestore.`);
+      dlog(`[MediTrans AI] Directly fetched ${fetchedUsers.length} users from Firestore.`);
       
       // Stop here if successful to avoid redundant REST calls that might 403
       setIsFetchingUsers(false);
@@ -1990,7 +2102,7 @@ export default function App() {
             }));
           } else {
             // Case B: Fallback - use data from Backend if Firestore fetch failed
-            console.log(`[MediTrans AI] Using backend list-users as fallback.`);
+            dlog(`[MediTrans AI] Using backend list-users as fallback.`);
             const backendUsers = data.users.map((u: any) => ({
               ...u,
               uid: u.uid || u.localId,
@@ -2046,7 +2158,7 @@ export default function App() {
       if (response.ok && data.success) {
         // If server-side DB write failed, try from client (Admin has permission)
         if (!data.dbSuccess && data.userData) {
-          console.log("Server-side DB write failed, retrying from client...");
+          dlog("Server-side DB write failed, retrying from client...");
           try {
             const uid = data.uid;
             const email = data.userData.email;
@@ -2057,7 +2169,7 @@ export default function App() {
               updatedAt: serverTimestamp()
             });
             
-            console.log("Client-side DB write successful");
+            dlog("Client-side DB write successful");
           } catch (clientDbError: any) {
             handleFirestoreError(clientDbError, OperationType.CREATE, `users/${data.uid}`);
           }
@@ -2130,7 +2242,7 @@ export default function App() {
     }
 
     // Debug log
-    console.log(`[Admin] Attempting to delete user: ${email} (${uid})`);
+    dlog(`[Admin] Attempting to delete user: ${email} (${uid})`);
 
     // Protection for root admin
     const isRootAdmin = email?.toLowerCase() === "hoanghiep1296@gmail.com" || 
@@ -2143,10 +2255,10 @@ export default function App() {
     showToast(`Đang thực hiện xóa tài khoản ${email}...`, 'info');
 
     try {
-      console.log("[Admin] Fetching idToken...");
+      dlog("[Admin] Fetching idToken...");
       const token = await user.getIdToken();
       
-      console.log("[Admin] Sending request to server...");
+      dlog("[Admin] Sending request to server...");
       showToast("Đang gửi yêu cầu xóa đến máy chủ...", 'info');
       
       const response = await fetch('/api/admin/delete-user', {
@@ -2158,7 +2270,7 @@ export default function App() {
         body: JSON.stringify({ uid, email })
       });
       
-      console.log("[Admin] Server response status:", response.status);
+      dlog("[Admin] Server response status:", response.status);
       
         if (!response.ok) {
           const errorText = await response.text();
@@ -2176,7 +2288,7 @@ export default function App() {
         }
 
       const data = await response.json();
-      console.log("[Admin] Server response data:", data);
+      dlog("[Admin] Server response data:", data);
 
       if (data.success) {
         showToast(`Đã xóa tài khoản ${email} thành công.`, 'success');
@@ -2271,22 +2383,18 @@ export default function App() {
   const clearFile = () => {
     if (fileUrl && fileUrl.startsWith('blob:')) URL.revokeObjectURL(fileUrl);
     
-    // Increment fileId to invalidate all pending translations for the previous file
-    fileIdRef.current += 1;
-    
-    // Abort all pending translations
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    
-    preTranslateControllersRef.current.forEach(controller => controller.abort());
-    preTranslateControllersRef.current.clear();
+    // v10.3: dọn chung (tăng thế hệ, huỷ dịch trang/dịch trước/dịch toàn bộ, xoá yêu cầu dịch giữ định dạng…)
+    beginFileSwitch();
+    activeFileDataRef.current = null;
+    activeDriveFileRef.current = null;
+    activeFileBufferRef.current = null;
     
     setFile(null);
     setCurrentFileName('');
     setFileUrl(null);
     setFileId(null);
+    setFileOwnerId(null);
+    setIsLocalOnly(false);
     setPdfDoc(null);
     lastRenderedImageRef.current = null;
     setNumPages(0);
@@ -2514,10 +2622,12 @@ export default function App() {
 
   // Pre-load PDF worker
   useEffect(() => {
-    console.log(`[MediTrans AI] Pre-loading PDF worker v${pdfjs.version}...`);
+    dlog(`[MediTrans AI] Pre-loading PDF worker v${pdfjs.version}...`);
   }, []);
 
   const handleFileSelectFromExplorer = async (fileData: FileData, isAutoRestore = false) => {
+    // v10.3: dọn tài liệu cũ TRƯỚC (cùng lượt render với đổi fileId), rồi mới nạp bản dịch đệm của tài liệu mới
+    const gen = beginFileSwitch();
     activeFileDataRef.current = fileData;
     activeDriveFileRef.current = null;
     activeFileBufferRef.current = null;
@@ -2530,40 +2640,18 @@ export default function App() {
     setShowExplorer(false);
     setIsLocalOnly(false);
 
-    // Pre-load cached translations if available
-    getTranslationsCache(fileData.id || fileData.name).then(cached => {
-      if (cached && Object.keys(cached).length > 0) {
-        setTranslations(cached);
-      }
-    });
+    // Pre-load cached translations if available (v10.3: cùng khoá với lúc lưu = fileId || tên file)
+    loadCachedTranslationsFor([fileData.id || fileData.name], gen);
 
     // On mobile, switch to split view automatically when opening a file
     if (window.innerWidth < 768) {
       setMobileViewMode('split');
     }
 
-    // Increment fileId to invalidate all pending translations for the previous file
-    fileIdRef.current += 1;
-    
-    // Abort all pending translations
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    
-    preTranslateControllersRef.current.forEach(controller => controller.abort());
-    preTranslateControllersRef.current.clear();
-    translatingPagesRef.current.clear();
-    pageCacheRef.current.clear();
-
     setFile(null); // We don't have a local File object
-    setTranslations({});
-    setCurrentPage(1);
-    setCurrentJob(1);
-    setAutoTranslate(false);
 
     try {
-      console.log(`[MediTrans AI] Loading PDF document: ${fileData.name}`);
+      dlog(`[MediTrans AI] Loading PDF document: ${fileData.name}`);
       setCurrentFileName(fileData.name);
       let loadingTask;
 
@@ -2572,7 +2660,7 @@ export default function App() {
         const arrayBuffer = await downloadDriveFileAsArrayBuffer(fileData.driveFileId);
         activeFileBufferRef.current = arrayBuffer;
         activeFileDataRef.current = fileData;
-        loadingTask = pdfjs.getDocument({
+        loadingTask = pdfjs.getDocument({ ...PDFJS_SAFE_OPTIONS, // v10.3: tắt eval (CVE-2024-4367)
           data: arrayBuffer.slice(0), // bản sao: pdf.js detach buffer → lưu phiên lỗi DataCloneError
           cMapUrl: PDFJS_CMAP_URL,
           cMapPacked: true,
@@ -2580,8 +2668,12 @@ export default function App() {
           disableStream: false,
         });
       } else if (fileData.downloadUrl) {
+        // v10.3: chỉ tải từ URL https Google Drive / Firebase Storage (downloadUrl đến từ Firestore, có thể bị sửa)
+        if (!isSafeDownloadUrl(fileData.downloadUrl)) {
+          throw new Error("Liên kết tải tệp không hợp lệ (chỉ chấp nhận Google Drive / Firebase Storage).");
+        }
         setFileUrl(fileData.downloadUrl);
-        loadingTask = pdfjs.getDocument({
+        loadingTask = pdfjs.getDocument({ ...PDFJS_SAFE_OPTIONS, // v10.3: tắt eval (CVE-2024-4367)
           url: fileData.downloadUrl,
           cMapUrl: PDFJS_CMAP_URL,
           cMapPacked: true,
@@ -2593,9 +2685,12 @@ export default function App() {
       }
 
       const pdf = await loadingTask.promise;
+      // v10.3: đã mở tài liệu khác trong lúc tải → bỏ bản này
+      if (fileIdRef.current !== gen) { pdf.destroy().catch(() => {}); return; }
       setPdfDoc(pdf);
       setNumPages(pdf.numPages);
     } catch (error: any) {
+      if (fileIdRef.current !== gen) return; // v10.3: lỗi của tài liệu cũ — bỏ qua
       console.error("Error loading PDF from Google Drive:", error);
       clearActiveDocSession();
       if (isAutoRestore && error?.message !== 'CHUA_KET_NOI_DRIVE') {
@@ -2632,32 +2727,28 @@ export default function App() {
       return;
     }
 
+    // v10.3: dọn tài liệu cũ NGAY (trước đây không tăng thế hệ, không huỷ dịch toàn bộ, bản dịch đệm bị xoá sau khi tải)
+    const gen = beginFileSwitch();
     setShowExplorer(false);
     setIsPdfLoading(true);
     setPdfError(null);
+    setCurrentFileName(driveFile.name);
+    setFile(null);
+    setFileId(null);
+    setFileOwnerId(currentUser.uid);
+    setIsLocalOnly(false);
 
-    getTranslationsCache(driveFile.id || driveFile.name).then(cached => {
-      if (cached && Object.keys(cached).length > 0) {
-        setTranslations(cached);
-      }
-    });
-
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-    preTranslateControllersRef.current.forEach(c => c.abort());
-    preTranslateControllersRef.current.clear();
-    translatingPagesRef.current.clear();
-    pageCacheRef.current.clear();
+    // v10.3: khoá đệm phải TRÙNG khoá lúc lưu (fileId || tên file → file Drive không có fileId nên là tên file);
+    // thử thêm khoá cũ driveFile.id để không mất bản đệm cũ
+    loadCachedTranslationsFor([driveFile.name, driveFile.id], gen);
 
     try {
-      console.log(`[MediTrans AI] Opening Google Drive File (No Auto-Save): ${driveFile.name} (${driveFile.id})`);
+      dlog(`[MediTrans AI] Opening Google Drive File (No Auto-Save): ${driveFile.name} (${driveFile.id})`);
       const arrayBuffer = await downloadDriveFileAsArrayBuffer(driveFile.id);
       activeFileBufferRef.current = arrayBuffer;
       activeDriveFileRef.current = driveFile;
       
-      const loadingTask = pdfjs.getDocument({
+      const loadingTask = pdfjs.getDocument({ ...PDFJS_SAFE_OPTIONS, // v10.3: tắt eval (CVE-2024-4367)
         data: arrayBuffer.slice(0), // bản sao: pdf.js detach buffer → lưu phiên lỗi DataCloneError
         cMapUrl: PDFJS_CMAP_URL,
         cMapPacked: true,
@@ -2666,14 +2757,10 @@ export default function App() {
       });
 
       const pdf = await loadingTask.promise;
+      // v10.3: đã mở tài liệu khác trong lúc tải → bỏ bản này
+      if (fileIdRef.current !== gen) { pdf.destroy().catch(() => {}); return; }
       setPdfDoc(pdf);
       setNumPages(pdf.numPages);
-      setCurrentFileName(driveFile.name);
-      setFile(null);
-      setTranslations({});
-      setCurrentPage(1);
-      setFileId(null);
-      setFileOwnerId(currentUser.uid);
 
       saveActiveDocSession({
         fileName: driveFile.name,
@@ -2681,6 +2768,7 @@ export default function App() {
         driveFile
       });
     } catch (error: any) {
+      if (fileIdRef.current !== gen) return; // v10.3: lỗi của tài liệu cũ — bỏ qua
       console.error("Error opening PDF from Google Drive:", error);
       clearActiveDocSession();
       if (isAutoRestore && error?.message !== 'CHUA_KET_NOI_DRIVE') {
@@ -2761,28 +2849,32 @@ export default function App() {
                   selectedFile.name.toLowerCase().endsWith('.pdf');
     
     if (isPdf) {
+      // v10.3: dọn tài liệu cũ TRƯỚC khi đổi fileId (trước đây bản dịch đệm vừa nạp bị xoá sau 100 ms,
+      // và fileOwnerId/isLocalOnly của tài liệu trước vẫn giữ → ghi nhầm vào tài liệu của người khác)
+      const gen = beginFileSwitch();
       setIsPdfLoading(true);
       setPdfError(null);
       
       // Generate a document ID based on filename and size
       const docId = `${selectedFile.name.replace(/[^a-zA-Z0-9]/g, '_')}_${selectedFile.size}`;
       setFileId(docId);
+      setFileOwnerId(user?.uid || null);
+      setIsLocalOnly(true);
       setCurrentFileName(selectedFile.name);
+      setShowExplorer(false);
+      activeFileDataRef.current = null;
+      activeDriveFileRef.current = null;
+      activeFileBufferRef.current = null;
 
       try {
         const arrayBuffer = await selectedFile.arrayBuffer();
-        activeFileDataRef.current = null;
-        activeDriveFileRef.current = null;
-        activeFileBufferRef.current = arrayBuffer;
+        if (fileIdRef.current === gen) activeFileBufferRef.current = arrayBuffer;
       } catch (e) {
         console.warn("Could not cache file buffer:", e);
       }
+      if (fileIdRef.current !== gen) return;
 
-      getTranslationsCache(docId).then(cached => {
-        if (cached && Object.keys(cached).length > 0) {
-          setTranslations(cached);
-        }
-      });
+      loadCachedTranslationsFor([docId], gen);
 
       // On mobile, switch to split view automatically when opening a file
       if (window.innerWidth < 768) {
@@ -2792,35 +2884,13 @@ export default function App() {
       // Small delay to allow UI to update and browser to settle after file picker
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Clear previous
-      if (fileUrl) URL.revokeObjectURL(fileUrl);
-      if (pdfDoc) {
-        try {
-          await pdfDoc.destroy();
-        } catch (e) {
-          console.warn("Error destroying previous PDF:", e);
-        }
-      }
+      if (fileIdRef.current !== gen) return;
 
-      // Increment fileId to invalidate all pending translations for the previous file
-      fileIdRef.current += 1;
-      
-      // Abort all pending translations
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-      
-      preTranslateControllersRef.current.forEach(controller => controller.abort());
-      preTranslateControllersRef.current.clear();
-      translatingPagesRef.current.clear();
-      pageCacheRef.current.clear();
+      // Clear previous
+      // v10.3: PDF cũ được huỷ tự động SAU khi state đã chuyển sang tài liệu mới (xem effect pdfDoc bên dưới)
+      if (fileUrl && fileUrl.startsWith('blob:')) URL.revokeObjectURL(fileUrl);
 
       setFile(selectedFile);
-      setTranslations({});
-      setCurrentPage(1);
-      setCurrentJob(1);
-      setAutoTranslate(false);
       
       try {
         // For iOS Chrome/Safari stability, we'll try loading via ArrayBuffer if Blob URL fails
@@ -2828,9 +2898,9 @@ export default function App() {
         const url = URL.createObjectURL(selectedFile);
         setFileUrl(url);
         
-        console.log(`[MediTrans AI] Loading PDF: ${selectedFile.name} (${Math.round(selectedFile.size / 1024)} KB)`);
+        dlog(`[MediTrans AI] Loading PDF: ${selectedFile.name} (${Math.round(selectedFile.size / 1024)} KB)`);
 
-        const loadingTask = pdfjs.getDocument({
+        const loadingTask = pdfjs.getDocument({ ...PDFJS_SAFE_OPTIONS, // v10.3: tắt eval (CVE-2024-4367)
           url,
           // Use cdnjs for cmaps as well for high performance
           cMapUrl: PDFJS_CMAP_URL,
@@ -2840,20 +2910,23 @@ export default function App() {
         });
 
         const pdf = await loadingTask.promise;
+        if (fileIdRef.current !== gen) { pdf.destroy().catch(() => {}); return; } // v10.3
         setPdfDoc(pdf);
         setNumPages(pdf.numPages);
       } catch (error: any) {
+        if (fileIdRef.current !== gen) return; // v10.3
         console.error("Error loading PDF with Blob URL, trying ArrayBuffer fallback:", error);
         
         try {
           // Fallback: Read as ArrayBuffer (more stable on some mobile browsers)
           const arrayBuffer = await selectedFile.arrayBuffer();
-          const loadingTask = pdfjs.getDocument({
+          const loadingTask = pdfjs.getDocument({ ...PDFJS_SAFE_OPTIONS, // v10.3: tắt eval (CVE-2024-4367)
             data: arrayBuffer,
             cMapUrl: PDFJS_CMAP_URL,
             cMapPacked: true,
           });
           const pdf = await loadingTask.promise;
+          if (fileIdRef.current !== gen) { pdf.destroy().catch(() => {}); return; } // v10.3
           setPdfDoc(pdf);
           setNumPages(pdf.numPages);
         } catch (fallbackError: any) {
@@ -2885,7 +2958,7 @@ export default function App() {
     // 1. Instant Cache Check - If we have this page rendered at this zoom, show it immediately!
     const cached = pageCacheRef.current.get(pageNum);
     if (cached && Math.abs(cached.zoom - zoom) < 0.01) {
-      console.log(`[MediTrans] Instant Cache Hit for page ${pageNum}`);
+      dlog(`[MediTrans] Instant Cache Hit for page ${pageNum}`);
       const canvas = canvasRef.current;
       const context = canvas.getContext('2d', { alpha: false });
       if (context) {
@@ -2941,6 +3014,10 @@ export default function App() {
 
     try {
       const page = await pdfDoc.getPage(pageNum);
+      // v10.2.1: trong lúc chờ getPage, lần vẽ khác có thể đã bắt đầu trên cùng canvas → bỏ nếu đã có yêu cầu mới hơn,
+      // và huỷ lần vẽ đang chạy ngay trước khi vẽ (hết lỗi "Cannot use the same canvas during multiple render()")
+      if (requestId !== renderRequestIdRef.current) return;
+      if (renderTaskRef.current) { try { renderTaskRef.current.cancel(); } catch { /* ignore */ } renderTaskRef.current = null; }
       
       // iOS Canvas Limit Check: Ensure canvas doesn't exceed 4096px which is safe for most mobile browsers
       const MAX_CANVAS_DIMENSION = 4096;
@@ -2949,7 +3026,7 @@ export default function App() {
       
       if (baseViewport.width * renderScale > MAX_CANVAS_DIMENSION || baseViewport.height * renderScale > MAX_CANVAS_DIMENSION) {
         renderScale = Math.min(MAX_CANVAS_DIMENSION / baseViewport.width, MAX_CANVAS_DIMENSION / baseViewport.height);
-        console.log(`[MediTrans] Đã giới hạn tỉ lệ render cho mobile: ${renderScale}`);
+        dlog(`[MediTrans] Đã giới hạn tỉ lệ render cho mobile: ${renderScale}`);
       }
       
       const viewport = page.getViewport({ scale: renderScale });
@@ -3068,7 +3145,7 @@ export default function App() {
         }
       }
     } catch (error: any) {
-      if (error.name !== 'RenderingCancelledException') {
+      if (error.name !== 'RenderingCancelledException' && !/same canvas during multiple render/i.test(String(error?.message))) {
         console.error("Error rendering page:", error);
       }
       
@@ -3201,7 +3278,7 @@ export default function App() {
             return fullContent;
           }
         } else {
-          console.log(`[MediTrans] Trang ${targetPage}: dùng ảnh (${md.reason}).`);
+          dlog(`[MediTrans] Trang ${targetPage}: dùng ảnh (${md.reason}).`);
         }
       } catch (e: any) {
         if (signal.aborted || e?.name === 'AbortError' || e?.message === 'Translation aborted') return null;
@@ -3306,6 +3383,10 @@ export default function App() {
     if (!force && (currentStatus === 'loading' || currentStatus === 'success')) {
       if (translatingPagesRef.current.has(targetPage)) return;
     }
+    // v10.3: trang đang được dịch trước / dịch toàn bộ → không gửi thêm yêu cầu AI trùng (tiến trình vẫn hiện qua onProgress)
+    if (!force && translatingPagesRef.current.has(targetPage)) return;
+    // v10.3: bấm Dịch thủ công (force) → cho phép tự dịch thử lại trang từng lỗi
+    if (force) autoFailedPagesRef.current.delete(targetPage);
 
     // Abort previous FOREGROUND request only
     if (abortControllerRef.current) abortControllerRef.current.abort();
@@ -3354,6 +3435,7 @@ export default function App() {
       if (content !== null) {
         const finalResult = { content, status: 'success' as const };
         if (fileIdRef.current === currentFileId) {
+          autoFailedPagesRef.current.delete(targetPage);
           setTranslations(prev => ({ ...prev, [targetPage]: finalResult }));
           setActiveTranslation({ page: targetPage, content, status: 'success' });
           
@@ -3368,19 +3450,27 @@ export default function App() {
       }
     } catch (error: any) {
       console.error(`Translation error for page ${targetPage}:`, error);
-      setTranslations(prev => ({ ...prev, [targetPage]: { content: formatErrorMessage(error), status: 'error' } }));
-      setActiveTranslation(null);
+      // v10.3: lỗi của tài liệu cũ (đã đổi tài liệu) → không ghi vào tài liệu mới
+      if (fileIdRef.current === currentFileId) {
+        // v10.3: đánh dấu để chế độ tự dịch không thử lại vô hạn (bấm Dịch để thử lại)
+        autoFailedPagesRef.current.add(targetPage);
+        setTranslations(prev => ({ ...prev, [targetPage]: { content: formatErrorMessage(error), status: 'error' } }));
+        setActiveTranslation(null);
+      }
     } finally {
-      translatingPagesRef.current.delete(targetPage);
+      // v10.3: chỉ gỡ cờ "đang dịch" nếu vẫn cùng tài liệu (đổi tài liệu đã xoá toàn bộ tập này)
+      if (fileIdRef.current === currentFileId) translatingPagesRef.current.delete(targetPage);
       if (abortControllerRef.current === controller) {
         setIsTranslating(false);
       }
     }
-  }, [currentPage, user, fileId, pdfDoc, performTranslation]);
+  }, [currentPage, user, fileId, fileOwnerId, pdfDoc, performTranslation]); // v10.3: thêm fileOwnerId (tránh ghi vào chủ cũ)
 
   const preTranslatePage = useCallback(async (pageNum: number, signal: AbortSignal, engine?: TranslationEngine) => {
     if (!pdfDoc || pageNum > numPages || translatingPagesRef.current.has(pageNum)) return;
     if (!hasValidKeysForFolder(activeKeyFolder)) return;
+    // v10.3: ghi nhớ tài liệu lúc bắt đầu — kết quả về muộn sau khi đổi tài liệu bị bỏ
+    const startFileGen = fileIdRef.current;
     
     try {
       translatingPagesRef.current.add(pageNum);
@@ -3398,8 +3488,9 @@ export default function App() {
         }
       );
 
-      if (content !== null) {
+      if (content !== null && fileIdRef.current === startFileGen) {
         const finalResult = { content, status: 'success' as const };
+        autoFailedPagesRef.current.delete(pageNum);
         setTranslations(prev => ({ ...prev, [pageNum]: finalResult }));
 
         if (pageNum === currentPageRef.current) {
@@ -3415,10 +3506,12 @@ export default function App() {
       }
     } catch (error: any) {
       // Quiet fail for pre-translation
+      // v10.3: ghi nhớ trang lỗi để vòng dịch trước không gửi lại liên tục
+      if (!signal.aborted && fileIdRef.current === startFileGen) autoFailedPagesRef.current.add(pageNum);
     } finally {
-      translatingPagesRef.current.delete(pageNum);
+      if (fileIdRef.current === startFileGen) translatingPagesRef.current.delete(pageNum);
     }
-  }, [pdfDoc, numPages, user, fileId, performTranslation]);
+  }, [pdfDoc, numPages, user, fileId, fileOwnerId, performTranslation]);
 
   useEffect(() => {
     if (pdfDoc && autoTranslate) {
@@ -3434,8 +3527,10 @@ export default function App() {
         const state = translationsRef.current[pageNum];
         const isDone = state?.status === 'success';
         const isTranslating = translatingPagesRef.current.has(pageNum);
+        // v10.3: bỏ qua trang lỗi (thử lại bằng nút Dịch) — tránh vòng lặp gửi lại vô hạn
+        const isFailed = state?.status === 'error' || autoFailedPagesRef.current.has(pageNum);
 
-        if (!isDone && !isTranslating) {
+        if (!isDone && !isTranslating && !isFailed) {
           pagesToBuffer.push(pageNum);
         }
       }
@@ -3541,11 +3636,15 @@ export default function App() {
       // v8.4: số trang song song theo trần yêu cầu đồng thời (mặc định 8 → 6 trang); bộ điều tiết tự hạ khi bị 429
       concurrentLimit = Math.min(8, Math.max(3, Math.ceil(getProxyMaxConcurrent() * 0.75)));
     }
-    console.log(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages with concurrency ${concurrentLimit} (Folder: ${activeKeyFolder})...`);
+    dlog(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages with concurrency ${concurrentLimit} (Folder: ${activeKeyFolder})...`);
 
     // Hàng đợi liên tục (trang nào xong thì lấy trang tiếp) thay vì chạy theo mẻ phải chờ trang chậm nhất
     const bulkQueue = [...pagesToTranslate];
     let launchIdx = 0;
+    // v10.3: ghi nhớ tài liệu lúc bắt đầu dịch toàn bộ — đổi tài liệu thì kết quả muộn không được ghi vào tài liệu mới
+    const bulkFileGen = fileIdRef.current;
+    const bulkFileId = fileId;
+    const bulkOwnerId = fileOwnerId;
     const processPage = async (pageNum: number, batchIdx: number) => {
         if (signal.aborted) return;
         
@@ -3573,12 +3672,12 @@ export default function App() {
           if (content === null && !signal.aborted) {
             await new Promise(r => setTimeout(r, 1500));
             if (!signal.aborted) {
-              console.log(`[MediTrans] Auto-retrying page ${pageNum} in bulk mode...`);
+              dlog(`[MediTrans] Auto-retrying page ${pageNum} in bulk mode...`);
               content = await performTranslation(pageNum, signal, engine || selectedEngine);
             }
           }
 
-          if (content !== null && !signal.aborted) {
+          if (content !== null && !signal.aborted && fileIdRef.current === bulkFileGen) {
             const finalResult = { content, status: 'success' as const };
             setTranslations(prev => ({ ...prev, [pageNum]: finalResult }));
             newlyCompletedCount++;
@@ -3593,15 +3692,18 @@ export default function App() {
             }
 
             // Save to Firestore
-            if (user && fileId && fileOwnerId) {
-              savePageToCloud(fileOwnerId, fileId, pageNum, content);
+            if (user && bulkFileId && bulkOwnerId) {
+              savePageToCloud(bulkOwnerId, bulkFileId, pageNum, content);
             }
           }
         } catch (e) {
           console.error(`Bulk translation failed for page ${pageNum}:`, e);
-          setTranslations(prev => ({ ...prev, [pageNum]: { content: 'Lỗi dịch thuật.', status: 'error' } }));
+          // v10.3: chỉ ghi lỗi vào đúng tài liệu đang dịch
+          if (fileIdRef.current === bulkFileGen && !signal.aborted) {
+            setTranslations(prev => ({ ...prev, [pageNum]: { content: 'Lỗi dịch thuật.', status: 'error' } }));
+          }
         } finally {
-          translatingPagesRef.current.delete(pageNum);
+          if (fileIdRef.current === bulkFileGen) translatingPagesRef.current.delete(pageNum);
         }
     };
     await Promise.all(Array.from({ length: Math.min(concurrentLimit, bulkQueue.length) }, async () => {
@@ -3630,7 +3732,7 @@ export default function App() {
 
   useEffect(() => {
     if (user && fileId && fileOwnerId) {
-      console.log(`[MediTrans] Listening for translations for document: ${fileId} owned by: ${fileOwnerId}`);
+      dlog(`[MediTrans] Listening for translations for document: ${fileId} owned by: ${fileOwnerId}`);
       const q = query(collection(db, 'users', fileOwnerId, 'documents', fileId, 'pages'));
       const unsubscribe = onSnapshot(q, (snapshot) => {
         const remoteTranslations: TranslationState = {};
@@ -3669,18 +3771,18 @@ export default function App() {
   useEffect(() => {
     // Wait for keys to load if we have a user
     if (user && isKeysLoading) {
-      console.log(`[MediTrans AI] Postponing key sync - waiting for Vault keys to load...`);
+      dlog(`[MediTrans AI] Postponing key sync - waiting for Vault keys to load...`);
       return;
     }
 
     const currentEngineType = selectedEngine.startsWith('gemini') ? 'gemini' : selectedEngine;
     
     // Enhanced logging for diagnostics
-    console.log(`[MediTrans AI] Syncing keys for engine: ${selectedEngine}. UserKeys count: ${userKeys.length}`);
+    dlog(`[MediTrans AI] Syncing keys for engine: ${selectedEngine}. UserKeys count: ${userKeys.length}`);
     
     // Enhanced logging for chuyển đổi key
     if (userKeys.length > 0) {
-      console.log(`[MediTrans AI] Processing Vault Keys:`, userKeys.map(k => ({ id: k.id, name: k.name, engine: k.engine })));
+      dlog(`[MediTrans AI] Processing Vault Keys:`, userKeys.map(k => ({ id: k.id, name: k.name, engine: k.engine })));
     }
     
     // 1. Build list of keys from vault filtered by activeKeyFolder
@@ -3703,7 +3805,7 @@ export default function App() {
         primaryKey = vaultKey.value.trim();
         selectedVaultKeyName = vaultKey.name;
         allKeys.push(primaryKey);
-        console.log(`[MediTrans AI] Selected primary key from vault (${activeKeyFolder}): ${vaultKey.name}`);
+        dlog(`[MediTrans AI] Selected primary key from vault (${activeKeyFolder}): ${vaultKey.name}`);
       }
     }
 
@@ -3729,7 +3831,7 @@ export default function App() {
 
       const otherVaultKeys = [...otherActiveKeys, ...otherFallbackKeys];
       if (otherVaultKeys.length > 0) {
-        console.log(`[MediTrans AI] Found ${otherVaultKeys.length} additional compatible keys in folder '${activeKeyFolder}'`);
+        dlog(`[MediTrans AI] Found ${otherVaultKeys.length} additional compatible keys in folder '${activeKeyFolder}'`);
       }
       allKeys = [...allKeys, ...otherVaultKeys];
     }
@@ -3767,7 +3869,7 @@ export default function App() {
     // Enhanced logging for diagnostics
     const vaultKeyCount = allKeys.filter(k => userKeys.some(vk => vk.value === k)).length;
     if (allKeys.length > 0) {
-      console.log(`[MediTrans AI] Engine: ${selectedEngine} (Folder: ${activeKeyFolder}) | Keys: ${allKeys.length} (${vaultKeyCount} from Vault) | Active: ${selectedVaultKeyName || "Primary"}`);
+      dlog(`[MediTrans AI] Engine: ${selectedEngine} (Folder: ${activeKeyFolder}) | Keys: ${allKeys.length} (${vaultKeyCount} from Vault) | Active: ${selectedVaultKeyName || "Primary"}`);
     } else {
       console.warn(`[MediTrans AI] Engine: ${selectedEngine} - NO API KEYS AVAILABLE FOR FOLDER '${activeKeyFolder}'`);
     }
@@ -3793,6 +3895,28 @@ export default function App() {
       fitToWidth();
     }
   }, [pdfDoc]);
+
+  // v10.3: huỷ (destroy) PDF cũ sau khi state đã chuyển sang tài liệu khác — trước đây clearFile / mở từ Explorer /
+  // mở từ Drive không bao giờ huỷ → rò worker + bộ nhớ. Chờ vài giây để bảng "Giữ định dạng" và lượt vẽ trang
+  // đang chạy kịp nhận tín hiệu huỷ (đổi tài liệu) trước khi tài liệu bị đóng.
+  const prevPdfDocRef = useRef<PDFDocumentProxy | null>(null);
+  useEffect(() => {
+    const prev = prevPdfDocRef.current;
+    prevPdfDocRef.current = pdfDoc;
+    if (prev && prev !== pdfDoc) {
+      // Không huỷ hẹn giờ khi effect chạy lại: tài liệu cũ vẫn phải được đóng
+      setTimeout(() => {
+        try {
+          prev.destroy().catch((e: any) => console.warn("Error destroying previous PDF:", e));
+        } catch (e) {
+          console.warn("Error destroying previous PDF:", e);
+        }
+      }, 5000);
+    }
+  }, [pdfDoc]);
+  useEffect(() => () => {
+    try { prevPdfDocRef.current?.destroy().catch(() => {}); } catch { /* */ }
+  }, []);
 
   // Handle container resize to maintain fit-to-width if enabled
   useEffect(() => {
@@ -3827,8 +3951,10 @@ export default function App() {
       const translation = translationsRef.current[currentPage];
       const isDone = translation?.status === 'success';
       const isForegroundActive = isTranslatingRef.current && activeTranslation?.page === currentPage;
+      // v10.3: trang vừa lỗi không tự dịch lại (trước đây effect chạy lại mỗi lần translations đổi → thử lại vô hạn)
+      const isFailed = translation?.status === 'error' || autoFailedPagesRef.current.has(currentPage);
       
-      if (!isDone && !isForegroundActive) {
+      if (!isDone && !isForegroundActive && !isFailed) {
         translateCurrentPage(currentPage);
       }
     }, 150); // Faster initiation (150ms)
@@ -3866,7 +3992,7 @@ export default function App() {
                 textContent 
               });
               
-              console.log(`[MediTrans] Prefetched page ${nextP}`);
+              dlog(`[MediTrans] Prefetched page ${nextP}`);
               
               if (pageCacheRef.current.size > CACHE_SIZE_LIMIT) {
                 const oldestKey = pageCacheRef.current.keys().next().value;
@@ -4248,7 +4374,7 @@ export default function App() {
                     )}
                   </div>
                 </div>
-                <button onClick={() => setKeyCheckResults(null)} className="p-1 hover:bg-slate-50 rounded-full">
+                <button aria-label="Đóng" onClick={() => setKeyCheckResults(null)} className="p-1 hover:bg-slate-50 rounded-full">
                   <ChevronLeft className="w-5 h-5 text-slate-400 rotate-180" />
                 </button>
               </div>
@@ -4289,7 +4415,7 @@ export default function App() {
       {(!isFullScreen && !(pdfDoc && window.innerWidth < 768)) && (
         <header className="h-14 border-b border-slate-200 bg-white flex items-center justify-between px-4 shrink-0 shadow-sm z-30">
           {file || pdfDoc ? (
-            <button 
+            <button aria-label="Quay lại quản lý file" 
               onClick={clearFile}
               className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500 mr-2"
               title="Quay lại quản lý file"
@@ -4343,7 +4469,7 @@ export default function App() {
             <span className="hidden sm:inline">Google Drive</span>
           </button>
 
-          <button 
+          <button aria-label="Cài đặt hệ thống" 
             onClick={() => setShowSettings(true)}
             className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
             title="Cài đặt hệ thống"
@@ -4352,7 +4478,7 @@ export default function App() {
           </button>
 
           {userRole === 'admin' && (
-            <button 
+            <button aria-label="Quản lý API Keys" 
               onClick={() => setShowApiSettings(true)}
               className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
               title="Quản lý API Keys"
@@ -4361,7 +4487,7 @@ export default function App() {
             </button>
           )}
 
-          <button 
+          <button aria-label={showTranslationPanel ? "Đóng Tra cứu & Dịch thuật" : "Mở Tra cứu & Dịch thuật"} 
             onClick={() => {
               const nextState = !showTranslationPanel;
               setShowTranslationPanel(nextState);
@@ -4381,7 +4507,7 @@ export default function App() {
             <Languages className="w-4 h-4" />
           </button>
           
-          <button 
+          <button aria-label={isFullScreen ? "Thoát toàn màn hình" : "Toàn màn hình (F11)"} 
             onClick={toggleFullScreen}
             className={cn(
               "p-2 rounded-full transition-all",
@@ -4448,6 +4574,7 @@ export default function App() {
               onLocalFileOpen={handleLocalFileOpen}
               onBulkTranslate={handleBulkTranslateFromExplorer}
               onOpenGoogleDrive={() => setShowDrivePickerModal(true)}
+              showToast={showToast}
             />
           </div>
         ) : (
@@ -4497,21 +4624,21 @@ export default function App() {
 
                     {/* Mobile Actions - Settings & Close */}
                     <div className="flex md:hidden items-center gap-0.5 mr-2">
-                      <button 
+                      <button aria-label="Cài đặt hệ thống" 
                         onClick={() => setShowSettings(true)}
                         className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
                         title="Cài đặt hệ thống"
                       >
                         <Settings className="w-3.5 h-3.5" />
                       </button>
-                      <button 
+                      <button aria-label="Quản lý API Keys" 
                         onClick={() => setShowApiSettings(true)}
                         className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
                         title="Quản lý API Keys"
                       >
                         <Key className="w-3.5 h-3.5" />
                       </button>
-                      <button 
+                      <button aria-label="Đóng PDF" 
                         onClick={clearFile}
                         className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
                         title="Đóng PDF"
@@ -4529,7 +4656,7 @@ export default function App() {
                   <div className="h-4 w-px bg-slate-200 hidden xs:block" />
 
                   <div className="flex items-center gap-0.5">
-                    <button 
+                    <button aria-label="Trang trước" 
                       onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                       disabled={currentPage === 1}
                       className="p-1 hover:bg-slate-100 rounded-md disabled:opacity-20 transition-colors"
@@ -4552,7 +4679,7 @@ export default function App() {
                       />
                       <span className="text-[9px] md:text-[10px] font-bold text-slate-400">/ {numPages}</span>
                     </div>
-                    <button 
+                    <button aria-label="Trang sau" 
                       onClick={() => setCurrentPage(p => Math.min(numPages, p + 1))}
                       disabled={currentPage === numPages}
                       className="p-1 hover:bg-slate-100 rounded-md disabled:opacity-20 transition-colors"
@@ -4564,7 +4691,7 @@ export default function App() {
 
                 <div className="flex items-center gap-3 min-w-max ml-4">
                   <div className="flex items-center gap-0.5 bg-slate-50 rounded-lg p-0.5 border border-slate-100">
-                    <button 
+                    <button aria-label={isPanning ? "Tắt Hand Tool" : "Bật Hand Tool (Di chuyển)"} 
                       onClick={() => setIsPanning(!isPanning)}
                       className={cn(
                         "p-1.5 rounded transition-all",
@@ -4575,7 +4702,7 @@ export default function App() {
                       <Hand className="w-3.5 h-3.5" />
                     </button>
                     <div className="w-px h-3 bg-slate-200 mx-0.5" />
-                    <button 
+                    <button aria-label={isLookupEnabled ? "Tắt Tra cứu nhanh" : "Bật Tra cứu nhanh (Bôi đen để dịch)"} 
                       onClick={() => {
                         const nextState = !isLookupEnabled;
                         setIsLookupEnabled(nextState);
@@ -4605,7 +4732,7 @@ export default function App() {
                       <span className="text-[10px] font-bold hidden sm:inline">Tải PDF</span>
                     </button>
                     <div className="w-px h-3 bg-slate-200 mx-0.5" />
-                    <button 
+                    <button aria-label="Thu nhỏ PDF" 
                       onClick={() => {
                         setIsAutoFit(false);
                         setZoom(z => Math.max(0.5, z - 0.1));
@@ -4618,7 +4745,7 @@ export default function App() {
                     <span className="text-[10px] font-black font-mono text-slate-600 w-9 text-center">
                       {Math.round(zoom * 100)}%
                     </span>
-                    <button 
+                    <button aria-label="Phóng to" 
                       onClick={() => {
                         setIsAutoFit(false);
                         setZoom(z => Math.min(3, z + 0.1));
@@ -4627,7 +4754,7 @@ export default function App() {
                     >
                       <ZoomIn className="w-3.5 h-3.5" />
                     </button>
-                    <button 
+                    <button aria-label="Vừa khít chiều rộng" 
                       onClick={fitToWidthAction} 
                       className={cn(
                         "p-1.5 rounded transition-all ml-0.5",
@@ -4731,21 +4858,21 @@ export default function App() {
                 <div className="flex items-center gap-3 min-w-max">
                   <div className="flex items-center gap-2">
                     <div className="flex md:hidden items-center gap-0.5 mr-1">
-                      <button 
+                      <button aria-label="Cài đặt hệ thống" 
                         onClick={() => setShowSettings(true)}
                         className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
                         title="Cài đặt hệ thống"
                       >
                         <Settings className="w-3.5 h-3.5" />
                       </button>
-                      <button 
+                      <button aria-label="Quản lý API Keys" 
                         onClick={() => setShowApiSettings(true)}
                         className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
                         title="Quản lý API Keys"
                       >
                         <Key className="w-3.5 h-3.5" />
                       </button>
-                      <button 
+                      <button aria-label="Đóng tài liệu" 
                         onClick={clearFile}
                         className="p-1.5 text-slate-400 active:text-indigo-600 transition-colors"
                       >
@@ -4926,7 +5053,7 @@ export default function App() {
                           className="w-7 md:w-8 text-[10px] font-black bg-transparent border-none p-0 text-center text-slate-600 focus:ring-0"
                           title="Trang kết thúc"
                         />
-                        <button 
+                        <button aria-label="Tóm tắt khoảng tùy chọn" 
                           onClick={() => handleSummarize('chapter')}
                           disabled={isSummarizing}
                           className={cn(
@@ -5060,7 +5187,7 @@ export default function App() {
                     
                     {/* Font Size Selector & Quick Controls */}
                     <div className="flex items-center gap-1">
-                      <button
+                      <button aria-label="Giảm cỡ chữ"
                         onClick={() => setFontSize(prev => Math.max(12, prev - 1))}
                         disabled={fontSize <= 12}
                         className="p-1 rounded-lg hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent text-slate-500 hover:text-indigo-600 transition-all active:scale-90"
@@ -5083,7 +5210,7 @@ export default function App() {
                         </select>
                       </div>
 
-                      <button
+                      <button aria-label="Tăng cỡ chữ"
                         onClick={() => setFontSize(prev => Math.min(30, prev + 1))}
                         disabled={fontSize >= 30}
                         className="p-1 rounded-lg hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent text-slate-500 hover:text-indigo-600 transition-all active:scale-90"
@@ -5100,11 +5227,11 @@ export default function App() {
                 {layoutPanelMounted && pdfDoc && (
                   <div className={translationPanelMode === 'layout' ? "flex-1 min-h-0 flex flex-col" : "hidden"}>
                     <LayoutTranslatePanel
-                      key={`${fileId || `${currentFileName || 'local'}::${String((pdfDoc as any)?.fingerprints?.[0] || '').slice(0, 16)}`}::${numPages}`}
+                      key={layoutDocKey}
                       pdfDoc={pdfDoc}
                       numPages={numPages}
                       currentPage={currentPage}
-                      docKey={`${fileId || `${currentFileName || 'local'}::${String((pdfDoc as any)?.fingerprints?.[0] || '').slice(0, 16)}`}::${numPages}`}
+                      docKey={layoutDocKey}
                       fileName={currentFileName || 'tai-lieu.pdf'}
                       translator={(translationService.current as any)?.translateLayoutBlocks ? (translationService.current as any) : null}
                       showToast={showToast}
@@ -5153,7 +5280,7 @@ export default function App() {
                               <p className="text-xs font-bold text-slate-500 animate-pulse uppercase tracking-wider">Đang khởi tạo tóm tắt...</p>
                             </div>
                           )}
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, rehypeSafeHtml]}>
                             {prepareMedicalContent(summaryText)}
                           </ReactMarkdown>
                           {isSummarizing && summaryText && (
@@ -5294,7 +5421,7 @@ export default function App() {
       {/* Tablet Navigation Buttons */}
       {pdfDoc && !showSettings && !showAuthModal && (
         <div className="fixed bottom-6 md:bottom-8 left-0 right-0 pointer-events-none z-40 hidden md:flex justify-between px-4 md:px-12">
-          <button 
+          <button aria-label="Trang trước" 
             onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
             disabled={currentPage === 1 || isPdfLoading || isRendering}
             className={cn(
@@ -5308,7 +5435,7 @@ export default function App() {
             <ChevronLeft className="w-6 h-6 md:w-8 md:h-8" />
           </button>
           
-          <button 
+          <button aria-label="Trang tiếp theo" 
             onClick={() => setCurrentPage(p => Math.min(numPages, p + 1))}
             disabled={currentPage === numPages || isPdfLoading || isRendering}
             className={cn(
@@ -5511,7 +5638,7 @@ export default function App() {
             
             {/* Navigation */}
             <div className="flex-1 flex items-center justify-center gap-0">
-              <button 
+              <button aria-label="Trang trước" 
                 onClick={() => {
                   setCurrentPage(p => Math.max(1, p - 1));
                   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -5524,7 +5651,7 @@ export default function App() {
               
               <span className="text-[10px] font-black text-slate-800 min-w-[30px] text-center">{currentPage}/{numPages}</span>
               
-              <button 
+              <button aria-label="Trang sau" 
                 onClick={() => {
                   setCurrentPage(p => Math.min(numPages, p + 1));
                   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -5540,7 +5667,7 @@ export default function App() {
 
             {/* Right Actions */}
             <div className="flex items-center gap-0.5 pr-1 shrink-0">
-              <button 
+              <button aria-label="Dịch lại trang này" 
                 onClick={() => translateCurrentPage(currentPage, true)}
                 disabled={isTranslating}
                 className={cn(
@@ -5595,7 +5722,7 @@ export default function App() {
                   </div>
                   <h3 className="text-xl font-display font-bold text-slate-800">Chọn thư mục tải lên</h3>
                 </div>
-                <button 
+                <button aria-label="Đóng" 
                   onClick={() => setShowFolderSelectModal(false)}
                   className="p-2 hover:bg-slate-100 rounded-full transition-colors"
                 >
@@ -5679,7 +5806,7 @@ export default function App() {
                   </div>
                   <h3 className="text-xl font-display font-bold text-slate-800">Cấu hình hệ thống</h3>
                 </div>
-                <button 
+                <button aria-label="Đóng" 
                   onClick={() => setShowSettings(false)}
                   className="p-2 hover:bg-slate-100 rounded-full transition-colors"
                 >
@@ -5722,7 +5849,7 @@ export default function App() {
                           Quản trị
                         </button>
                       )}
-                      <button 
+                      <button aria-label="Đăng xuất" 
                         onClick={handleLogout}
                         className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"
                         title="Đăng xuất"
@@ -5972,7 +6099,7 @@ export default function App() {
                               setTranslationPanelMode('layout');
                               setShowTranslationPanel(true);
                               if (mobileViewMode === 'pdf') setMobileViewMode('split');
-                              setLayoutBulkRequest({ id: Date.now(), pages: Array.from({ length: numPages }, (_, i) => i + 1) });
+                              setLayoutBulkRequest({ id: Date.now(), docKey: layoutDocKey, pages: Array.from({ length: numPages }, (_, i) => i + 1) });
                             }}
                             className="w-full py-3 bg-emerald-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-emerald-700 shadow-lg shadow-emerald-100 transition-all active:scale-95 flex items-center justify-center gap-2"
                             title="Dịch toàn bộ tài liệu, giữ nguyên bố cục trang gốc (xuất PDF dạng ảnh)"
@@ -5981,7 +6108,7 @@ export default function App() {
                             Dịch toàn bộ giữ định dạng
                           </button>
                           <p className="text-[9px] text-slate-400 leading-snug px-1">
-                            Giữ định dạng: trang đã dịch trước đó (kể cả trên máy khác) được dựng lại, không tốn token; trang scan sẽ được bỏ qua. Theo dõi tiến độ và xuất PDF ở tab "Giữ định dạng".
+                            Giữ định dạng: trang đã dịch trước đó (kể cả trên máy khác) được dựng lại, không tốn token; trang scan được nhận dạng chữ (OCR) rồi dịch. Theo dõi tiến độ và xuất PDF ở tab "Giữ định dạng".
                           </p>
                           <button
                             onClick={() => setShowBulkConfirm(false)}
@@ -6110,7 +6237,7 @@ export default function App() {
                   </div>
                   <h3 className="text-xl font-display font-bold text-slate-800">Quản lý API Keys</h3>
                 </div>
-                <button 
+                <button aria-label="Đóng" 
                   onClick={() => setShowApiSettings(false)}
                   className="p-2 hover:bg-slate-100 rounded-full transition-colors"
                 >
@@ -6178,7 +6305,7 @@ export default function App() {
                             <span>Khôi phục Key lỗi</span>
                           </button>
                         )}
-                        <button 
+                        <button aria-label="Kiểm tra tất cả Key" 
                           onClick={() => performKeyCheck(false)}
                           disabled={isCheckingKeys}
                           className="p-1.5 hover:bg-indigo-50 text-indigo-600 rounded-lg transition-all active:scale-95 disabled:opacity-50"
@@ -6256,7 +6383,7 @@ export default function App() {
                               }}
                               className="w-full pl-3 pr-10 py-2 bg-white border border-indigo-100 rounded-xl text-xs mb-2 focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
                             />
-                            <button
+                            <button aria-label="Hiện/ẩn API key"
                               type="button"
                               onClick={() => setShowApiKeys(!showApiKeys)}
                               className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-indigo-600 transition-colors mb-2"
@@ -6422,7 +6549,7 @@ export default function App() {
                                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                     {key.ownerId === user.uid && (
                                       <>
-                                        <button 
+                                        <button aria-label="Đổi tên Key" 
                                           onClick={() => {
                                             setShowRenameKeyModal(key);
                                             setRenameKeyName(key.name);
@@ -6432,7 +6559,7 @@ export default function App() {
                                         >
                                           <Pencil className="w-3.5 h-3.5" />
                                         </button>
-                                        <button 
+                                        <button aria-label="Chia sẻ Key" 
                                           onClick={() => setShowShareKeyModal(key)}
                                           className="p-1.5 hover:bg-indigo-50 text-indigo-400 hover:text-indigo-500 rounded-lg transition-colors"
                                           title="Chia sẻ Key"
@@ -6442,7 +6569,7 @@ export default function App() {
                                       </>
                                     )}
                                     {!key.isSystem && (key.ownerId === user.uid || userRole === 'admin') && (
-                                      <button 
+                                      <button aria-label="Xoá Key" 
                                         onClick={() => setKeyToDelete(key)}
                                         className="p-1.5 hover:bg-rose-50 text-rose-400 hover:text-rose-500 rounded-lg transition-colors"
                                         title="Xoá Key"
@@ -6530,7 +6657,7 @@ export default function App() {
                     <p className="text-[10px] text-slate-400">Thiết lập dành cho các API Key dạng `sk-...`</p>
                   </div>
                 </div>
-                <button 
+                <button aria-label="Đóng" 
                   onClick={() => setShowProxyModal(false)}
                   className="p-2 hover:bg-slate-100 rounded-full transition-colors"
                 >
@@ -6605,6 +6732,7 @@ export default function App() {
                     >
                       <option value="">⚙️ Mặc định (gpt-4.1-mini)</option>
                       <option value="gpt-4.1-mini">gpt-4.1-mini (khuyên dùng)</option>
+                      <option value="gpt-6-luna">gpt-6-luna (tắt suy nghĩ, chậm hơn)</option>
                       <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
                       <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
                       <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
@@ -6644,6 +6772,7 @@ export default function App() {
                     >
                       <option value="">⚙️ Mặc định (gemini-3.1-flash-lite)</option>
                       <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (khuyên dùng)</option>
+                      <option value="gpt-6-luna">gpt-6-luna (tắt suy nghĩ)</option>
                       <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
                       <option value="gpt-4.1-mini">gpt-4.1-mini</option>
                       <option value="gpt-4.1">gpt-4.1</option>
@@ -6653,6 +6782,36 @@ export default function App() {
                     Dành riêng cho nút &quot;Dịch Chuyên Sâu&quot;. Mặc định gemini-3.1-flash-lite.
                   </p>
                 </div>
+
+                {/* v10.4: Model Proxy cho Dịch giữ định dạng / OCR giữ định dạng */}
+                {([
+                  ['mediTrans_proxyModelLayout', 'Model Proxy cho Dịch giữ định dạng:', 'gpt-4.1-mini', 'Dịch các khối chữ của trang PDF có lớp chữ (tab "Giữ định dạng"). Trả JSON, cần model nhanh.'],
+                  ['mediTrans_proxyModelOcr', 'Model Proxy cho OCR giữ định dạng:', 'gemini-3.1-flash-lite', 'Đọc trang scan / chữ trong hình kèm toạ độ khung chữ. Model Gemini cho toạ độ chính xác nhất.'],
+                ] as const).map(([key, label, def, hint]) => (
+                  <div key={key} className="space-y-2 pt-3 border-t border-slate-100">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                        {label}
+                      </label>
+                      <select
+                        defaultValue={localStorage.getItem(key) || ''}
+                        onChange={(e) => { if (e.target.value) localStorage.setItem(key, e.target.value); else localStorage.removeItem(key); showToast(`Đã chọn ${e.target.value || 'Mặc định (' + def + ')'}.`, 'success'); }}
+                        className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-bold outline-none cursor-pointer"
+                      >
+                        <option value="">⚙️ Mặc định ({def})</option>
+                        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                        <option value="gpt-6-luna">gpt-6-luna (tắt suy nghĩ)</option>
+                        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                        <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+                        <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
+                        <option value="gpt-4o-mini">gpt-4o-mini</option>
+                        <option value="gpt-4.1">gpt-4.1</option>
+                      </select>
+                    </div>
+                    <p className="text-[10px] text-slate-400 leading-tight">{hint} Model có suy nghĩ được tự tắt suy nghĩ.</p>
+                  </div>
+                ))}
 
                 {/* 4. Số luồng đồng thời (ShopAIKey / key hệ thống) */}
                 <div className="space-y-2 pt-3 border-t border-slate-100">
@@ -6716,7 +6875,7 @@ export default function App() {
                     <p className="text-[10px] text-slate-400 font-medium">Chọn các trang bạn muốn xuất ra file Word (.docx)</p>
                   </div>
                 </div>
-                <button 
+                <button aria-label="Đóng" 
                   onClick={() => setShowDownloadModal(false)}
                   className="p-2 hover:bg-slate-100 rounded-full transition-colors"
                 >
@@ -6832,7 +6991,7 @@ export default function App() {
                     <p className="text-xs text-slate-500">Kiểm tra trạng thái kết nối Firebase</p>
                   </div>
                 </div>
-                <button 
+                <button aria-label="Đóng" 
                   onClick={() => setIsDiagnosticModalOpen(false)}
                   className="p-2 hover:bg-white rounded-xl transition-colors text-slate-400 hover:text-slate-600 shadow-sm"
                 >
@@ -7167,7 +7326,7 @@ export default function App() {
                   <p className="text-xs text-slate-400 truncate max-w-[240px]">{driveFileToSave?.name}</p>
                 </div>
               </div>
-              <button 
+              <button aria-label="Đóng" 
                 onClick={() => setShowDriveFolderModal(false)}
                 className="p-2 hover:bg-slate-100 rounded-full transition-colors"
               >
