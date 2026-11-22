@@ -17,7 +17,7 @@ import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveT
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { LayoutTranslatePanel } from './components/LayoutTranslatePanel';
 import { buildPageMarkdown } from './services/layoutTranslationService';
-import { splitMarkdownForParallel, fixUntranslatedLines } from './utils/translateBoost';
+import { splitMarkdownForParallel, fixUntranslatedLines, splitReferenceSegments } from './utils/translateBoost';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
 
 const PDFJS_VERSION = '3.11.174';
@@ -401,21 +401,36 @@ export default function App() {
     isTranslatingRef.current = isTranslating;
   }, [isTranslating]);
   const [selectedEngine, setSelectedEngine] = useState<TranslationEngine>(() => {
-    const saved = localStorage.getItem('mediTrans_selectedEngine') as TranslationEngine;
-    if (saved === 'gemini-3-flash-preview') return 'gemini-3.6-flash';
-    return saved || 'gemini-2.5-flash-lite';
+    const saved = (localStorage.getItem('mediTrans_selectedEngine') || '').trim();
+    // v8.0: chỉ còn 2 chế độ. Tên engine cũ lưu trong máy (vd. "gemini-flash-lite-latest", "gemini-3-flash-preview")
+    // trước đây được giữ nguyên → log/nhận diện model sai. Chuẩn hoá về Cơ bản / Chuyên sâu.
+    if (saved === 'gemini-2.5-flash-lite' || saved === 'gemini-3.6-flash') return saved;
+    if (/pro|3-flash-preview|3\.[5-9]-flash(?!-lite)|deep/i.test(saved)) return 'gemini-3.6-flash';
+    return 'gemini-2.5-flash-lite';
   });
 
   const [customBaseUrl, setCustomBaseUrl] = useState<string>(() => {
     return localStorage.getItem('mediTrans_customBaseUrl') || 'https://api.shopaikey.com/v1';
   });
 
+  // Một lần: lựa chọn cũ là model Gemini 2.5 (ShopAIKey báo quá tải, ngừng hỗ trợ từ 01/12/2026) → về "Tự động"
+  const migrateModel = (v: string, key: string) => {
+    if (localStorage.getItem('mediTrans_modelMigrated_v75')) return v;
+    return /^gemini-2\.5-/.test(v) ? '' : v;
+  };
   const [customOpenAIModelNormal, setCustomOpenAIModelNormal] = useState<string>(() => {
-    return localStorage.getItem('mediTrans_customOpenAIModelNormal') || localStorage.getItem('mediTrans_customOpenAIModel') || '';
+    let v = migrateModel(localStorage.getItem('mediTrans_customOpenAIModelNormal') || localStorage.getItem('mediTrans_customOpenAIModel') || '', 'normal');
+    // v8.0: một lần — bỏ model tự chọn cũ → dùng mặc định mới (dịch thường: gpt-4.1-mini)
+    if (!localStorage.getItem('mediTrans_modelMigrated_v80')) v = '';
+    return v;
   });
 
   const [customOpenAIModelDeep, setCustomOpenAIModelDeep] = useState<string>(() => {
-    return localStorage.getItem('mediTrans_customOpenAIModelDeep') || '';
+    let v = migrateModel(localStorage.getItem('mediTrans_customOpenAIModelDeep') || '', 'deep');
+    localStorage.setItem('mediTrans_modelMigrated_v75', '1');
+    // v8.0: ô Chuyên sâu nay có tác dụng thật → bỏ giá trị cũ một lần, dùng mặc định gemini-3.1-flash-lite
+    if (!localStorage.getItem('mediTrans_modelMigrated_v80')) { v = ''; localStorage.setItem('mediTrans_modelMigrated_v80', '1'); }
+    return v;
   });
 
   useEffect(() => {
@@ -3010,9 +3025,16 @@ export default function App() {
         if (md.eligible) {
           // Trang dài → 2–3 phần dịch SONG SONG (thời gian chờ ≈ phần dài nhất). Phần đầu hiện dần như cũ;
           // phần sau hiện ngay khi các phần trước nó xong, giữ đúng thứ tự.
-          const parts = splitMarkdownForParallel(md.markdown);
-          const results = parts.map(() => '');
-          const done = parts.map(() => false);
+          // Tài liệu tham khảo (≥ 2 mục liền nhau) giữ nguyên, không gửi AI → trang tham khảo gần như 0 token
+          const segs = splitReferenceSegments(md.markdown);
+          const plan: { text: string; pass: boolean }[] = [];
+          for (const sg of segs) {
+            if (sg.passthrough) plan.push({ text: sg.text, pass: true });
+            else for (const p of splitMarkdownForParallel(sg.text)) plan.push({ text: p, pass: false });
+          }
+          const parts = plan.map(p => p.text);
+          const results = plan.map(p => (p.pass ? p.text : ''));
+          const done = plan.map(p => p.pass);
           let lastUpdate = 0;
           const visible = () => {
             let out = '';
@@ -3028,6 +3050,7 @@ export default function App() {
             if (onProgress && (force || now - lastUpdate > 120)) { onProgress(visible()); lastUpdate = now; }
           };
           await Promise.all(parts.map(async (part, i) => {
+            if (plan[i].pass) return;
             for await (const chunk of svc.translateMarkdownPageStream(part, targetPage, signal, engine || selectedEngine)) {
               if (signal.aborted) break;
               started = true;
@@ -3386,7 +3409,8 @@ export default function App() {
     // proxy báo quá tải). Chạy nhiều trang hơn số đó chỉ làm trang phải chờ và tốn CPU chụp ảnh trang → giới hạn
     // số trang = số yêu cầu tối đa + 1 (1 trang chuẩn bị sẵn trong lúc chờ).
     if ((translationService.current as any)?.usesProxy?.()) {
-      concurrentLimit = Math.min(concurrentLimit, getProxyMaxConcurrent() + 1);
+      // 4 trang: mỗi trang dài tách 2–3 phần → đủ việc cho bộ điều tiết (tối đa 6 yêu cầu, tự giảm khi quá tải)
+      concurrentLimit = Math.min(4, getProxyMaxConcurrent() + 1);
     }
     console.log(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages with concurrency ${concurrentLimit} (Folder: ${activeKeyFolder})...`);
 
@@ -4725,7 +4749,7 @@ export default function App() {
                             ? "bg-slate-100 text-slate-400 cursor-not-allowed shadow-none" 
                             : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 hover:shadow-indigo-300 hover:scale-105 active:scale-95"
                         )}
-                        title={isTranslating ? 'Đang dịch chuyên sâu...' : (translations[currentPage] ? 'Dịch lại (Chuyên sâu 3.6 Flash)' : 'Dịch chuyên sâu (3.6 Flash)')}
+                        title={isTranslating ? 'Đang dịch chuyên sâu...' : (translations[currentPage] ? 'Dịch lại (Chuyên sâu 3.1 Flash-Lite)' : 'Dịch chuyên sâu (3.1 Flash-Lite)')}
                       >
                         {isTranslating ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
@@ -4949,11 +4973,11 @@ export default function App() {
                 {layoutPanelMounted && pdfDoc && (
                   <div className={translationPanelMode === 'layout' ? "flex-1 min-h-0 flex flex-col" : "hidden"}>
                     <LayoutTranslatePanel
-                      key={`${fileId || currentFileName || 'local'}::${numPages}`}
+                      key={`${fileId || `${currentFileName || 'local'}::${String((pdfDoc as any)?.fingerprints?.[0] || '').slice(0, 16)}`}::${numPages}`}
                       pdfDoc={pdfDoc}
                       numPages={numPages}
                       currentPage={currentPage}
-                      docKey={`${fileId || currentFileName || 'local'}::${numPages}`}
+                      docKey={`${fileId || `${currentFileName || 'local'}::${String((pdfDoc as any)?.fingerprints?.[0] || '').slice(0, 16)}`}::${numPages}`}
                       fileName={currentFileName || 'tai-lieu.pdf'}
                       translator={(translationService.current as any)?.translateLayoutBlocks ? (translationService.current as any) : null}
                       showToast={showToast}
@@ -5644,8 +5668,8 @@ export default function App() {
                       onChange={(e) => setSelectedEngine(e.target.value as TranslationEngine)}
                       className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-[10px] font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
                     >
-                      <option value="gemini-2.5-flash-lite">Cơ bản (Flash Lite)</option>
-                      <option value="gemini-3.6-flash">Chuyên sâu (3.6 Flash)</option>
+                      <option value="gemini-2.5-flash-lite">Cơ bản (GPT-4.1 mini)</option>
+                      <option value="gemini-3.6-flash">Chuyên sâu (Gemini 3.1 Flash-Lite)</option>
                     </select>
                   </div>
                 </div>
@@ -5827,7 +5851,7 @@ export default function App() {
                             className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2"
                           >
                             <Sparkles className="w-4 h-4" />
-                            Dịch chuyên sâu (Gemini 3.6 Flash)
+                            Dịch chuyên sâu (Gemini 3.1 Flash-Lite)
                           </button>
                           <button
                             onClick={() => {
@@ -6505,7 +6529,7 @@ export default function App() {
                       onChange={(e) => {
                         setCustomOpenAIModelNormal(e.target.value);
                       }}
-                      placeholder="Mặc định: gemini-2.5-flash-lite..."
+                      placeholder="Mặc định: gpt-4.1-mini..."
                       className="flex-1 px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:ring-2 focus:ring-sky-500 outline-none text-slate-800"
                     />
                     <select
@@ -6515,15 +6539,12 @@ export default function App() {
                       }}
                       className="px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-bold outline-none cursor-pointer"
                     >
-                      <option value="">⚙️ Mặc định (gemini-2.5-flash-lite)</option>
-                      <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                      <option value="">⚙️ Mặc định (gpt-4.1-mini)</option>
+                      <option value="gpt-4.1-mini">gpt-4.1-mini (khuyên dùng)</option>
                       <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                      <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
                       <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
-                      <option value="gemini-3.1-flash-lite-preview">gemini-3.1-flash-lite-preview</option>
-                      <option value="gemini-1.5-flash">gemini-1.5-flash</option>
-                      <option value="gemini-2.0-flash">gemini-2.0-flash</option>
                       <option value="gpt-4o-mini">gpt-4o-mini</option>
-                      <option value="claude-3-5-haiku">claude-3-5-haiku</option>
                     </select>
                   </div>
                   <p className="text-[10px] text-slate-400 leading-tight">
@@ -6547,7 +6568,7 @@ export default function App() {
                       onChange={(e) => {
                         setCustomOpenAIModelDeep(e.target.value);
                       }}
-                      placeholder="Mặc định: gemini-3.6-flash..."
+                      placeholder="Mặc định: gemini-3.1-flash-lite..."
                       className="flex-1 px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:ring-2 focus:ring-purple-500 outline-none text-slate-800"
                     />
                     <select
@@ -6557,18 +6578,15 @@ export default function App() {
                       }}
                       className="px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-bold outline-none cursor-pointer"
                     >
-                      <option value="">⚙️ Mặc định (Theo Dịch Thường)</option>
-                      <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                      <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                      <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
-                      <option value="gemini-3.6-flash">gemini-3.6-flash</option>
-                      <option value="gemini-1.5-pro">gemini-1.5-pro</option>
-                      <option value="gpt-4o">gpt-4o</option>
-                      <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
+                      <option value="">⚙️ Mặc định (gemini-3.1-flash-lite)</option>
+                      <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (khuyên dùng)</option>
+                      <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+                      <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                      <option value="gpt-4.1">gpt-4.1</option>
                     </select>
                   </div>
                   <p className="text-[10px] text-slate-400 leading-tight">
-                    Dành riêng cho nút &quot;Dịch Chuyên Sâu&quot; (3.6 Flash / Pro). Phù hợp cho phân tích y khoa chi tiết.
+                    Dành riêng cho nút &quot;Dịch Chuyên Sâu&quot;. Mặc định gemini-3.1-flash-lite.
                   </p>
                 </div>
               </div>

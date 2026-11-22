@@ -299,3 +299,86 @@ Kiểm thử mô phỏng: dồn 12 yêu cầu cùng lúc vào proxy chỉ chịu
 - **Trang dài (> ~2.400 ký tự) chia 2–3 phần dịch song song**, cắt tại ranh giới đoạn (tiêu đề luôn đi cùng đoạn sau nó). Phần đầu vẫn hiện dần; thời gian chờ ≈ phần dài nhất (ước tính nhanh gần gấp đôi với trang dài).
 - **Bảo đảm toàn bộ tiếng Việt:** sau khi dịch, dòng (kể cả ô bảng, gạch đầu dòng, dòng in đậm) còn sót tiếng Anh được tự dịch bù, giữ nguyên định dạng Markdown; tài liệu tham khảo giữ nguyên. Không có dòng sót thì không gọi thêm AI.
 - Số luồng dịch hàng loạt với key Google: 2 trang/key (tối đa 8) thay vì 6–12 với cả 1 key (gây 429 liên tục).
+
+### Cập nhật v7.5 — tối ưu chủ đạo cho ShopAIKey + sửa bảng OCR + kiểm thử toàn bộ
+
+**ShopAIKey nhanh nhất có thể mà không quá tải:**
+- **Bộ điều tiết tự học:** bắt đầu 2 yêu cầu cùng lúc, cứ 4 lần thành công liên tiếp thì tăng 1 (tối đa 6; chỉnh bằng `localStorage.mediTrans_proxyMaxConcurrent`, 1–10). Khi bị 429 lúc đang chạy N yêu cầu → ghi nhớ ngưỡng an toàn N−1 trong 10 phút và chạy đúng ngưỡng đó (không thử vượt lại). Lỗi 5xx / rớt mạng chỉ dừng 0,8 giây, không hạ ngưỡng. Sau 429 vòng thử lại không chờ thêm (bộ điều tiết đã dừng đúng mức).
+- Đo trên ShopAIKey giả lập (24 yêu cầu, 3–5% lỗi 502 ngẫu nhiên), đơn vị giây:
+
+| ShopAIKey chịu được | Cố định 2 (v7.3–7.4) | v7.5 |
+|---|---|---|
+| 1 yêu cầu | 67 | 63–67 |
+| 2 yêu cầu | 33 | 33 |
+| 4 yêu cầu | 39 | **21** |
+| 8 yêu cầu | 38 | **16–19** |
+
+- **Tự chọn model:** web hỏi ShopAIKey danh sách model (`/models`, lưu đệm 12 giờ). Dịch thường dùng **gemini-2.5-flash-lite** (nhanh nhất). Dịch nâng cao dùng **gemini-2.5-flash** (trước đây cũng bị đổi về Flash-Lite nên không hơn dịch thường). ShopAIKey không có model đó → tự chuyển sang model kế tiếp ngay ở lần gọi sau (không chờ, không đổi key). Model tự đặt trong Cài đặt vẫn được ưu tiên.
+- Số trang song song khi dùng ShopAIKey: dịch toàn bộ 4 trang, giữ định dạng 3 trang, dịch trước 2 trang; mọi yêu cầu đều qua bộ điều tiết.
+
+**Dịch giữ định dạng — bảng BI-RADS (trang dịch bằng OCR):**
+- Khung OCR chạm đường kẻ dọc → đường kẻ bị tính là "chữ": chữ dịch đè lên đường kẻ, vị trí dòng sai, nhận nhầm in đậm. Nay nhận diện đường kẻ dọc (nét liền dài hơn 1,6 dòng) và đường kẻ ngang, loại khỏi mọi phép đo; dòng chữ bị đường kẻ ngang ngăn cách không bị gán nhầm sang ô khác.
+- In đậm theo mật độ mực chặt hơn với ô ngắn; các ô cùng cột (thẳng mép trái) dùng chung một cỡ chữ.
+
+**Lỗi tìm thấy khi kiểm thử toàn bộ sách thật (465 trang) và đã sửa:**
+- Chú thích hình chạy 2 cột bị tách thành từng dòng (bị coi là ô bảng) → nay là đoạn liền mạch.
+- Trang có bảng chữ nhỏ nhiều ô: hai cột văn bản thân bài bị ghép ngang thành một (do chọn nhầm cỡ chữ của bảng làm chữ thân bài, và ngưỡng ±15% quá rộng) → nay dò khe cột theo từng cỡ chữ chính, ngưỡng ±10%.
+- Bỏ điều kiện "chữ vắt qua khe" (thêm ở v7.1) vì làm hỏng nhận diện cột ở trang có tiêu đề bảng chạy ngang trang.
+
+**Kiểm thử đã chạy (đều đạt):** giữ định dạng 120 trang sách thật (0 lỗi, ~0,5 giây/trang); dựng Markdown toàn bộ 465 trang (0 lỗi, 452 trang dịch theo lớp chữ); trang mẫu drop cap / bảng / 2 cột / bìa; AI trả lời sai số cột; OCR khung sai; bảng OCR chạm đường kẻ; nút Dừng (thoát < 0,2 giây); ShopAIKey giả lập 1/2/4/8 yêu cầu + lỗi ngẫu nhiên; tự chọn model ShopAIKey (3 trường hợp); key Google (403, key sai); dịch bù tiếng Anh (không báo nhầm trên bản tiếng Việt); TypeScript + build.
+
+### Cập nhật v7.6 — cố định model gemini-3.5-flash-lite cho ShopAIKey
+
+- Theo thông báo của ShopAIKey (15/11/2026): Gemini 2.5 Pro / 2.5 Flash đang quá tải, Google ngừng hỗ trợ từ 01/12/2026; khuyến nghị dùng `gemini-3.5-flash-lite`.
+- **Mọi yêu cầu qua ShopAIKey / key hệ thống** (dịch thường, dịch nâng cao, giữ định dạng, tóm tắt, tra thuật ngữ, OCR) dùng **cố định `gemini-3.5-flash-lite`**. Bỏ cơ chế tự đổi model và việc hỏi danh sách model (bớt một yêu cầu mỗi phiên).
+- Chỉ đổi model khi tự đặt "Model dịch thường" trong Cài đặt (ô "Model nâng cao" không còn tác dụng với ShopAIKey). Lựa chọn cũ đã lưu là model Gemini 2.5 được tự chuyển về mặc định một lần.
+- Key hệ thống (`/api/ai/chat`): mặc định `gemini-3.5-flash-lite`; danh sách model cho phép bổ sung các model 3.x.
+- Nhãn chế độ dịch: "Cơ bản (3.5 Flash-Lite)", "Chuyên sâu (3.5 Flash-Lite)".
+
+### Cập nhật v7.7 — giảm token dịch thường (model Gemini 3.5 Flash-Lite)
+
+**Nguyên nhân tốn token:** Gemini 3 luôn "suy nghĩ" (không tắt được như 2.5-flash-lite trước đây); phần suy nghĩ tính vào token đầu ra. Web gửi `reasoning_effort: "minimal"` (mức thấp nhất), nhưng một số cổng chỉ nhận `high, low, medium, none` và từ chối "minimal". Khi đó code cũ BỎ HẲN tham số → model suy nghĩ ở mức MẶC ĐỊNH (cao) → tốn rất nhiều token đầu ra và chậm hơn.
+
+**Đã sửa:**
+- **Thương lượng mức suy nghĩ thấp nhất** cho từng model: bị từ chối thì đọc danh sách giá trị hợp lệ trong thông báo lỗi và chọn mức thấp nhất còn lại ("none" → "low"), không bao giờ để trống tham số. Chỉ mất 1 yêu cầu bị từ chối mỗi phiên.
+- Dịch thường: chỉ chia trang khi > 5.000 ký tự, tối đa 2 phần (trước: > 2.400 ký tự, 2–3 phần → lặp hướng dẫn hệ thống và phần suy nghĩ cho mỗi phần).
+- Dịch giữ định dạng: gửi theo phần ~3.500 ký tự (trước 1.800) → ít lặp hướng dẫn hệ thống hơn. Dịch giữ định dạng (dịch khối, OCR, nhận diện cột) luôn dùng gemini-3.5-flash-lite, không bị ô Model trong Cài đặt ghi đè.
+- Nhật ký (console) ghi số token thực tế mỗi lần gọi không-stream: `Token (model): vào X, ra Y (trong đó suy nghĩ Z)` để đối chiếu.
+
+### Cập nhật v7.8 — sửa lỗi "thỉnh thoảng" của Giữ định dạng + giảm token dịch thường
+
+**Giữ định dạng — lỗi đã sửa:**
+- **Bản dịch bị cụt nửa câu**: khi bản dịch có dấu ngoặc kép `"` (vd. dấu hiệu "bánh vòng"), JSON AI trả về bị hỏng; cách đọc dự phòng cũ cắt bản dịch ngay tại dấu `"` mà vẫn coi là thành công. Nay đọc lại đúng cả câu (`parseLayoutJson`), xuống dòng trong chuỗi không còn làm hỏng JSON, mục cuối bị cắt giữa chừng thì dịch bù chứ không lấy nửa câu.
+- **Chế độ JSON** cho ShopAIKey / key hệ thống (`response_format: json_object`, `/api/ai/chat` chuyển tiếp); proxy không nhận thì tự bỏ sau 1 lần. Prompt yêu cầu dùng “ ” thay cho `"`.
+- **Một phần lỗi làm hỏng cả trang**: trang được chia nhiều phần gửi song song, chỉ cần 1 phần lỗi (JSON hỏng / proxy bận) là cả trang báo lỗi và mất phần đã dịch. Nay giữ các phần thành công, khối thiếu được dịch bù.
+- **Còn sót chữ tiếng Anh**: khối AI trả lại nguyên văn tiếng Anh nay được nhận ra và dịch bù (trừ tài liệu tham khảo, tên riêng). Không dịch được khối nào → báo lỗi thay vì lưu trang toàn chữ gốc.
+- **Font sai / chữ to nhỏ thất thường**: mạng chậm > 4 giây thì font Tinos/Arimo chưa tải xong nhưng web vẫn coi là xong cả phiên → trang vẽ bằng font dự phòng và bị lưu vào đệm. Nay kiểm tra font đã sẵn sàng thật (chờ tối đa 8 giây, thử lại ở trang sau), nạp cả bộ ký hiệu µ ± ≤ ≥ × →.
+- **Dựng lại trang từ bản lưu bị lỗi → lặp vô hạn** (mỗi vòng còn gọi AI dịch bù → tốn token, máy chạy ngầm). Nay chỉ thử 1 lần, hiện thông báo lỗi; nút "Dịch lại" hiện cả khi trang chỉ có bản lưu đám mây (trước đây trang bị kẹt: nút Dịch bị khoá, không có nút Dịch lại).
+- **Hai file PDF trên máy trùng tên + cùng số trang** dùng chung đệm → hiện nhầm bản dịch của file kia. Khoá đệm của file chưa lưu lên tài khoản nay kèm mã nhận dạng PDF (file đã lưu tài khoản không đổi). File cục bộ đã dịch trước đây sẽ phải dịch lại một lần.
+
+**Dịch thường — giảm token:**
+- **Tài liệu tham khảo không gửi AI**: cụm ≥ 2 mục tham khảo liền nhau được giữ nguyên ngay trên máy (trước đây AI chép lại y nguyên, tốn hàng nghìn token đầu ra mỗi trang tham khảo). Trang toàn tham khảo → 0 token.
+- **Hết nội dung lặp 2 lần** khi mạng/proxy rớt giữa lúc đang hiện chữ: trước đây web dịch lại từ đầu và nối thêm vào phần đã hiện (lặp nội dung, tốn gấp đôi). Nay dừng và báo lỗi để bấm dịch lại.
+- Key Google, chế độ đọc ảnh: mức suy nghĩ `minimal` (trước `low`), giống ShopAIKey → ít token đầu ra hơn.
+
+### Cập nhật v7.9 — đổi model ShopAIKey sang gemini-3-flash-preview
+
+- Mọi yêu cầu qua **ShopAIKey / key hệ thống** (dịch thường, chuyên sâu, giữ định dạng, OCR, nhận diện cột, tóm tắt, tra thuật ngữ) dùng mặc định **`gemini-3-flash-preview`** (trước: `gemini-3.5-flash-lite`).
+- `/api/ai/chat`: model mặc định `gemini-3-flash-preview` (vẫn đổi được bằng `SYSTEM_AI_DEFAULT_MODEL`).
+- Cài đặt: ô "Model Proxy" có thêm `gemini-3-flash-preview (mặc định)`; vẫn chọn được `gemini-3.5-flash-lite` nếu muốn rẻ hơn. Ai trước đây đã chọn tay `gemini-3.5-flash-lite` được tự chuyển về "Mặc định" một lần.
+- Định dạng yêu cầu giữ nguyên (OpenAI-compatible `/chat/completions`): `reasoning_effort: "minimal"` (proxy từ chối thì tự thương lượng mức thấp kế tiếp), `response_format: json_object` cho dịch giữ định dạng (proxy từ chối thì tự bỏ sau 1 lần).
+- Key Google riêng (AIzaSy…) không đổi: vẫn theo "Chế độ dịch" trong Cài đặt, có tự chuyển model dự phòng.
+- Lưu ý: 3 Flash Preview chính xác hơn nhưng giá/token cao hơn Flash-Lite; xem số token thực tế trong console (`Token (gemini-3-flash-preview): vào …, ra …`).
+
+### Cập nhật v8.0 — chọn model theo chức năng (ShopAIKey / key hệ thống) + sửa nhận diện model cũ
+
+| Chức năng | Model (ShopAIKey / key hệ thống) |
+|---|---|
+| Dịch thường (lớp chữ & đọc ảnh), dịch giữ định dạng, dịch bù dòng sót, tóm tắt, tra thuật ngữ | **gpt-4.1-mini** |
+| OCR (trang scan, chữ trong hình), nhận diện số cột, dịch chuyên sâu | **gemini-3.1-flash-lite** |
+
+- gpt-4.1-mini: không gửi tham số "suy nghĩ" (`reasoning_effort` chỉ gửi cho model Gemini 3); chế độ JSON (`response_format: json_object`) cho dịch giữ định dạng; proxy không nhận thì tự bỏ.
+- Ô "Model Proxy" trong Cài đặt: ô Dịch thường ghi đè model dịch thường; ô Chuyên sâu nay **có tác dụng thật** (trước đây bị bỏ qua). Dịch giữ định dạng và OCR luôn cố định. Lựa chọn tự đặt cũ được đưa về "Mặc định" một lần.
+- `/api/ai/chat`: thêm `gpt-4.1-mini`, `gpt-4.1` vào danh sách cho phép; mặc định `gpt-4.1-mini`.
+
+**Lỗi nhận diện model (log `Using key … for gemini-flash-lite-latest`):** "Chế độ dịch" lưu trong máy còn tên engine cũ (vd. `gemini-flash-lite-latest`) và dòng log in tên engine này chứ không phải model thật được gửi. Nay tên engine cũ được chuẩn hoá về Cơ bản / Chuyên sâu khi mở web, và log in đúng model thật: `engine "…" → model gpt-4.1-mini`.

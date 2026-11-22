@@ -5,6 +5,13 @@ import { getEffectiveUserLevel } from "../../src/types";
 let roundRobinCounter = 0;
 
 const ALLOWED_MODELS = new Set([
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+  "gemini-3.5-flash",
+  "gemini-flash-latest",
+  "gemini-flash-lite-latest",
   "gemini-2.5-flash-lite",
   "gemini-2.5-flash",
   "gemini-2.5-pro",
@@ -13,6 +20,8 @@ const ALLOWED_MODELS = new Set([
   "gemini-3.6-flash",
   "gemini-3-flash-preview",
   "gpt-4o",
+  "gpt-4.1-mini",
+  "gpt-4.1",
   "gpt-4o-mini",
   "gpt-4.5-preview",
   "claude-3-5-sonnet",
@@ -25,7 +34,8 @@ const ALLOWED_MODELS = new Set([
     .map(m => m.trim())
     .filter(Boolean)
 ]);
-const DEFAULT_MODEL = (process.env.SYSTEM_AI_DEFAULT_MODEL || "gemini-2.5-flash-lite").trim();
+// v8.0: mặc định gpt-4.1-mini (đổi bằng biến môi trường SYSTEM_AI_DEFAULT_MODEL)
+const DEFAULT_MODEL = (process.env.SYSTEM_AI_DEFAULT_MODEL || "gpt-4.1-mini").trim();
 
 const PRIMARY_ADMIN_EMAILS = ["hoanghiep1296@gmail.com", "mrihachnach@gmail.com"];
 const PRIMARY_ADMIN_UIDS = ["4cFbfQhPMpgStJXZ9EpAVcd90i33"];
@@ -103,7 +113,7 @@ export default async function handler(req: any, res: any) {
   }
 
   const bodyData = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-  const { model, messages, stream, temperature, max_tokens, reasoning_effort } = bodyData || {};
+  const { model, messages, stream, temperature, max_tokens, reasoning_effort, response_format } = bodyData || {};
 
   if (!messages || !Array.isArray(messages)) {
     return res.status(400).json({ error: "Danh sách tin nhắn (messages) không hợp lệ." });
@@ -134,7 +144,9 @@ export default async function handler(req: any, res: any) {
     temperature: typeof temperature === 'number' ? temperature : 0.2,
     ...(typeof max_tokens === 'number' ? { max_tokens } : {}),
     // Giảm "suy nghĩ" của model để tiết kiệm token/thời gian (chỉ nhận giá trị hợp lệ)
-    ...(['none', 'minimal', 'low', 'medium', 'high'].includes(reasoning_effort) ? { reasoning_effort } : {})
+    ...(['none', 'minimal', 'low', 'medium', 'high'].includes(reasoning_effort) ? { reasoning_effort } : {}),
+    // Chỉ chuyển tiếp chế độ JSON đơn giản (dịch giữ định dạng)
+    ...(response_format?.type === 'json_object' ? { response_format: { type: 'json_object' } } : {})
   };
 
   // 5. Execute Upstream Request with Key Rotation

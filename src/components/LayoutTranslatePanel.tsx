@@ -87,6 +87,8 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const abortRef = useRef<AbortController | null>(null);
   /** Huỷ việc dựng lại trang đang xem từ bản lưu khi lật sang trang khác / đóng bảng. */
   const rebuildAbortRef = useRef<AbortController | null>(null);
+  /** Trang dựng lại từ bản lưu bị lỗi → không tự thử lại liên tục (trước đây lặp vô hạn, mỗi lần còn gọi AI dịch bù). */
+  const rebuildFailedRef = useRef<Set<number>>(new Set());
   const resultsRef = useRef(results);
   resultsRef.current = results;
   const cloudPairsRef = useRef(cloudPairs);
@@ -189,12 +191,18 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
 
   useEffect(() => {
     if (loadingCache || cloudLoading || running || rebuilding !== null) return;
-    if (resultsRef.current[currentPage] || !cloudPairs[currentPage]) return;
+    if (resultsRef.current[currentPage] || !cloudPairs[currentPage] || rebuildFailedRef.current.has(currentPage)) return;
     const ctrl = new AbortController();
     rebuildAbortRef.current = ctrl;
-    setRebuilding(currentPage);
-    rebuildFromCloud(currentPage, ctrl.signal)
-      .catch(e => { if (!ctrl.signal.aborted) console.warn('[Layout] Dựng lại trang thất bại:', e); })
+    const page = currentPage;
+    setRebuilding(page);
+    rebuildFromCloud(page, ctrl.signal)
+      .catch(e => {
+        if (ctrl.signal.aborted || /aborted/i.test(String(e?.message))) return;
+        console.warn('[Layout] Dựng lại trang thất bại:', e);
+        rebuildFailedRef.current.add(page);
+        setErrors(prev => ({ ...prev, [page]: `Không dựng lại được trang từ bản đã lưu (${friendlyError(e)}). Bấm "Dịch lại" để dịch mới.` }));
+      })
       .finally(() => {
         if (rebuildAbortRef.current === ctrl) rebuildAbortRef.current = null;
         setRebuilding(null);
@@ -228,7 +236,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     // Key Google riêng: 3 trang khi có ≥3 key, còn lại 2.
     const keys: string[] = (translator as any).apiKeys || [];
     const viaProxy = !!(translator as any).usesProxy?.();
-    const concurrency = todo.length <= 1 ? 1 : viaProxy ? 2 : (keys.length >= 3 ? 3 : 2);
+    const concurrency = todo.length <= 1 ? 1 : viaProxy ? 3 : (keys.length >= 3 ? 3 : 2);
     const queue = [...todo];
     let ok = 0;
     let finished = 0;
@@ -307,6 +315,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   };
 
   const handleRetranslate = async () => {
+    rebuildFailedRef.current.delete(currentPage);
     await deleteLayoutPages(docKey, [currentPage]);
     setResults(prev => { const n = { ...prev }; delete n[currentPage]; return n; });
     runPages([currentPage], true);
@@ -455,7 +464,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         title="Dịch / xuất nhiều trang">
         <Layers className="w-3.5 h-3.5" /><span className="hidden 2xl:inline">Nhiều trang</span>
       </button>
-      {current && !running && (
+      {hasSaved && !running && (
         <button onClick={handleRetranslate} className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Dịch lại trang này">
           <RefreshCw className="w-3.5 h-3.5" />
         </button>

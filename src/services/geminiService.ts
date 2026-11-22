@@ -23,33 +23,41 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 class ProxyGate {
   private active = 0;
   private waiters: (() => void)[] = [];
-  private limit: number;
+  private limit = 2;              // bắt đầu 2 yêu cầu cùng lúc (an toàn), tăng dần khi proxy trả lời tốt
   private pauseUntil = 0;
   private lastStart = 0;
   private okStreak = 0;
   private overloads = 0;
-  constructor(private readonly spacingMs = 350) {
-    this.limit = this.max;
-  }
+  /** Ngưỡng an toàn học được: số yêu cầu cùng lúc vừa gây quá tải − 1 (giữ 10 phút, không thử vượt lại). */
+  private learnedCap = Infinity;
+  private learnedUntil = 0;
+  constructor(private readonly spacingMs = 250) {}
+  /** Trần số yêu cầu cùng lúc (mặc định 6; chỉnh bằng localStorage "mediTrans_proxyMaxConcurrent", 1–10). */
   get max(): number {
     try {
       const v = parseInt((typeof window !== 'undefined' && localStorage.getItem('mediTrans_proxyMaxConcurrent')) || '', 10);
-      if (v >= 1 && v <= 8) return v;
+      if (v >= 1 && v <= 10) return v;
     } catch { /* ignore */ }
-    return 2;
+    return 6;
   }
+  private get cap(): number {
+    if (Date.now() > this.learnedUntil) this.learnedCap = Infinity;
+    return Math.min(this.max, this.learnedCap);
+  }
+  get current(): number { return Math.min(this.limit, this.cap); }
   private wakeAll() { const w = this.waiters; this.waiters = []; w.forEach(f => f()); }
   async acquire(signal?: AbortSignal): Promise<void> {
     for (;;) {
       if (signal?.aborted) throw new Error('Translation aborted');
       const now = Date.now();
-      const wait = Math.max(this.pauseUntil - now, this.active < this.limit ? this.lastStart + this.spacingMs - now : 0);
-      if (this.active < this.limit && wait <= 0) {
+      const lim = this.current;
+      const wait = Math.max(this.pauseUntil - now, this.active < lim ? this.lastStart + this.spacingMs - now : 0);
+      if (this.active < lim && wait <= 0) {
         this.active++;
         this.lastStart = now;
         return;
       }
-      if (this.active < this.limit || this.pauseUntil > now) {
+      if (this.active < lim || this.pauseUntil > now) {
         await sleepAbortable(Math.max(20, wait), signal);
         continue;
       }
@@ -66,27 +74,45 @@ class ProxyGate {
     const w = this.waiters.shift();
     if (w) w();
   }
+  /** Thành công liên tục → tăng dần số yêu cầu cùng lúc (tới trần). */
   onSuccess() {
     this.overloads = 0;
-    if (++this.okStreak >= 6 && this.limit < this.max) { this.limit++; this.okStreak = 0; this.wakeAll(); }
+    if (++this.okStreak >= 4 && this.limit < this.cap) { this.limit++; this.okStreak = 0; this.wakeAll(); }
+  }
+  /** Quá tải → giảm một nửa số yêu cầu cùng lúc và tạm dừng theo Retry-After / lùi dần 3 → 6 → 12 → 24 giây. */
+  /** Proxy lỗi tạm thời (5xx, rớt mạng) — không phải do gửi quá nhiều → chỉ dừng ngắn, không hạ ngưỡng. */
+  onServerError() {
+    this.okStreak = 0;
+    this.pauseUntil = Math.max(this.pauseUntil, Date.now() + 800);
   }
   onOverload(retryAfterMs?: number) {
     this.okStreak = 0;
-    this.limit = 1;
-    const backoff = retryAfterMs && retryAfterMs > 0 ? Math.min(60000, retryAfterMs) : Math.min(30000, 4000 * 2 ** this.overloads);
+    // Quá tải khi đang chạy N yêu cầu → ngưỡng an toàn là N−1 (tối thiểu 1); không thử vượt lại trong 10 phút
+    const atLoad = Math.max(1, this.active);
+    this.learnedCap = Math.max(1, Math.min(this.learnedCap, atLoad - 1 || 1));
+    this.learnedUntil = Date.now() + 10 * 60 * 1000;
+    // Đã biết ngưỡng an toàn (N−1) → dùng luôn ngưỡng đó, không chia đôi rồi phải tăng lại từ từ
+    this.limit = Math.max(1, this.learnedCap);
+    const backoff = retryAfterMs && retryAfterMs > 0 ? Math.min(60000, retryAfterMs) : Math.min(16000, 1500 * 2 ** this.overloads);
     this.overloads++;
     this.pauseUntil = Math.max(this.pauseUntil, Date.now() + backoff);
-    console.warn(`[MediTrans] Proxy quá tải → tạm dừng ${Math.round(backoff / 1000)} giây, gửi tối đa 1 yêu cầu/lần.`);
+    console.warn(`[MediTrans] Proxy quá tải → tạm dừng ${Math.round(backoff / 1000)} giây, giảm còn ${this.limit} yêu cầu/lần.`);
   }
 }
 const proxyGate = new ProxyGate();
 /** Số yêu cầu tối đa gửi proxy cùng lúc (để các màn dịch hàng loạt đặt số luồng phù hợp). */
 export function getProxyMaxConcurrent(): number { return proxyGate.max; }
+/** Số yêu cầu proxy đang được phép chạy cùng lúc (tự điều chỉnh theo tình trạng proxy). */
+export function getProxyCurrentConcurrent(): number { return proxyGate.current; }
 
 /** Phản hồi proxy có phải do quá tải / giới hạn tốc độ không. */
 function isOverloadStatus(status: number, text = ''): boolean {
   return status === 429 || status === 408 || (status >= 500 && status !== 501) ||
     /overload|rate.?limit|too many|quá tải|capacity|try again later/i.test(text);
+}
+/** Bị từ chối vì gửi quá nhiều / quá nhanh (khác lỗi máy chủ tạm thời). */
+function isRateLimit(status: number, text = ''): boolean {
+  return status === 429 || /rate.?limit|too many|overload|quá tải|capacity|concurren/i.test(text);
 }
 function retryAfterMs(res: Response): number | undefined {
   const h = res.headers.get('retry-after');
@@ -95,6 +121,52 @@ function retryAfterMs(res: Response): number | undefined {
   if (Number.isFinite(sec)) return sec * 1000;
   const t = Date.parse(h);
   return Number.isFinite(t) ? Math.max(0, t - Date.now()) : undefined;
+}
+
+/**
+ * Đọc phản hồi JSON của dịch khối chữ ({"t":[{"id","v"}]}) một cách chịu lỗi.
+ * Lỗi "thỉnh thoảng" trước đây:
+ *  - Xuống dòng thật bên trong chuỗi → JSON.parse hỏng → cả phần bị dịch lại (tốn token) hoặc mất khối.
+ *  - Bản dịch chứa dấu " chưa thoát (vd. dấu hiệu "bánh vòng") → cách đọc dự phòng cũ CẮT CỤT bản dịch tại dấu "
+ *    mà vẫn coi là thành công → chữ trên trang bị thiếu nửa câu.
+ *  - Phản hồi bị cắt giữa chừng → mục cuối dở dang bị bỏ (để dịch bù), không lấy nửa câu.
+ */
+export function parseLayoutJson(raw: string): any[] {
+  let txt = (raw || '').replace(/```json|```/gi, '').replace(/[\u0000-\u001F]+/g, ' ').trim();
+  const start = txt.indexOf('{');
+  const end = txt.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    const body = txt.slice(start, end + 1);
+    try {
+      const data = JSON.parse(body);
+      const arr = Array.isArray(data) ? data : (data?.t || data?.translations || data?.blocks);
+      if (Array.isArray(arr)) return arr;
+    } catch { /* đọc dự phòng bên dưới */ }
+    txt = body;
+  }
+  const heads: { id: string; start: number; valStart: number }[] = [];
+  const re = /\{\s*"id"\s*:\s*"([^"]+)"\s*,\s*"(?:v|text|translation)"\s*:\s*"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(txt))) heads.push({ id: m[1], start: m.index, valStart: re.lastIndex });
+  const out: { id: string; v: string }[] = [];
+  heads.forEach((h, i) => {
+    const seg = txt.slice(h.valStart, i + 1 < heads.length ? heads[i + 1].start : txt.length);
+    const close = seg.match(/"\s*\}\s*,?\s*(?:\]\s*\}?\s*)?$/);
+    if (!close) return; // mục bị cắt giữa chừng → để dịch bù
+    const v = seg.slice(0, close.index);
+    let fixed = '';
+    for (let k = 0; k < v.length; k++) {
+      const ch = v[k];
+      if (ch === '\\') { fixed += ch + (v[k + 1] ?? ''); k++; }
+      else if (ch === '"') fixed += '\\"';
+      else fixed += ch;
+    }
+    let val: string;
+    try { val = JSON.parse(`"${fixed}"`); } catch { val = v.replace(/\\"/g, '"'); }
+    out.push({ id: h.id, v: val });
+  });
+  if (!out.length) throw new Error('Phản hồi dịch không phải JSON hợp lệ.');
+  return out;
 }
 
 export class GeminiService implements TranslationService {
@@ -109,6 +181,8 @@ export class GeminiService implements TranslationService {
   /** Model không nhận mức "minimal" → lùi về "low" trước khi bỏ hẳn tham số. */
   private static thinkingLowOnly = new Set<string>();
   private static reasoningUnsupported = false;
+  /** Proxy không nhận response_format {type:"json_object"} → không gửi nữa. */
+  private static jsonModeUnsupported = false;
 
   /**
    * Dịch thuật không cần "suy nghĩ" dài: Gemini 3 mặc định thinking mức CAO (tốn token đầu ra + chậm).
@@ -133,7 +207,9 @@ export class GeminiService implements TranslationService {
   /** Lỗi do tham số thinking/reasoning không được hỗ trợ → ghi nhớ để lần sau bỏ, trả về true để thử lại ngay. */
   private static handleThinkingError(model: string, error: any): boolean {
     const msg = String(error?.message || '').toLowerCase();
-    if (msg.includes('reasoning') && !GeminiService.reasoningUnsupported) {
+    // Proxy không có model → đã ghi nhớ, gọi lại ngay với model kế tiếp (không chờ, không đổi key)
+    if (msg.startsWith('proxy_model_unavailable')) return true;
+    if (msg.includes('reasoning') && !msg.includes('proxy error') && !GeminiService.reasoningUnsupported) {
       GeminiService.reasoningUnsupported = true;
       console.warn('[MediTrans] Proxy không hỗ trợ reasoning_effort → bỏ tham số này.');
       return true;
@@ -153,8 +229,38 @@ export class GeminiService implements TranslationService {
     return false;
   }
 
+  /**
+   * Thời gian chờ trước khi thử lại. Proxy báo 429: bộ điều tiết chung đã tạm dừng đúng mức → chỉ chờ ngắn
+   * (trước đây chờ thêm 1–8 giây nữa → chờ hai lần, chậm gấp đôi khi proxy yếu).
+   */
+  private static retryDelay(error: any, normal: number): number {
+    return /proxy error \(429\)/i.test(String(error?.message || '')) ? 150 : normal;
+  }
+
+  /**
+   * Mức "suy nghĩ" đã thương lượng được với proxy cho từng model (null = proxy không nhận tham số này).
+   * Gemini 3 KHÔNG tắt được suy nghĩ; nếu bỏ trống tham số, model suy nghĩ ở mức MẶC ĐỊNH (cao) → tốn rất nhiều
+   * token đầu ra và chậm. Vì vậy khi proxy từ chối một giá trị, thử giá trị thấp kế tiếp chứ không bỏ trống.
+   */
+  private static reasoningChoice = new Map<string, string | null>();
+
+  /** Proxy từ chối reasoning_effort → chọn mức thấp nhất còn lại. Trả về true nếu đã đổi (gọi lại ngay). */
+  private static negotiateReasoning(model: string, tried: string | undefined, errText: string): boolean {
+    if (!tried || !/reasoning/i.test(errText)) return false;
+    const listed = (errText.match(/valid values are:?\s*([a-z ,|]+)/i)?.[1] || '').toLowerCase().split(/[\s,|]+/).filter(Boolean);
+    const order = ['minimal', 'none', 'low'];
+    const pos = order.indexOf(tried);
+    const next = order.slice(pos + 1).find(v => !listed.length || listed.includes(v))
+      ?? (listed.includes('low') && tried !== 'low' ? 'low' : null);
+    GeminiService.reasoningChoice.set(model, next);
+    console.warn(`[MediTrans] Proxy không nhận reasoning_effort="${tried}" cho ${model} → ${next ? `dùng "${next}"` : 'bỏ tham số'}.`);
+    return true;
+  }
+
   /** reasoning_effort cho proxy kiểu OpenAI (chỉ với model Gemini có thinking). */
   private static reasoningFor(model: string): string | undefined {
+    const chosen = GeminiService.reasoningChoice.get(model);
+    if (chosen !== undefined) return chosen ?? undefined;
     if (GeminiService.reasoningUnsupported) return undefined;
     const m = (model || '').toLowerCase();
     if (/gemini-2\.5-flash(?!-lite)/.test(m)) return 'none';
@@ -261,7 +367,8 @@ export class GeminiService implements TranslationService {
     
     try {
       const isProxy = this.isCurrentKeyProxy(key);
-      console.log(`[MediTrans] Using key: ...${key.substring(key.length - 4)} (${isProxy ? 'ShopAIKey/Proxy' : 'Google Gemini'}) for ${this.modelName}`);
+      // Ghi đúng model THỰC SỰ được gửi (trước đây in tên engine lưu trong máy, vd. "gemini-flash-lite-latest", gây hiểu nhầm)
+      console.log(`[MediTrans] Using key: ...${key.substring(key.length - 4)} (${isProxy ? 'ShopAIKey/Proxy' : 'Google Gemini'}) — engine "${this.modelName}" → model ${isProxy ? this.mapModelForOpenAI(this.modelName) : this.googleModel(key)}`);
       if (isProxy) {
         return { ai: null, key };
       }
@@ -310,37 +417,37 @@ export class GeminiService implements TranslationService {
     return true;
   }
 
+  /* ---------------- ShopAIKey / proxy: chọn model ---------------- */
+
+  /**
+   * v8.0 — model cho ShopAIKey / key hệ thống, chọn theo CHỨC NĂNG (không theo tên engine cũ lưu trong máy):
+   *  - Dịch thường + dịch giữ định dạng: gpt-4.1-mini
+   *  - OCR (đọc ảnh trang scan / chữ trong hình / nhận diện cột) + dịch chuyên sâu: gemini-3.1-flash-lite
+   * Ô "Model Proxy" trong Cài đặt: ô Dịch thường ghi đè cho dịch thường, ô Chuyên sâu ghi đè cho chuyên sâu.
+   * Dịch giữ định dạng và OCR luôn cố định (JSON / toạ độ khung ổn định, không bị cài đặt cũ làm hỏng).
+   */
+  public static readonly PROXY_NORMAL_MODEL = 'gpt-4.1-mini';
+  public static readonly PROXY_DEEP_MODEL = 'gemini-3.1-flash-lite';
+  public static readonly PROXY_OCR_MODEL = 'gemini-3.1-flash-lite';
+  /** Mã chức năng nội bộ (truyền thay cho tên model). */
+  private static readonly LAYOUT_MODEL = '__layout_fixed__';
+  private static readonly OCR_MODEL = '__ocr_fixed__';
+  /** Engine "Chuyên sâu" (nút Dịch chuyên sâu / Chế độ dịch = Chuyên sâu). */
+  public static isDeepEngine(engine?: string): boolean {
+    return (engine || '').trim() === 'gemini-3.6-flash';
+  }
+
   private mapModelForOpenAI(modelName: string): string {
-    const customNormal = typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customOpenAIModelNormal') : null;
-    const customDeep = typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customOpenAIModelDeep') : null;
-    const legacyCustom = typeof window !== 'undefined' ? localStorage.getItem('mediTrans_customOpenAIModel') : null;
+    if (modelName === GeminiService.LAYOUT_MODEL) return GeminiService.PROXY_NORMAL_MODEL;
+    if (modelName === GeminiService.OCR_MODEL) return GeminiService.PROXY_OCR_MODEL;
+    const ls = (k: string) => (typeof window !== 'undefined' ? localStorage.getItem(k) : null)?.trim() || '';
+    if (GeminiService.isDeepEngine(modelName)) return ls('mediTrans_customOpenAIModelDeep') || GeminiService.PROXY_DEEP_MODEL;
+    return ls('mediTrans_customOpenAIModelNormal') || ls('mediTrans_customOpenAIModel') || GeminiService.PROXY_NORMAL_MODEL;
+  }
 
-    const isDeepMode = modelName === 'gemini-3.6-flash' || modelName === 'gemini-3-flash-preview' || modelName.toLowerCase().includes('deep') || modelName.toLowerCase().includes('pro');
-
-    if (isDeepMode) {
-      if (customDeep && customDeep.trim()) {
-        return customDeep.trim();
-      }
-      if (customNormal && customNormal.trim()) {
-        return customNormal.trim();
-      }
-    } else {
-      if (customNormal && customNormal.trim()) {
-        return customNormal.trim();
-      }
-    }
-
-    if (legacyCustom && legacyCustom.trim()) {
-      return legacyCustom.trim();
-    }
-
-    if (modelName === 'gemini-flash-lite-latest' || modelName === 'gemini-flash' || modelName === 'gemini-2.5-flash-lite') {
-      return 'gemini-2.5-flash-lite';
-    }
-    if (modelName === 'gemini-3.6-flash' || modelName === 'gemini-3-flash-preview') {
-      return 'gemini-2.5-flash-lite';
-    }
-    return modelName;
+  /** Model cố định → không tự đổi model khi proxy báo lỗi model (lỗi được báo thẳng cho người dùng). */
+  private static noteProxyModelError(_model: string, _status: number, _text: string): boolean {
+    return false;
   }
 
   /**
@@ -547,7 +654,7 @@ export class GeminiService implements TranslationService {
         signal
       });
     } catch (e) {
-      if (!signal?.aborted) proxyGate.onOverload(3000); // lỗi mạng / proxy cắt kết nối
+      if (!signal?.aborted) proxyGate.onServerError(); // lỗi mạng / proxy cắt kết nối
       throw e;
     }
 
@@ -556,7 +663,10 @@ export class GeminiService implements TranslationService {
         throw new Error("Tài khoản của bạn chưa đủ Level 2 hoặc đã hết hạn.");
       }
       const errText = await response.text();
-      if (isOverloadStatus(response.status, errText)) proxyGate.onOverload(retryAfterMs(response));
+      if (response.status === 400 && GeminiService.negotiateReasoning(mappedModel, body.reasoning_effort, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (400): đổi mức suy nghĩ`);
+        if (GeminiService.noteProxyModelError(mappedModel, response.status, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (${response.status}): ${errText.slice(0, 200)}`);
+      if (isRateLimit(response.status, errText)) proxyGate.onOverload(retryAfterMs(response));
+        else if (isOverloadStatus(response.status, errText)) proxyGate.onServerError();
       throw new Error(`ShopAIKey/Proxy Error (${response.status}): ${errText}`);
     }
     proxyGate.onSuccess();
@@ -622,7 +732,9 @@ export class GeminiService implements TranslationService {
     prompt: string,
     imageBase64: string,
     signal?: AbortSignal,
-    maxTokens = 8192
+    maxTokens = 8192,
+    /** Yêu cầu proxy trả JSON hợp lệ (response_format json_object) — giảm lỗi JSON hỏng ở dịch giữ định dạng. */
+    jsonMode = false
   ): Promise<string> {
     const cleanBaseUrl = this.getProxyBaseUrl();
     const mappedModel = this.mapModelForOpenAI(model);
@@ -656,6 +768,7 @@ export class GeminiService implements TranslationService {
     };
     const reasoning = GeminiService.reasoningFor(mappedModel);
     if (reasoning) body.reasoning_effort = reasoning;
+    if (jsonMode && !GeminiService.jsonModeUnsupported) body.response_format = { type: 'json_object' };
 
     let requestUrl = cleanBaseUrl;
     let authHeaderValue = `Bearer ${key.trim()}`;
@@ -687,7 +800,7 @@ export class GeminiService implements TranslationService {
           signal
         });
       } catch (e) {
-        if (!signal?.aborted) proxyGate.onOverload(3000); // lỗi mạng / proxy cắt kết nối
+        if (!signal?.aborted) proxyGate.onServerError(); // lỗi mạng / proxy cắt kết nối
         throw e;
       }
 
@@ -696,11 +809,22 @@ export class GeminiService implements TranslationService {
           throw new Error("Tài khoản của bạn chưa đủ Level 2 hoặc đã hết hạn.");
         }
         const errText = await response.text();
-        if (isOverloadStatus(response.status, errText)) proxyGate.onOverload(retryAfterMs(response));
+        if (response.status === 400 && GeminiService.negotiateReasoning(mappedModel, body.reasoning_effort, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (400): đổi mức suy nghĩ`);
+        // Proxy không nhận response_format → ghi nhớ, gửi lại ngay không kèm tham số này (chỉ mất 1 yêu cầu mỗi phiên)
+        if (response.status === 400 && body.response_format && !/api.?key|unauthor|invalid.*key/i.test(errText)) {
+          GeminiService.jsonModeUnsupported = true;
+          console.warn('[MediTrans] Proxy không nhận response_format → bỏ tham số này.');
+          throw new Error('PROXY_MODEL_UNAVAILABLE (400): bỏ response_format');
+        }
+        if (GeminiService.noteProxyModelError(mappedModel, response.status, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (${response.status}): ${errText.slice(0, 200)}`);
+        if (isRateLimit(response.status, errText)) proxyGate.onOverload(retryAfterMs(response));
+        else if (isOverloadStatus(response.status, errText)) proxyGate.onServerError();
         throw new Error(`ShopAIKey/Proxy Error (${response.status}): ${errText}`);
       }
       data = await response.json();
       proxyGate.onSuccess();
+      const u = data?.usage;
+      if (u) console.log(`[MediTrans] Token (${mappedModel}): vào ${u.prompt_tokens ?? '?'}, ra ${u.completion_tokens ?? '?'}${u.completion_tokens_details?.reasoning_tokens ? ` (trong đó suy nghĩ ${u.completion_tokens_details.reasoning_tokens})` : ''}.`);
     } finally {
       proxyGate.release();
     }
@@ -920,6 +1044,9 @@ Example of the expected shape:
       }
 
       const isProxy = this.isCurrentKeyProxy(key);
+      // Đã hiển thị một phần bản dịch → KHÔNG thử lại từ đầu (trước đây thử lại thì nội dung bị lặp 2 lần trên màn hình
+      // và tốn gấp đôi token); báo lỗi để người dùng bấm dịch lại.
+      let streamed = false;
 
       // Handle ShopAIKey / OpenAI Proxy Key
       if (isProxy) {
@@ -928,6 +1055,7 @@ Example of the expected shape:
           for await (const chunkText of this.callOpenAIStream(key, requestModel, systemInstruction, prompt, imageBuffer, signal)) {
             if (signal?.aborted) break;
             fullText += chunkText;
+            streamed = true;
             yield chunkText;
           }
           GeminiService.lastSuccessfulKey = key;
@@ -950,6 +1078,7 @@ Example of the expected shape:
           if (signal?.aborted || error.message === "Translation aborted") {
             throw new Error("Translation aborted");
           }
+          if (streamed) throw error;
           if (GeminiService.handleThinkingError(this.mapModelForGoogle(requestModel), error)) continue;
           const isQuota = error.message?.includes("429") || error.message?.toLowerCase().includes("quota") || error.message?.includes("401");
           const isServerErr = error.message?.includes("500") || error.message?.includes("502") || error.message?.includes("503") || error.message?.includes("504") || error.message?.toLowerCase().includes("fetch");
@@ -958,7 +1087,7 @@ Example of the expected shape:
             retryCount++;
             const delay = Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500);
             console.warn(`[MediTrans] Retrying page ${pageNumber} (attempt ${retryCount}/${MAX_RETRIES}) after ${delay.toFixed(0)}ms...`);
-            await sleepAbortable(delay, signal);
+            await sleepAbortable(GeminiService.retryDelay(error, delay), signal);
             continue;
           }
           throw error;
@@ -972,7 +1101,7 @@ Example of the expected shape:
         const genModel = ai.getGenerativeModel({ 
           model: googleModel,
           systemInstruction: systemInstruction,
-          generationConfig: GeminiService.genConfig(googleModel, { temperature: 0, maxOutputTokens: 8192 }, 'low')
+          generationConfig: GeminiService.genConfig(googleModel, { temperature: 0, maxOutputTokens: 8192 })
         });
 
         const response = await genModel.generateContentStream([
@@ -1008,6 +1137,7 @@ Example of the expected shape:
 
           if (chunkText) {
             fullText += chunkText;
+            streamed = true;
             yield chunkText;
           }
         }
@@ -1024,6 +1154,7 @@ Example of the expected shape:
         if (signal?.aborted || error.message === "Translation aborted") {
           throw new Error("Translation aborted");
         }
+        if (streamed) throw error;
         if (GeminiService.handleThinkingError(this.googleModel(key, requestModel), error)) continue;
         {
           const ge = this.onGoogleError(key, requestModel, error);
@@ -1097,7 +1228,7 @@ Example of the expected shape:
           if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
             retryCount++;
             const delay = Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500);
-            await sleepAbortable(delay, signal);
+            await sleepAbortable(GeminiService.retryDelay(error, delay), signal);
             continue;
           }
           throw error;
@@ -1109,7 +1240,7 @@ Example of the expected shape:
         const genModel = ai.getGenerativeModel({ 
           model: googleModel,
           systemInstruction: systemInstruction,
-          generationConfig: GeminiService.genConfig(googleModel, { temperature: 0, maxOutputTokens: 8192 }, 'low')
+          generationConfig: GeminiService.genConfig(googleModel, { temperature: 0, maxOutputTokens: 8192 })
         });
 
         const result = await genModel.generateContent([
@@ -1208,7 +1339,7 @@ Example of the expected shape:
     const prompt = "Hãy trích xuất văn bản từ hình ảnh này.";
 
     if (this.isCurrentKeyProxy(key)) {
-      return await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, imageBuffer, undefined);
+      return await this.callOpenAINonStream(key, GeminiService.OCR_MODEL, systemInstruction, prompt, imageBuffer, undefined);
     }
 
     return this.withGoogleModel(key, this.modelName, async (googleModel) => {
@@ -1316,7 +1447,7 @@ Rules:
         const isQuota = msg.includes('429') || msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('401');
         if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
           retryCount++;
-          await sleepAbortable(Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500), signal);
+          await sleepAbortable(GeminiService.retryDelay(error, Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500)), signal);
           continue;
         }
         throw error;
@@ -1388,7 +1519,7 @@ Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bo
       try {
         let raw = '';
         if (this.isCurrentKeyProxy(key)) {
-          raw = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, imageDataUrl, signal, 16384);
+          raw = await this.callOpenAINonStream(key, GeminiService.OCR_MODEL, systemInstruction, prompt, imageDataUrl, signal, 16384);
         } else {
           const gm = this.googleModel(key, this.modelName);
           const genModel = ai.getGenerativeModel({
@@ -1416,7 +1547,7 @@ Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bo
         if (msg.includes('level 2') || msg.includes('đăng nhập')) throw error;
         const isQuota = msg.includes('429') || msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('401');
         if (retry < MAX_RETRIES && this.rotateKey(key, isQuota)) {
-          await sleepAbortable(Math.min(8000, Math.pow(1.5, retry + 1) * 800), signal);
+          await sleepAbortable(GeminiService.retryDelay(error, Math.min(8000, Math.pow(1.5, retry + 1) * 800)), signal);
           continue;
         }
         throw error;
@@ -1454,7 +1585,7 @@ Return ONLY JSON: {"columns":N,"splits":[...]} where N is 1, 2 or 3 and splits a
       try {
         let raw = '';
         if (this.isCurrentKeyProxy(key)) {
-          raw = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, imageDataUrl, signal);
+          raw = await this.callOpenAINonStream(key, GeminiService.OCR_MODEL, systemInstruction, prompt, imageDataUrl, signal);
         } else {
           const gm = this.googleModel(key, this.modelName);
           const genModel = ai.getGenerativeModel({
@@ -1497,30 +1628,13 @@ Return ONLY JSON: {"columns":N,"splits":[...]} where N is 1, 2 or 3 and splits a
     const systemInstruction = `English→Vietnamese medical translator. Input: JSON text blocks extracted from one PDF page (reading order). Translate each block into natural, accurate Vietnamese medical language, consistent across blocks; it will be redrawn in the same box, so keep it concise and add nothing.
 Keep unchanged: numbers, units, symbols (± ≤ ≥ × µ °), drug/gene names, abbreviations, superscripts (¹²³), person names, journal names, URLs, DOIs, emails. Reference-list entries: return unchanged.
 Some blocks mark differently-styled words (bold/colored) with tags like <1>Right Ventricle</1>: put the same tag pair around the corresponding Vietnamese words (e.g. <1>Tâm thất phải</1>); keep every tag, add no new ones. Translate EVERY English word, including words outside the tags and in titles (e.g. "Atlas of <1>Full Breast Ultrasonography</1>" → "<1>Atlas Siêu âm Toàn bộ Vú</1>" or "Atlas <1>Siêu âm Toàn bộ Vú</1>"); only person names, journal names and the items listed above stay unchanged.
-Figure n → Hình n, Table n → Bảng n. ALL-CAPS headings stay ALL-CAPS. No Markdown, no LaTeX, no line breaks.
+Figure n → Hình n, Table n → Bảng n. ALL-CAPS headings stay ALL-CAPS. No Markdown, no LaTeX, no line breaks; inside "v" use “ ” instead of straight double quotes.
 Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
 
     const prompt = `${JSON.stringify(blocks.map(b => ({ id: b.id, text: b.text })))}`;
 
     const parse = (raw: string): Record<string, string> => {
-      let txt = (raw || '').replace(/```json|```/gi, '').trim();
-      const start = txt.indexOf('{');
-      const end = txt.lastIndexOf('}');
-      if (start >= 0 && end > start) txt = txt.slice(start, end + 1);
-      let arr: any[];
-      try {
-        const data = JSON.parse(txt);
-        arr = Array.isArray(data) ? data : (data.t || data.translations || []);
-      } catch (e) {
-        // Phản hồi bị cắt giữa chừng (hết token) → vẫn lấy các khối đã trả đủ; khối thiếu sẽ được dịch bù
-        arr = [];
-        const re = /"id"\s*:\s*"([^"]+)"\s*,\s*"v"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-        let mm: RegExpExecArray | null;
-        while ((mm = re.exec(raw || ''))) {
-          try { arr.push({ id: mm[1], v: JSON.parse(`"${mm[2]}"`) }); } catch { /* bỏ qua */ }
-        }
-        if (!arr.length) throw e;
-      }
+      const arr = parseLayoutJson(raw);
       const out: Record<string, string> = {};
       for (const item of arr) {
         const id = String(item?.id ?? '');
@@ -1545,7 +1659,7 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
       try {
         let raw = '';
         if (this.isCurrentKeyProxy(key)) {
-          raw = await this.callOpenAINonStream(key, this.modelName, systemInstruction, prompt, '', signal);
+          raw = await this.callOpenAINonStream(key, GeminiService.LAYOUT_MODEL, systemInstruction, prompt, '', signal, 8192, true);
         } else {
           const gm = this.googleModel(key, this.modelName);
           const genModel = ai.getGenerativeModel({
@@ -1573,7 +1687,7 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
         if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
           retryCount++;
           const delay = Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500);
-          await sleepAbortable(delay, signal);
+          await sleepAbortable(GeminiService.retryDelay(error, delay), signal);
           continue;
         }
         throw error;

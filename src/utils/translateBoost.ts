@@ -6,12 +6,14 @@
  */
 
 /** Cắt Markdown thành các phần gần bằng nhau tại dòng trống (không cắt giữa đoạn / bảng / danh sách). */
-export function splitMarkdownForParallel(md: string, minChars = 2400, maxParts = 3): string[] {
+// Chỉ chia khi trang RẤT dài (> 5.000 ký tự), tối đa 2 phần: mỗi phần lặp lại hướng dẫn hệ thống và phần "suy nghĩ"
+// của model (Gemini 3 không tắt được) → chia nhỏ quá thì tốn token hơn nhiều so với lợi về tốc độ.
+export function splitMarkdownForParallel(md: string, minChars = 5000, maxParts = 2): string[] {
   const text = md.trim();
   if (text.length < minChars) return [text];
   const blocks = text.split(/\n{2,}/);
   if (blocks.length < 2) return [text];
-  const parts = Math.min(maxParts, Math.max(2, Math.round(text.length / 1800)));
+  const parts = Math.min(maxParts, Math.max(2, Math.round(text.length / 3500)));
   const target = text.length / parts;
   const out: string[] = [];
   let cur: string[] = [];
@@ -79,7 +81,7 @@ export async function fixUntranslatedLines(md: string, svc: LayoutTranslator | n
     let body = m[2];
     const bold = /^\*\*[\s\S]+\*\*$/.test(body.trim());
     if (bold) body = body.trim().slice(2, -2);
-    if (!looksEnglish(body) || isReference(body)) return;
+    if (!looksEnglish(body) || isReference(body) || isReferenceLine(line)) return;
     todo.push({ idx, prefix: m[1], body, bold });
   });
   if (!todo.length) return md;
@@ -102,4 +104,48 @@ export async function fixUntranslatedLines(md: string, svc: LayoutTranslator | n
     console.warn('[MediTrans] Dịch bù dòng sót tiếng Anh thất bại:', e);
   }
   return lines.join('\n');
+}
+
+/* ---------------- Tài liệu tham khảo: giữ nguyên, KHÔNG gửi AI (tiết kiệm token) ---------------- */
+
+/** Một dòng là mục tài liệu tham khảo: bắt đầu bằng tên tác giả + chữ viết tắt, có năm và dấu hiệu trích dẫn. */
+export function isReferenceLine(line: string): boolean {
+  const t = line.replace(/^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+|\[\d{1,3}\]\s*)/, '').replace(/\*\*/g, '').trim();
+  if (t.length < 25) return false;
+  if (!/\b(19|20)\d{2}[a-z]?\b/.test(t)) return false;
+  const author = /^[A-ZÀ-Ý][\p{L}'’\-]+(?:\s+[A-Z][\p{L}'’\-]+)?,?\s+(?:[A-Z]{1,3}\b|[A-Z]\.(?:\s?[A-Z]\.)*)/u.test(t);
+  const cite = /\bet al\b|\bdoi\b|\b(19|20)\d{2}[a-z]?\s*[;.,:]\s*\(?\d|\d+\s*\(\d+\)\s*:\s*\d|:\s*\d+\s*[–-]\s*\d+|\bpp?\.\s*\d|\bIn:\s|\b(?:Springer|Elsevier|Wiley|Lippincott|Thieme)\b/i.test(t);
+  return author && cite;
+}
+
+export interface MdSegment { text: string; passthrough: boolean; }
+
+/**
+ * Tách Markdown thành các đoạn cần dịch và các cụm TÀI LIỆU THAM KHẢO (≥ 2 mục liền nhau) giữ nguyên.
+ * Trang tài liệu tham khảo cuối mỗi chương rất dài; trước đây gửi AI cả trang và AI viết lại y nguyên
+ * → tốn hàng nghìn token đầu ra mà không đổi gì.
+ */
+export function splitReferenceSegments(md: string): MdSegment[] {
+  const lines = md.split('\n');
+  const isRef = lines.map(isReferenceLine);
+  const out: MdSegment[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (isRef[i]) {
+      let j = i;
+      // cụm tham khảo: các dòng tham khảo liền nhau (cho phép dòng trống xen giữa)
+      while (j + 1 < lines.length && (isRef[j + 1] || (!lines[j + 1].trim() && j + 2 < lines.length && isRef[j + 2]))) j++;
+      const run = lines.slice(i, j + 1);
+      if (run.filter(l => l.trim()).length >= 2) {
+        out.push({ text: run.join('\n').trim(), passthrough: true });
+        i = j + 1;
+        continue;
+      }
+    }
+    const last = out[out.length - 1];
+    if (last && !last.passthrough) last.text += '\n' + lines[i];
+    else out.push({ text: lines[i], passthrough: false });
+    i++;
+  }
+  return out.map(s => ({ ...s, text: s.text.trim() })).filter(s => s.text);
 }

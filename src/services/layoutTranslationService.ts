@@ -194,22 +194,38 @@ const JPEG_QUALITY = 0.9;
 /* ------------------------------------------------------------------ */
 
 let fontsReady: Promise<void> | null = null;
+let fontAttempts = 0;
+/**
+ * Nạp font Tinos/Arimo (kèm bộ chữ tiếng Việt + ký hiệu) trước khi vẽ.
+ * Lỗi trước đây: mạng chậm > 4 giây → hết giờ chờ nhưng vẫn coi là "đã nạp" suốt phiên → các trang dịch sau đó bị vẽ
+ * bằng font dự phòng (chữ to nhỏ, khác dáng) và ảnh lỗi bị lưu vĩnh viễn vào đệm. Nay chỉ ghi nhớ khi font đã sẵn sàng
+ * thật; chưa sẵn sàng thì lần vẽ sau chờ tiếp.
+ */
 export function ensureLayoutFonts(): Promise<void> {
   if (fontsReady) return fontsReady;
-  fontsReady = (async () => {
+  const specs = [
+    '400 20px "Tinos"', '700 20px "Tinos"', 'italic 400 20px "Tinos"', 'italic 700 20px "Tinos"',
+    '400 20px "Arimo"', '700 20px "Arimo"', 'italic 400 20px "Arimo"', 'italic 700 20px "Arimo"',
+  ];
+  const sample = 'Tiếng Việt ắằẳẵặ ếềểễệ ốồổỗộ ướừửữự µ ± ≤ ≥ × → ° –';
+  const attempt = (async () => {
     if (typeof document === 'undefined' || !(document as any).fonts) return;
-    const specs = [
-      '400 20px "Tinos"', '700 20px "Tinos"', 'italic 400 20px "Tinos"',
-      '400 20px "Arimo"', '700 20px "Arimo"', 'italic 400 20px "Arimo"',
-    ];
-    const sample = 'Tiếng Việt ắằẳẵặ ếềểễệ ốồổỗộ ướừửữự';
-    const timeout = new Promise<void>(resolve => setTimeout(resolve, 4000));
+    const fonts = (document as any).fonts;
+    const timeout = new Promise<void>(resolve => setTimeout(resolve, 8000));
     await Promise.race([
-      Promise.all(specs.map(s => (document as any).fonts.load(s, sample).catch(() => null))).then(() => undefined),
+      Promise.all(specs.map(s => fonts.load(s, sample).catch(() => null))).then(() => undefined),
       timeout,
     ]);
+    let ok = true;
+    try { ok = specs.every(s => fonts.check(s, sample)); } catch { ok = true; }
+    // Thử tối đa 3 lần (mạng chặn hẳn Google Fonts thì không bắt mỗi trang chờ mãi)
+    if (!ok && ++fontAttempts < 3) {
+      console.warn('[Layout] Font Tinos/Arimo chưa tải xong — lần vẽ sau sẽ chờ tiếp.');
+      fontsReady = null;
+    }
   })();
-  return fontsReady;
+  fontsReady = attempt;
+  return attempt;
 }
 
 /* ------------------------------------------------------------------ */
@@ -604,6 +620,18 @@ async function finishPage(
   }
 }
 
+/** Bản dịch trùng nguyên văn câu gốc tiếng Anh (AI bỏ quên) — không tính tên riêng, số, tài liệu tham khảo. */
+function isUntranslated(src: string, v: string): boolean {
+  const plain = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const a = plain(src);
+  if (a !== plain(v)) return false;
+  const words = a.match(/[a-z]{2,}/g) || [];
+  if (words.length < 4) return false;
+  if (/\bet al\.|\bdoi\b|\b(19|20)\d{2}[;:,]\s*\d/.test(a)) return false;
+  const stop = words.filter(w => /^(the|and|of|with|is|are|was|were|for|in|on|to|by|from|as|or|that|this|which|be|may|can|not|has|have)$/.test(w)).length;
+  return stop >= 2;
+}
+
 /**
  * Dịch danh sách khối: các phần (chunk) của một trang gửi SONG SONG; khối AI bỏ sót được dịch bù một lần
  * (trước đây khối bị sót giữ nguyên tiếng Anh).
@@ -613,30 +641,47 @@ async function translateBlocks(
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   if (!blocks.length) return out;
-  // Phần nhỏ (~1800 ký tự) gửi song song tối đa 3 phần: thời gian chờ AI ≈ phần dài nhất thay vì cả trang
+  // Phần ~3500 ký tự (ít lặp hướng dẫn hệ thống → ít token) gửi song song tối đa 3 phần: thời gian chờ AI ≈ phần dài nhất thay vì cả trang
   // (AI viết ra càng dài càng lâu; một trang chữ dày gửi một lần mất 20–40 giây)
-  const chunks = chunkBlocks(blocks, 20, 1800);
+  const chunks = chunkBlocks(blocks, 40, 3500);
   const queue = [...chunks];
+  let lastError: any = null;
   const runOne = async () => {
     while (queue.length) {
       checkAbort(signal);
       const chunk = queue.shift()!;
-      Object.assign(out, await translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal));
+      try {
+        Object.assign(out, await translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal));
+      } catch (e) {
+        // Một phần lỗi (JSON hỏng / proxy bận nhiều lần) KHÔNG làm hỏng cả trang như trước: các phần khác vẫn giữ,
+        // khối của phần lỗi sẽ được dịch bù ở bước dưới.
+        if (signal?.aborted || /aborted|level 2|đăng nhập|api key|key khả dụng/i.test(String((e as any)?.message))) throw e;
+        lastError = e;
+        console.warn('[Layout] Một phần dịch lỗi, sẽ dịch bù:', e);
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(3, chunks.length) }, runOne));
   checkAbort(signal);
-  const missing = blocks.filter(b => !out[b.id]);
+  // Khối AI bỏ sót HOẶC trả nguyên văn tiếng Anh (thỉnh thoảng xảy ra) → dịch bù một lần
+  const missing = blocks.filter(b => !out[b.id] || isUntranslated(b.text, out[b.id]));
   if (missing.length) {
     try {
-      const again = await Promise.all(chunkBlocks(missing, 20, 1800).map(chunk =>
+      const again = await Promise.all(chunkBlocks(missing, 40, 3500).map(chunk =>
         translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal)));
-      again.forEach(r => Object.assign(out, r));
+      again.forEach(r => {
+        for (const [id, v] of Object.entries(r)) {
+          const b = missing.find(x => x.id === id);
+          if (!out[id] || (b && !isUntranslated(b.text, v))) out[id] = v;
+        }
+      });
     } catch (e) {
       if (signal?.aborted) throw e;
       console.warn('[Layout] Dịch bù khối bị sót thất bại:', e);
     }
   }
+  // Không dịch được khối nào → báo lỗi thật (trước đây trang vẫn được lưu như "đã dịch" nhưng toàn chữ gốc)
+  if (!Object.keys(out).length) throw lastError || new Error('AI không trả về bản dịch nào cho trang này.');
   return out;
 }
 
