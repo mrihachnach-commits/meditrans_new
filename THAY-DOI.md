@@ -847,3 +847,14 @@ Thêm vào bộ hồi quy: CT tim tr.12, 35, 44, 48, 56, 57, 68, 73, 103, 108 (s
 - Bản dịch: bỏ cụm từ bị AI lặp liền nhau (tr.52), tiêu đề bị VIẾT HOA toàn bộ hoặc một phần được viết thường lại (tr.68, 93, 155), bỏ dấu chấm thừa cuối tiêu đề (tr.88).
 - Tài liệu tham khảo cuối cột (vắt sang trang sau) giữ nguyên, không bị dịch (tr.145).
 - Dịch giữ định dạng: model mặc định đổi sang **gpt-4.1-nano**. Ô model trong Cài đặt giờ là ô tự nhập (có gợi ý sẵn), gõ tên model bất kỳ proxy hỗ trợ; để trống = gpt-4.1-nano. Máy chủ (key hệ thống) đã cho phép gpt-4.1-nano.
+
+## v10.9 — Rà bản xuất v10.8 của 2 sách (engine v37)
+
+**Lỗi thật đã sửa**
+- Chú thích hình chạy 2 cột (Atlas tr.59, 117, 123, 284…): dòng đầu cột trái bị nối với dòng đầu cột phải thành một dòng dài, bản dịch vẽ thành dòng chữ tí hon hoặc giữ nguyên tiếng Anh. Nay nhận ra khe cột (mảnh sau thẳng mép với dòng dưới của cột phải, không dòng nào chạy qua khe) và tách đúng 2 cột. Chú thích căn đều kiểu "Fig. 19.11 Aortic   Dissection" (CT tim tr.238) vẫn giữ nguyên.
+- Nhãn "Hình 4.12", "Bảng 3.1" mất chữ đậm khi AI bỏ thẻ quanh nhãn (Atlas tr.91, 225…): nay tự bọc lại thẻ theo số hình.
+
+**Không phải lỗi phần mềm: trang chưa dịch bù**
+- Atlas còn nhiều đoạn/chú thích giữ tiếng Anh (khoảng tr.159, 177, 187–217, 238, 249, 265–286, 306–330, 355–386). Đây là các khối AI chưa trả bản dịch. Khi bấm Xuất PDF, chọn **"Sửa lỗi N trang"** để dịch bù các trang này.
+
+**Lưu ý khi cập nhật**: engine đổi sang v37 nên các trang đã dịch sẽ tự dàn lại từ bản dịch đã lưu (không tốn token). Riêng chú thích 2 cột được tách lại thành 2 khối mới → trang đó sẽ hiện trong danh sách "Sửa lỗi" để dịch bù phần chú thích.

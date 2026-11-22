@@ -1041,7 +1041,7 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[], rules: H
           letterCount(curText) >= 2 && (letterCount(it.str) >= 2 || LABEL_RE.test(it.str.trim()));
         // v10.6: dòng đầu chú thích hình/bảng căn đều ("Fig. 19.11 Aortic   Dissection   Related   Aortic") có khe rộng
         // giữa các từ viết hoa trùng khe dòng dưới → từng bị cắt thành ô bảng, mẩu giữa vẽ chồng lên chú thích (CT tim tr.238)
-        const captionRun = !gutterBreak && !(jg && jg.exact >= 2) && sameFont && gap <= 2 * mainSize && /^(fig\.?|figure|table|tab\.)\s*\d/i.test(curText);
+        const captionRun = !gutterBreak && !(jg && jg.exact >= 2) && !(jg && jg.exact >= 1 && jg.covered === 0 && gap > 1.0 * mainSize) && sameFont && gap <= 2 * mainSize && /^(fig\.?|figure|table|tab\.)\s*\d/i.test(curText);
         // v10.7: mẩu cuối dòng cột trái chạm sát (thậm chí chồng) tiêu đề đậm của cột phải ("…57 ± 8%" | "17.8.3.1
         // Arrhythmogenic", CT tim tr.208): khác font đậm/thường + có khe cột ngay đó → hai cột khác nhau
         const fontJump = prev.bold !== it.bold && it.font !== prev.font && gap < 0.35 * mainSize && (/^\s*\d/.test(it.str) || it.size > 1.03 * prev.size) &&
@@ -2039,7 +2039,9 @@ export function restoreTags(src: string, v: string): string {
     // Khoảng trắng quanh dấu câu có thể khác ("6, 7" ↔ "6,7"), "and" ↔ "và"
     const pat = sp.inner.trim().split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*')
       .replace(/(,|;)/g, '\\s*$1\\s*').replace(/\\s\*and\\s\*/g, '\\s*(?:and|và|,)\\s*');
-    const rx = new RegExp(pat, 'gu');
+    // v10.9: nhãn chú thích "Fig. 4.12" được dịch thành "Hình 4.12" → tìm theo số hình (không thì nhãn mất chữ đậm)
+    const capM = sp.inner.match(/^(?:figs?\.?|figures?|tables?|tab\.)\s*(\d+(?:[.\-–]\d+)*[a-z]?)$/i);
+    const rx = capM ? new RegExp(`(?:hình|bảng|fig\\.?|figure|table)\\s*${capM[1].replace(/[.\-–]/g, m => '\\' + m)}`, 'giu') : new RegExp(pat, 'gu');
     const find = (f: number) => { rx.lastIndex = f; const mm = rx.exec(v); return mm ? { i: mm.index, j: mm.index + mm[0].length } : null; };
     while (true) {
       let hit = find(from);
