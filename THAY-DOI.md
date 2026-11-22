@@ -823,13 +823,13 @@ Thêm vào bộ hồi quy: CT tim tr.12, 35, 44, 48, 56, 57, 68, 73, 103, 108 (s
 - Trang chủ "Quản lý tài liệu": tiêu đề + tab "Của tôi / Được chia sẻ" không bị bóp; thanh tìm kiếm/sắp xếp/nút xuống hàng dưới trên điện thoại.
 - **Tràn viền ở Dịch thường** (khung bản gốc bị bóp còn một dải): chế độ xem điện thoại ("Bản dịch"/"Chia đôi") còn lưu khi mở trên máy tính → khung dịch không có bề rộng cố định, thanh công cụ đẩy khung trái. Nay màn hình ≥ 768px luôn chia đôi 50/50.
 
-## v10.6.1 — Sửa lỗi xuất PDF giữ định dạng báo "Đã huỷ xuất PDF"
-
-**File sửa (chỉ 1 file):** `src/components/LayoutTranslatePanel.tsx`
-
-- **Nguyên nhân:** khi còn trang chưa dịch / khối thiếu bản dịch / lệch số liệu, nút PDF hỏi lại bằng `window.confirm`. App chạy trong iframe (AI Studio, trình xem nhúng) thì hộp thoại bị chặn → `confirm` trả `false` ngay → app báo "Đã huỷ xuất PDF" mà người dùng không thấy câu hỏi nào.
-- **Sửa:** thay `window.confirm` bằng hộp xác nhận trong app (state `exportAsk`, trả Promise<boolean>), hai nút "Huỷ" và "Vẫn xuất N trang".
-- Khi đang xuất, nút PDF hiện "Đang xuất x/y" và bị khoá (không bấm chồng).
-- Xuất PDF được cả khi đang dịch nhiều trang (trước đây nút PDF bị khoá trong lúc dịch).
-- Nút đỏ khi đang dịch nhiều trang đổi chữ từ "279/339" thành "Dừng dịch 279/339" — trước đây dễ nhầm là tiến độ xuất PDF, bấm vào là dừng dịch.
-- Không đổi: vẫn xuất MỘT file PDF duy nhất, tên `MediTrans_<tên file>_ban-dich-giu-dinh-dang.pdf`; dựng lại trang khi xuất chỉ dùng bản dịch đã lưu (`noAi = true`), không gọi AI.
+## v10.7 — Xuất PDF, viết tắt, tác giả/ORCID, dòng số liệu/%, bảng (engine v35)
+- Xuất PDF: bỏ hộp xác nhận của trình duyệt (bị chặn trong khung nhúng nên báo "đã huỷ"), thay bằng hộp hỏi trong app; nút hiện "Đang xuất x/y"; xuất được khi đang dịch; bấm lặp khi đang xuất không làm gì (gộp bản v10.6.1).
+- Thanh công cụ khung phải: gom nút phụ vào menu "⋯", có thanh cuộn ngang mảnh.
+- Danh sách viết tắt: cột viết tắt luôn giữ nguyên, không gửi đi dịch (kể cả "Ao", "aAo", "AV canal"…); hai dòng định nghĩa liền nhau không còn bị gộp; "Computed     tomography" căn đều không còn bị tách.
+- Dòng tên tác giả giữ nguyên (không dịch "and" thành "và" chen vào biểu tượng ORCID).
+- Dòng căn đều có số, m², %, ≥/≤ không còn bị cắt vụn hay dính đề mục ("8%17.8.3.1").
+- Bảng: tách đúng ô ở bảng có kẻ ngang (Stage | Definition, I | Normal, 12 | 1592…); cỡ chữ trong bảng gần bản gốc hơn; nội dung ô không bị dời lên hàng trên (Bảng 22.3).
+- Thân bài nằm ngay dưới bảng không còn bị coi là ô bảng rồi co nhỏ (tr.135, 221, 323, 332); chú thích hình cạnh bảng không bị co.
+- Dòng "e-mail:" ở chân trang đi liền với khối địa chỉ tác giả.
+- Trang đã dịch bằng bản cũ cần bấm Dịch lại để áp dụng.

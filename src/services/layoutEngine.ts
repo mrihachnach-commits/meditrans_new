@@ -839,7 +839,7 @@ function sameRow(a: NormItem, b: NormItem): boolean {
     (small.y - 0.7 * small.size) >= big.y - 0.95 * big.size && dy < 0.6 * big.size;
 }
 
-function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment[] {
+function buildSegments(rawItems: NormItem[], gutterOverride?: number[], rules: HRule[] = []): Segment[] {
   const items = splitLeadingBullets(rawItems.filter(i => !i.dropCap));
   const gutters = gutterOverride ?? defaultGutters(items);
   const sorted = [...items].sort((a, b) => a.y - b.y || a.x - b.x);
@@ -850,7 +850,10 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
     for (let r = rows.length - 1; r >= 0 && r >= rows.length - 4; r--) {
       // Hai item chồng nhau theo chiều ngang không thể cùng một hàng (vd. số chương cỡ lớn kéo 2 dòng tiêu đề vào một hàng)
       const clash = rows[r].some(o => Math.min(o.x + o.w, it.x + it.w) - Math.max(o.x, it.x) > 0.3 * Math.min(o.size, it.size) &&
-        Math.abs(o.y - it.y) > 0.15 * Math.min(o.size, it.size));
+        Math.abs(o.y - it.y) > 0.15 * Math.min(o.size, it.size) &&
+        // v10.7: chỉ số trên/dưới nhỏ ("mL/m²" trong dòng căn đều) nằm chồng ngang lên chữ thường cùng hàng không phải là
+        // "dòng khác" — trước đây đẩy nửa sau của dòng sang hàng riêng, đoạn có số liệu bị cắt vụn, số đè chữ (CT tim tr.207)
+        Math.min(o.size, it.size) >= 0.75 * Math.max(o.size, it.size));
       if (clash) continue;
       for (const o of rows[r]) {
         if (!sameRow(o, it)) continue;
@@ -935,7 +938,7 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
         const gap = it.x - prevEnd;
         const curText = cur.map(c => c.str).join('').trim();
         // Số mục / ký hiệu đầu dòng ("10", "1.2", "•", "a)") đứng tách khỏi chữ → khối riêng
-        const labelBreak = cur.length === 1 && LABEL_RE.test(curText) && gap > 0.2 * mainSize && /[\p{L}\p{N}(]/u.test(it.str);
+        const labelBreak = cur.length === 1 && LABEL_RE.test(curText) && gap > 0.2 * mainSize && /[\p{L}\p{N}(≥≤<>±~]/u.test(it.str);
         // Khoảng trống rơi vào khe cột → luôn tách (kể cả khi khe hẹp)
         // v10.3: khe cột chỉ có hiệu lực ở hàng này khi các dòng ngay trên/dưới KHÔNG có chữ chạy qua nó — khe giữa các cột
         // BẢNG bên dưới (CT tr.220: x=414) từng cắt đôi dòng thân bài cột trái phía trên bảng ("ularly in regions |
@@ -951,28 +954,63 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
         // v10.4: mẩu trước chỉ có số ("25–49%,  50–69%,  70–99%),  as" — CT tim tr.35) cũng tính: trước đây dòng căn đều
         // có dãy số bị cắt thành 4 mẩu → đoạn văn tách đôi, mẩu số lơ lửng lệch phải. Bảng số thật vẫn tách vì dòng lân cận
         // không có chữ chạy qua khe (covered = 0).
-        const sameFont = Math.abs(it.size - prev.size) < 0.1 * mainSize && (letterCount(prev.str) > 0 || /\d/.test(prev.str)) && !LABEL_RE.test(curText);
+        // v10.7: so cỡ với mẩu chữ THƯỜNG cuối (bỏ chỉ số trên "m²" nhỏ) và tính cả mẩu chỉ có ký hiệu ("73 ±" | "22 mL") —
+        // trước đây dòng căn đều có "mL/m²   (95%  CI," hay "± 22" bị cắt vụn (CT tim tr.207–208)
+        let mi = pi;
+        while (mi > 0 && (!cur[mi].str.trim() || cur[mi].size < 0.8 * mainSize)) mi--;
+        const prevMain = cur[mi];
+        const sameFont = Math.abs(it.size - prevMain.size) < 0.1 * mainSize && /[\p{L}\p{N}±×%<>=≤≥+\-–)\]]/u.test(prevMain.str) && !LABEL_RE.test(curText);
         const jg = !gutterBreak && sameFont && gap <= 4.5 * mainSize && gap > 0.6 * mainSize
           ? isJustifiedGap(ri, prevEnd, it.x, mainSize) : null;
-        const justifiedGap = !gutterBreak && sameFont && gap <= 4.5 * mainSize &&
+        const justifiedGap = !gutterBreak && sameFont && (gap <= 4.5 * mainSize || (/^\s*\p{Ll}/u.test(it.str) && gap <= 6 * mainSize)) &&
           (() => {
             const j = jg || isJustifiedGap(ri, prevEnd, it.x, mainSize);
             // khe trùng vị trí với dòng trên/dưới → cột bảng. v10.3: chỉ khi số dòng lân cận có khe trùng NHIỀU HƠN số dòng
             // có chữ chạy qua — dòng căn đều giãn rộng ("the   thyroid   gland   laterally   and") cạnh một dòng giãn khác
             // từng bị cắt thành 2 ô bảng lơ lửng
+            // v10.7: dòng căn đều rất thưa trong ô hẹp ("Computed          tomography" / "angiography" — danh mục viết tắt):
+            // mẩu sau viết thường, là mẩu CUỐI hàng và chạm đúng mép phải cột chữ (mép phải xa nhất của các dòng bắt đầu
+            // cùng mép trái với mẩu đang gom) → vẫn một dòng
+            const nx = row[row.indexOf(it) + 1];
+            if (/^\s*\p{Ll}/u.test(it.str) && gap <= 6 * mainSize && !/[.!?:;]\W{0,2}$/.test(curText) && (!nx || nx.x - (it.x + it.w) > 1.5 * mainSize)) {
+              const x0 = cur[0].x;
+              let edge = -Infinity;
+              for (let rj = Math.max(0, ri - 30); rj <= Math.min(rows.length - 1, ri + 30); rj++) {
+                if (rj === ri || Math.abs(rowY[rj] - rowY[ri]) > 30 * mainSize) continue;
+                const r = rows[rj];
+                if (!r.some(o => Math.abs(o.x - x0) < 0.5 * mainSize && Math.abs(o.size - mainSize) < 0.15 * mainSize)) continue;
+                for (const o of r) if (o.str.trim() && o.x >= x0 - 0.5 * mainSize && o.x < it.x + it.w && o.x + o.w <= it.x + it.w + 2 * mainSize && Math.abs(o.size - mainSize) < 0.15 * mainSize) edge = Math.max(edge, o.x + o.w);
+              }
+              if (Math.abs(it.x + it.w - edge) < 0.6 * mainSize) return true;
+            }
             if (j.aligned > j.covered) return false;
+            // v10.7: khe rất rộng (> 2,5 cỡ chữ) mà chỉ MỘT dòng lân cận có chữ chạy qua → ô bảng kế bên, không phải dòng
+            // căn đều (Bảng 11.1 CT tim tr.125: "320 MDCT meta-analysis of 12" | "1592" bị nối thành một ô, số đè lên chữ)
+            if (j.covered < 2 && gap > 2.5 * mainSize && !/^\s*\p{Ll}/u.test(it.str)) return false;
             // v10.4: khe rộng > 3 cỡ chữ mà không dòng lân cận nào có chữ chạy qua → không phải dòng dàn đều mà là sang ô
             // bảng bên cạnh, kể cả khi ô sau viết thường ("descending artery" | "artery (LCx)")
-            return (/^\s*\p{Ll}/u.test(it.str) && gap <= 3 * mainSize) || j.covered >= 1;
+            // (v10.7: không khi dòng lân cận có ô bắt đầu đúng chỗ mẩu sau — "(<50%) in 1–2" | "modifications" bảng 25.8)
+            if (/^\s*\p{Ll}/u.test(it.str) && gap <= 3 * mainSize && !(j.exact >= 1 && j.covered === 0)) return true;
+            return j.covered >= 1;
           })();
         // Bảng 2 cột (danh mục chữ viết tắt "BRCA1 and BRCA2   Breast cancer gene…"): ô bên trái dài làm khe cột hẹp
         // lại (< 1,2 cỡ chữ) → trước đây 2 ô bị nối thành 1 dòng rồi nhập luôn vào hàng trên. Khe nằm đúng vị trí khe
         // cột của ≥2 dòng lân cận và không dòng nào có chữ chạy qua → tách ô.
-        const tableBreak = !!jg && !leaderNum && ((jg.aligned >= 2 && jg.covered === 0) ||
+        // v10.7: hàng nằm GIỮA các đường kẻ bảng (≥ 3 đường kẻ ngang cùng phủ vị trí này trong phạm vi ~25 cỡ chữ, có đường
+        // trên và đường dưới) → bảng có kẻ: khe ≥ 0,6 cỡ chữ mà dòng lân cận có ô bắt đầu đúng mép = sang ô khác
+        // ("I  Normal", "(<50%) in 1–2  modifications" bảng 25.8 CT tim tr.336 bị nối liền hai cột)
+        const ruledRow = (() => {
+          const hit = rules.filter(r => r.x0 < it.x + 0.5 * mainSize && r.x1 > prevEnd - 0.5 * mainSize && Math.abs(r.y - it.y) < 25 * mainSize);
+          return hit.length >= 3 && hit.some(r => r.y < it.y - 0.5 * mainSize) && hit.some(r => r.y > it.y);
+        })();
+        const tableBreak = (ruledRow && !leaderNum && sameFont && gap <= 12 * mainSize && ((!!jg && jg.exact >= 1 && gap > 0.6 * mainSize) || (gap > 1.5 * mainSize && !(jg && jg.covered >= 2)) ||
+          // cột bảng sát nhau ("Stage Definition" khe chỉ 0,4 cỡ chữ): ≥ 2 dòng dưới/trên có ô bắt đầu đúng mép này
+          (it.x - (prev.x + prev.w) > 0.3 * mainSize && !jg && (() => { const j2 = isJustifiedGap(ri, prev.x + prev.w, it.x, mainSize); return (j2.exact >= 2 && j2.exact > j2.covered) || (j2.exact >= 1 && j2.aligned >= 2 && j2.aligned > j2.covered); })()))) ||
+          !!jg && !leaderNum && ( (jg.aligned >= 2 && jg.covered === 0) ||
           // v10.6: cột bảng khít (khe chỉ ≈ 1 cỡ chữ, bảng 19.7 CT tim tr.245): ≥ 2 dòng lân cận có ô bắt đầu ĐÚNG mép này
           // → sang ô khác, kể cả khi ô sau viết thường ("…mass on valve or" | "lesion that is attached…")
           (jg.exact >= 2 && jg.exact >= jg.covered && gap > 0.85 * mainSize) ||
-          (jg.exact >= 1 && jg.oneSided && jg.aligned > jg.covered && /^\s*[\p{Lu}\p{N}≤≥<>±(]/u.test(it.str)) ||
+          (jg.exact >= 1 && jg.oneSided && jg.aligned > jg.covered && (jg.covered === 0 || gap > 1.0 * mainSize) && /^\s*[\p{Lu}\p{N}≤≥<>±(]/u.test(it.str)) ||
           // v10.4: khoảng trống rất rộng (≥ 3,5 cỡ chữ) mà mảnh sau thẳng mép trái với một mảnh ở dòng kề = sang cột bảng khác
           // ("descending artery" | "artery (LCx)" bảng 18 đoạn SCCT) — dòng dàn đều không bao giờ hở rộng như vậy
           ((jg.exact >= 1 || (jg.aligned >= 1 && jg.oneSided)) && gap > 3.5 * mainSize && /^\s*[\p{L}\p{N}≤≥<>±(]/u.test(it.str)));
@@ -990,7 +1028,11 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
         // v10.6: dòng đầu chú thích hình/bảng căn đều ("Fig. 19.11 Aortic   Dissection   Related   Aortic") có khe rộng
         // giữa các từ viết hoa trùng khe dòng dưới → từng bị cắt thành ô bảng, mẩu giữa vẽ chồng lên chú thích (CT tim tr.238)
         const captionRun = !gutterBreak && !(jg && jg.exact >= 2) && sameFont && gap <= 2 * mainSize && /^(fig\.?|figure|table|tab\.)\s*\d/i.test(curText);
-        if (gutterBreak || labelBreak || sizeBreak || (tableBreak && !captionRun) || (gap > 1.2 * mainSize && !justifiedGap && !captionRun)) flush();
+        // v10.7: mẩu cuối dòng cột trái chạm sát (thậm chí chồng) tiêu đề đậm của cột phải ("…57 ± 8%" | "17.8.3.1
+        // Arrhythmogenic", CT tim tr.208): khác font đậm/thường + có khe cột ngay đó → hai cột khác nhau
+        const fontJump = prev.bold !== it.bold && it.font !== prev.font && gap < 0.35 * mainSize && (/^\s*\d/.test(it.str) || it.size > 1.03 * prev.size) &&
+          gutters.some(g => g > prev.x + 0.5 * mainSize && g < it.x + 1.5 * mainSize);
+        if (gutterBreak || fontJump || labelBreak || sizeBreak || (tableBreak && !captionRun) || (gap > 1.2 * mainSize && !justifiedGap && !captionRun)) flush();
       }
       cur.push(it);
     }
@@ -1242,7 +1284,7 @@ export function buildBlocks(
   // v10.6: gạch chân chữ (nằm sát dưới đường chân chữ, chữ phủ gần kín chiều dài) không phải đường kẻ bảng.
   // Trước đây gạch chân các mục "Selection of the best cardiac phase:" làm cả cột văn bản bị coi là bảng có kẻ.
   rules = rules.filter(r => !isUnderlineRule(r, items));
-  const segments = buildSegments(items, gutters).filter(s => s.text.length > 0);
+  const segments = buildSegments(items, gutters, rules).filter(s => s.text.length > 0);
   segments.sort((a, b) => a.y - b.y || a.x0 - b.x0);
 
   // Hàng bảng: dòng có "ô" chữ khác cùng hàng (cùng cột trang, không cách bởi khe cột).
@@ -1309,9 +1351,19 @@ export function buildBlocks(
       if (header) {
         ruledTop.set(sg, Math.round(top.y));
         // có hàng nhiều ô giữa khung (hai mẩu chữ cùng hàng, tách rời nhau)
-        ok = segments.some(m => m.y > top.y && m.y < below.y && m.x0 < Math.max(top.x1, below.x1) && m.x1 > Math.min(top.x0, below.x0) &&
-          segments.some(o => o !== m && Math.abs(o.y - m.y) < 0.4 * Math.min(o.size, m.size) && (o.x1 < m.x0 - 0.5 * m.size || o.x0 > m.x1 + 0.5 * m.size) &&
-            o.x0 < Math.max(top.x1, below.x1) && o.x1 > Math.min(top.x0, below.x0)));
+        // v10.7: hàng nhiều ô phải nằm trong CHÍNH dải giữa đường kẻ ngay trên và ngay dưới dòng này — trước đây xét từ đỉnh
+        // bảng nên thân bài ngay dưới bảng (giữa đường kẻ đáy bảng và đường kẻ tiêu đề mục) bị coi là ô bảng → chữ nhỏ,
+        // đoạn vỡ (CT tim tr.221, 135)
+        // (đường kẻ hàng có thể bị kẻ dọc cắt thành từng đoạn theo cột → bề ngang dải = mọi đoạn kẻ cùng độ cao)
+        const span = (y: number) => { const rr = rules.filter(r => Math.abs(r.y - y) < 0.5 * sg.size); return { x0: Math.min(...rr.map(r => r.x0)), x1: Math.max(...rr.map(r => r.x1)) }; };
+        const sa = span(rs[ia].y), sb = span(below.y);
+        const band = { y: rs[ia].y, x0: Math.min(sa.x0, sb.x0), x1: Math.max(sa.x1, sb.x1) };
+        ok = segments.some(m => !m.isLabel && m.y > band.y && m.y < below.y && m.x0 < band.x1 && m.x1 > band.x0 &&
+          segments.some(o => o !== m && !o.isLabel && Math.abs(o.y - m.y) < 0.4 * Math.min(o.size, m.size) && (o.x1 < m.x0 - 0.5 * m.size || o.x0 > m.x1 + 0.5 * m.size) &&
+            o.x0 < band.x1 && o.x1 > band.x0 &&
+            // v10.7: hai dòng thân bài của HAI CỘT TRANG (cách bởi khe cột) không phải "hàng nhiều ô" — trước đây cả cột văn
+            // bản nằm giữa hai đường kẻ bị coi là bảng: đoạn vỡ vụn, chữ nhỏ hẳn (CT tim tr.323)
+            !(paraLine(o) && paraLine(m)) && !((paraLine(o) || paraLine(m)) && gutters.some(g => g > Math.min(o.x1, m.x1) - 1 && g < Math.max(o.x0, m.x0) + 1))));
       }
     }
     ruledCache.set(sg, ok);
@@ -1390,7 +1442,7 @@ export function buildBlocks(
       // ô bảng: mỗi hàng là một khối riêng, không nối dọc với hàng dưới — trừ dòng viết thường nối tiếp ngay dưới trong bảng
       // có đường kẻ, cùng mép trái ("<30 mL/min" / "within 7 days", "No contrast media or" / "lower contrast dosing")
       if (segIsCell && !(Math.abs(seg.x0 - b.x0) < 0.5 * b.size && Math.abs(seg.y - last.y) < 1.75 * b.size &&
-        ((inRuledTable(seg) && /^\p{Ll}/u.test(seg.text.trim())) || (rules.length > 0 && wrapsInCell(last, seg))))) continue;
+        ((inRuledTable(seg) && /^\p{Ll}/u.test(seg.text.trim())) || (rules.length > 0 && !defRowSeg.has(seg) && wrapsInCell(last, seg))))) continue;
       if (Math.abs(seg.size - b.size) > 0.12 * b.size) continue;
       if (seg.bold !== b.bold) {
         // v10.2: dòng thân bài có cụm IN ĐẬM ("descriptive epidemiology, and the identification", câu nhấn mạnh in đậm
@@ -1498,7 +1550,10 @@ export function buildBlocks(
       const indentStart = !hangingNext && seg.x0 > b.x0 + 0.7 * b.size && seg.x1 > b.x1 - 1.5 * b.size;
       // (căn giữa chỉ khi cả dòng trước cũng nằm giữa khối — dòng đoạn văn tình cờ có tâm trùng tâm khối không tính)
       const centeredPair = centered && Math.abs((last.x0 + last.x1) / 2 - (b.x0 + b.x1) / 2) < b.size;
-      if (((prevShort && !centeredPair) || indentStart) && !(rightCont && !leftAligned)) continue;
+      // v10.7: dòng "e-mail: …" ở chân trang tác giả thuộc khối địa chỉ ngay trên (trước đây tách riêng → bản dịch địa chỉ
+      // ngắn lại, dòng e-mail đứng trơ cách xa — CT tim tr.187, 319)
+      const emailLine = /^e-?mail\s*:/i.test(segText) && Math.abs(seg.x0 - b.x0) < 0.5 * b.size;
+      if (((prevShort && !centeredPair) || indentStart) && !(rightCont && !leftAligned) && !emailLine) continue;
       if (gap < bestGap) { bestGap = gap; bestBlock = b; }
     }
     if (bestBlock) {
@@ -1555,6 +1610,37 @@ export function buildBlocks(
     const columnEdge = blocks.some(o => o !== b && o.lineCount >= 2 && Math.abs(o.x1 - b.x1) < 0.6 * b.size &&
       (o.align === 'justify' || o.lineCount >= 3));
     if (!columnEdge && sameRight.length >= 2 && ragged >= 1 && sameRight.length > sameLeft) b.align = 'right';
+  }
+  // v10.7: cột CHỮ VIẾT TẮT của bảng viết tắt ("CAD | Coronary artery disease", "PCI | Percutaneous…") giữ nguyên, không
+  // gửi đi dịch — trước đây AI dịch luôn "CAD" thành "Bệnh động mạch vành" rồi nhét vào ô hẹp, chữ tí hon chồng lên hàng dưới
+  const acro = (b: LayoutBlock) => b.lineCount === 1 && /^[\p{Lu}\d][\p{L}\d\-\/+]{1,7}$/u.test(b.plain.trim()) &&
+    (b.plain.match(/\p{Lu}/gu) || []).length >= 2 && (b.plain.match(/\p{Ll}/gu) || []).length <= 1;
+  for (const b of blocks) {
+    if (!b.translatable || !acro(b)) continue;
+    const def = (a: LayoutBlock) => blocks.some(o => o !== a && o.x0 > a.x1 && o.x0 - a.x0 < 9 * a.size &&
+      Math.abs(o.top - a.top) < 0.4 * a.size && Math.abs(o.size - a.size) < 0.15 * a.size && letterCount(o.plain) >= 3);
+    if (!def(b)) continue;
+    const col = blocks.filter(o => o !== b && acro(o) && Math.abs(o.x0 - b.x0) < 0.5 * b.size && Math.abs(o.size - b.size) < 0.15 * b.size && def(o));
+    if (col.length >= 2) b.translatable = false;
+  }
+  // v10.7: dòng TÊN TÁC GIẢ ("Muhammad Umair ⓘ, Julianna Czum ⓘ, and Stefan L. Zimmerman") giữ nguyên — dịch "and" → "và"
+  // làm chữ dài/ngắn lệch, đè lên biểu tượng ORCID (hình) nằm giữa các tên (CT tim tr.195, 306)
+  for (const b of blocks) {
+    if (!b.translatable || b.bold || b.lineCount > 3 || b.size < 1.05 * bodySz) continue;
+    const t = b.plain.trim();
+    const toks = t.split(/[\s,]+/).filter(Boolean);
+    if (toks.length < 2 || toks.length > 24 || !/,|\band\b|&/.test(t)) continue;
+    const name = (w: string) => /^(\p{Lu}[\p{Ll}'’]*([.\-]\p{Lu}?[\p{Ll}'’]*)*\.?|and|&|van|von|de|da|del|der|di|du|la|le)$/u.test(w);
+    // (phải có dấu hiệu tên người: dấu phẩy, chữ viết tắt tên "P.", tên ghép "Eun-Ju" — "Embryology and Normal Development" là tiêu đề)
+    const nameSignal = /,/.test(t) || toks.some(w => /^\p{Lu}\.$/u.test(w) || /^\p{Lu}\p{Ll}+-\p{Lu}\p{Ll}+$/u.test(w));
+    if (nameSignal && toks.every(name) && toks.filter(w => /^\p{Lu}/u.test(w)).length >= 2) b.translatable = false;
+  }
+  // …và mọi mục ngắn khác của CÙNG cột viết tắt ("Ao", "aAo", "dAo", "AV canal", "cHCD")
+  const acroCols = blocks.filter(b => !b.translatable && acro(b));
+  for (const b of blocks) {
+    if (!b.translatable || b.lineCount !== 1 || b.plain.trim().length > 12 || b.plain.trim().split(/\s+/).length > 2) continue;
+    if (acroCols.filter(o => Math.abs(o.x0 - b.x0) < 0.5 * b.size && Math.abs(o.size - b.size) < 0.15 * b.size).length < 3) continue;
+    if (blocks.some(o => o !== b && o.x0 > b.x1 && o.x0 - b.x0 < 9 * b.size && Math.abs(o.top - b.top) < 0.4 * b.size && letterCount(o.plain) >= 3)) b.translatable = false;
   }
   return orderForReading(blocks, pageWidth, gutters);
 }
@@ -2917,7 +3003,7 @@ export function paintTranslatedPage(
     // định cỡ chung → nhóm đó chữ to, các dòng cạnh bên chữ nhỏ (CT tim tr.237 "Aortic Vmax…")
     const csAll = list.map(eff).sort((x, y) => x - y);
     const shared = key.startsWith('r')
-      ? Math.max(0.68, Math.min(Math.max(cs[0], cs[Math.floor(0.25 * (cs.length - 1))] - 0.2), csAll[Math.floor(0.25 * (csAll.length - 1))]))
+      ? Math.max(0.68, Math.max(csAll[0], Math.min(cs[Math.floor(0.5 * (cs.length - 1))], csAll[Math.floor(0.5 * (csAll.length - 1))]) - 0.1))
       : Math.max(0.85, cs[Math.floor(0.3 * (cs.length - 1))]);
     for (const i of list) if (fitted[i].s > shared + 0.005 && (!key.startsWith('r') || Math.max(...fitted[i].los.map((lo, k) => lo.size / groups[i][k].size)) > shared + 0.005)) fitted[i] = fitGroup(groups[i], shared);
   });
@@ -2936,6 +3022,7 @@ export function paintTranslatedPage(
   });
   // v10.4: ô bảng không vừa chỗ dưới (bản dịch thêm dòng, sát đường kẻ hàng) → dồn lên chỗ trống phía trên trong cùng ô
   // (mục trên đã ngắn đi) thay vì tràn đè qua đường kẻ sang hàng dưới (CT tim tr.56 "Wheezing/bronchospasm…")
+  let cellRules: HRule[] | null = null;
   for (const p of plans) {
     const b = p.orig;
     if (!b.tableId) continue;
@@ -2952,6 +3039,11 @@ export function paintTranslatedPage(
       if (o === b || o.bottom > b.top || plans.some(q => q.orig === o)) continue;
       if (Math.min(o.x1, p.x0 + p.width) - Math.max(o.x0, p.x0) > 0) floor = Math.max(floor, o.bottom + 0.2 * b.size);
     }
+    // v10.7: không dồn lên qua ĐƯỜNG KẺ HÀNG phía trên ô (trước đây nội dung ô bị đẩy sang hàng trên — Bảng 22.3 CT tim tr.299)
+    if (cleanOk) {
+      if (!cellRules) cellRules = findHRules(clean!);
+      for (const r of cellRules) if (r.y <= b.top + 0.1 * b.size && r.x0 < p.x0 + p.width && r.x1 > p.x0 && r.y > floor - 0.2 * b.size) floor = r.y + 0.2 * b.size;
+    }
     if (floor === -Infinity) continue;
     const nt = Math.max(floor, limitBottom - h);
     if (nt < p.top - 0.5) p.top = nt;
@@ -2961,7 +3053,7 @@ export function paintTranslatedPage(
   {
     // v10.3: dòng đơn cùng cỡ + cùng kiểu chữ, không phải cỡ thân bài (tên tác giả in nghiêng dưới mỗi mục lục, nhãn
     // chú giải) → cùng cỡ vẽ; trước đây dòng dài bị thu nhỏ còn dòng ngắn giữ cỡ gốc, to nhỏ xen kẽ
-    const lineClass = (p: typeof plans[number]) => p.orig.lineCount === 1 && (p.orig.italic || Math.abs(p.orig.size - bodySize) > 0.06 * bodySize) &&
+    const lineClass = (p: typeof plans[number]) => p.orig.lineCount === 1 && !/^(<\d+>)?\s*(fig\.?|figure|table|tab\.|bảng|hình)\s*\d/i.test(p.orig.text) && (p.orig.italic || Math.abs(p.orig.size - bodySize) > 0.06 * bodySize) &&
       (info.get(p.orig.id)?.words.length ?? 99) <= 24 ? `line${p.orig.italic ? 'i' : ''}` : '';
     // v10.6: ô bảng có kẻ → theo bảng + cột (cả dòng in đậm "Mild AS:" và các dòng số liệu không có ô cùng hàng);
     // trước đây chỉ ô có "bạn cùng hàng" được đồng bộ → dòng số liệu chữ to cạnh dòng khác chữ nhỏ (CT tim tr.237)
@@ -2980,7 +3072,10 @@ export function paintTranslatedPage(
       // cỡ chung gần mức phổ biến; dòng nào buộc phải nhỏ hơn hẳn giữ cỡ riêng (không kéo cả nhóm xuống)
       // Chênh lệch nhỏ (≤ 0,2) → mọi dòng cùng một cỡ (cỡ nhỏ nhất), như bản in; chỉ dòng nhỏ hơn hẳn mới giữ cỡ riêng
       const mn = Math.min(...scales), md = median(scales);
-      return Math.max(0.68, md - mn <= (key.startsWith('tbl') ? 0.3 : 0.2) ? mn : md - 0.08);
+      // v10.7: bảng → ưu tiên cỡ gần bản gốc: cỡ chung theo mức của ĐA SỐ ô (phân vị 30%), ô chật hơn tự thu nhỏ riêng;
+      // trước đây lấy cỡ nhỏ nhất nên một ô dài kéo cả bảng xuống chữ tí hon (CT tim tr.217, 236, 237)
+      if (key.startsWith('tbl')) { const ss = [...scales].sort((x, y) => x - y); return Math.max(0.68, md - mn <= 0.1 ? mn : Math.max(mn, ss[Math.floor(0.5 * (ss.length - 1))] - 0.1)); }
+      return Math.max(0.68, md - mn <= 0.2 ? mn : md - 0.08);
     };
     // v10.6: các cột của cùng một bảng không chênh nhau quá 0,12 (cột ngắn được to hơn chút, không to hẳn)
     const tblMin = new Map<string, number>();
@@ -2992,7 +3087,7 @@ export function paintTranslatedPage(
     buckets.forEach((list, key) => {
       if (list.length < (key.startsWith('line') ? 4 : 2)) return;
       let target = targetOf(list, key);
-      if (key.startsWith('tbl')) target = Math.min(target, (tblMin.get(key.slice(0, key.indexOf('c', 3))) ?? target) + 0.06);
+      if (key.startsWith('tbl')) target = Math.min(target, (tblMin.get(key.slice(0, key.indexOf('c', 3))) ?? target) + 0.12);
       for (const p of list) {
         const sc = p.lo.size / p.orig.size;
         if (sc <= target + 0.01) continue;

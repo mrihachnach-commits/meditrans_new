@@ -5,7 +5,7 @@ import { saveAs } from 'file-saver';
 import {
   LayoutTemplate, Play, Square, Download, RefreshCw, AlertTriangle, Loader2, Layers,
   ImageDown, Cloud, HardDrive, Repeat, X, PencilLine, Save, ScanText,
-  BarChart3,
+  BarChart3, MoreHorizontal,
 } from 'lucide-react';
 import {
   LayoutBlockTranslator,
@@ -76,6 +76,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const [showRange, setShowRange] = useState(false);
   // v10.6: bộ đếm lượt gọi AI (token vào/ra/suy nghĩ, lỗi, thời gian) theo trang + xuất CSV
   const [showStats, setShowStats] = useState(false);
+  const [showMore, setShowMore] = useState(false);
   const [statsTick, setStatsTick] = useState(0);
   useEffect(() => {
     if (!showStats) return;
@@ -90,7 +91,8 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const [progress, setProgress] = useState<{ done: number; total: number; page: number | null }>({ done: 0, total: 0, page: null });
   const [inFlight, setInFlight] = useState<number[]>([]);
   const [exporting, setExporting] = useState(false);
-  // v10.6.1: tiến độ xuất PDF + hộp xác nhận TRONG APP (window.confirm bị chặn trong iframe AI Studio → trả false ngay → "Đã huỷ xuất")
+  // v10.7: tiến độ xuất + hộp xác nhận trong app (window.confirm bị chặn trong khung nhúng / một số trình duyệt
+  // → trả về "Huỷ" ngay, báo "Đã huỷ xuất PDF" dù người dùng chưa chọn gì)
   const [exportProgress, setExportProgress] = useState<{ done: number; total: number } | null>(null);
   const [exportAsk, setExportAsk] = useState<{ problems: string[]; count: number; resolve: (ok: boolean) => void } | null>(null);
   const askExport = (problems: string[], count: number) => new Promise<boolean>(resolve => setExportAsk({ problems, count, resolve }));
@@ -487,7 +489,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       showToast('Chưa có trang nào được dịch để xuất.', 'error');
       return;
     }
-    if (exporting) return;
+    if (exporting) return; // (v10.6.1) bấm lại khi đang xuất không làm gì
     setExporting(true);
     setExportProgress({ done: 0, total: wanted.length });
     untranslatedRef.current = 0;
@@ -496,9 +498,9 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       // v10.3: một trang lỗi không làm hỏng cả lần xuất — ghi lại trang bỏ qua và báo trong thông báo
       const failed: number[] = [];
       const scannedSkipped: number[] = [];
-      for (let i = 0; i < wanted.length; i++) {
-        const p = wanted[i];
-        setExportProgress({ done: i, total: wanted.length });
+      let k = 0;
+      for (const p of wanted) {
+        setExportProgress({ done: ++k, total: wanted.length });
         try {
           const r = resultsRef.current[p] || (await rebuildFromCloud(p, undefined, true));
           if (!r) { failed.push(p); continue; }
@@ -510,7 +512,6 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
           failed.push(p);
         }
       }
-      setExportProgress({ done: wanted.length, total: wanted.length });
       const fmt = (arr: number[]) => arr.length > 8 ? `${arr.slice(0, 8).join(', ')}…` : arr.join(', ');
       const skippedNote = (failed.length ? ` Bỏ qua ${failed.length} trang lỗi (${fmt(failed)}).` : '')
         + (scannedSkipped.length ? ` Bỏ qua ${scannedSkipped.length} trang scan chưa dịch được (${fmt(scannedSkipped)}).` : '');
@@ -606,10 +607,10 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     : cloud ? 'Bạn chỉ có quyền xem: bản dịch mới chỉ lưu trên máy này' : 'File chưa lưu lên tài khoản: bản dịch chỉ lưu trên máy này';
 
   const toolbar = (
-    <div className="flex items-center gap-1 min-w-0 max-w-full overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div className="flex items-center gap-1 min-w-0 max-w-full shrink-0">
       {running ? (
         <button onClick={() => { setStopping(true); abortRef.current?.abort(); }} disabled={stopping}
-          className={`${iconBtn} bg-rose-50 text-rose-600 border border-rose-100 hover:bg-rose-100`} title="Dừng dịch (không phải nút xuất PDF)">
+          className={`${iconBtn} bg-rose-50 text-rose-600 border border-rose-100 hover:bg-rose-100`} title="Dừng dịch">
           {stopping ? <Loader2 className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3 fill-current" />}
           <span>{stopping ? 'Đang dừng…' : progress.total > 1 ? `Dừng dịch ${progress.done}/${progress.total}` : 'Dừng dịch'}</span>
         </button>
@@ -624,16 +625,6 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         title="Dịch / xuất nhiều trang">
         <Layers className="w-3.5 h-3.5" /><span className="hidden 2xl:inline">Nhiều trang</span>
       </button>
-      {hasSaved && !running && (
-        <button onClick={handleRetranslate} aria-label="Dịch lại trang này" className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Dịch lại trang này">
-          <RefreshCw className="w-3.5 h-3.5" />
-        </button>
-      )}
-      {hasSaved && !running && (
-        <button onClick={() => openEditor()} className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Sửa bản dịch trang này (không tốn token)">
-          <PencilLine className="w-3.5 h-3.5" /><span className="hidden xl:inline">Sửa</span>
-        </button>
-      )}
       <button onClick={() => setAutoFollow(v => !v)}
         className={`${iconBtn} border ${autoFollow ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'border-slate-200 text-slate-400 hover:text-slate-600'}`}
         title={autoFollow ? `Đang bật: tự dịch trang đang xem và dịch trước ${lookAhead} trang tiếp theo (tốn thêm token)` : 'Tự dịch khi lật trang + dịch trước (đang tắt)'}>
@@ -646,25 +637,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
           {[0, 1, 2, 3, 4, 5, 6, 8, 10].map(n => <option key={n} value={n}>+{n} tr</option>)}
         </select>
       )}
-      <button onClick={() => { const v = !ocrFigures; setOcrFigures(v); setLayoutOcrFigures(v); }}
-        className={`${iconBtn} border ${ocrFigures ? 'bg-amber-50 border-amber-200 text-amber-700' : 'border-slate-200 text-slate-400 hover:text-slate-600'}`}
-        title={ocrFigures ? 'Đang bật: dịch cả chữ trong hình / chữ dọc (chậm hơn nhiều, tốn thêm token)' : 'Dịch chữ trong hình (đang tắt — nhanh hơn)'}>
-        <ScanText className="w-3.5 h-3.5" /><span className="hidden 2xl:inline">Chữ trong hình</span>
-      </button>
-      <span className={`inline-flex items-center h-7 px-1 ${cloud?.canWrite ? 'text-emerald-600' : 'text-slate-400'}`} title={storageTitle}>
-        {cloud?.canWrite ? <Cloud className="w-3.5 h-3.5" /> : <HardDrive className="w-3.5 h-3.5" />}
-      </span>
-      <div className="w-px h-4 bg-slate-200 mx-0.5" />
-      {current && (
-        <button onClick={() => saveAs(current.blob, `MediTrans_${baseName}_trang-${currentPage}_ban-dich.jpg`)}
-          aria-label="Tải ảnh trang này" className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Tải ảnh trang này">
-          <ImageDown className="w-3.5 h-3.5" />
-        </button>
-      )}
-      <button onClick={() => setShowStats(v => !v)}
-        className={`${iconBtn} border ${showStats ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'border-slate-200 text-slate-400 hover:text-slate-600'}`}
-        title="Thống kê lượt gọi AI: token vào/ra/suy nghĩ, lỗi thử lại, thời gian theo trang (xuất CSV)">
-        <BarChart3 className="w-3.5 h-3.5" /><span className="hidden 2xl:inline">Thống kê</span>
+      {/* v10.7: nút ít dùng gom vào menu "⋯" (Dịch lại, Sửa, Chữ trong hình, Tải ảnh, Thống kê, nơi lưu) */}
+      <button onClick={() => setShowMore(v => !v)} aria-label="Thêm" title="Thêm: dịch lại, sửa, chữ trong hình, tải ảnh, thống kê"
+        className={`${iconBtn} border ${showMore ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
+        <MoreHorizontal className="w-3.5 h-3.5" />
+        {ocrFigures && <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />}
       </button>
       <button onClick={handleExport} disabled={exporting || translatedCount === 0}
         className={`${iconBtn} bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm`}
@@ -681,27 +658,60 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         <div className="px-3 py-2 border-b border-slate-100 bg-white">{toolbar}</div>
       )}
 
-      {exportAsk && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 p-4" role="dialog" aria-modal="true">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-3">
-            <p className="text-sm font-bold text-slate-800">Bản dịch chưa hoàn chỉnh</p>
-            <ul className="text-xs text-slate-600 space-y-1 max-h-60 overflow-y-auto">
-              {exportAsk.problems.map((t, i) => <li key={i}>{t}</li>)}
-            </ul>
-            <div className="flex justify-end gap-2 pt-1">
-              <button onClick={() => { exportAsk.resolve(false); setExportAsk(null); }}
-                className="h-8 px-3 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50">Huỷ</button>
-              <button autoFocus onClick={() => { exportAsk.resolve(true); setExportAsk(null); }}
-                className="h-8 px-3 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700">Vẫn xuất {exportAsk.count} trang</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Thanh tiến trình mảnh, không chiếm chỗ */}
       {running && progress.total > 1 && (
         <div className="absolute top-0 left-0 right-0 h-1 bg-indigo-100 z-30">
           <div className="h-full bg-indigo-600 transition-all" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+
+      {/* v10.7: menu "⋯" */}
+      {showMore && <div className="fixed inset-0 z-20" onClick={() => setShowMore(false)} />}
+      {showMore && (
+        <div className="absolute top-2 right-3 z-30 w-64 bg-white rounded-xl shadow-xl border border-slate-200 p-1.5 text-xs text-slate-700" onClick={e => e.stopPropagation()}>
+          {hasSaved && !running && (
+            <button onClick={() => { setShowMore(false); handleRetranslate(); }} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg hover:bg-slate-50 text-left">
+              <RefreshCw className="w-3.5 h-3.5 text-slate-500" />Dịch lại trang {currentPage}
+            </button>
+          )}
+          {hasSaved && !running && (
+            <button onClick={() => { setShowMore(false); openEditor(); }} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg hover:bg-slate-50 text-left">
+              <PencilLine className="w-3.5 h-3.5 text-slate-500" />Sửa bản dịch trang này
+            </button>
+          )}
+          <button onClick={() => { const v = !ocrFigures; setOcrFigures(v); setLayoutOcrFigures(v); }} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg hover:bg-slate-50 text-left">
+            <ScanText className={`w-3.5 h-3.5 ${ocrFigures ? 'text-amber-600' : 'text-slate-500'}`} />
+            <span className="flex-1">Dịch chữ trong hình</span>
+            <span className={`text-[10px] font-bold ${ocrFigures ? 'text-amber-600' : 'text-slate-400'}`}>{ocrFigures ? 'BẬT' : 'TẮT'}</span>
+          </button>
+          {current && (
+            <button onClick={() => { setShowMore(false); saveAs(current.blob, `MediTrans_${baseName}_trang-${currentPage}_ban-dich.jpg`); }} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg hover:bg-slate-50 text-left">
+              <ImageDown className="w-3.5 h-3.5 text-slate-500" />Tải ảnh trang này
+            </button>
+          )}
+          <button onClick={() => { setShowMore(false); setShowStats(true); }} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg hover:bg-slate-50 text-left">
+            <BarChart3 className="w-3.5 h-3.5 text-slate-500" />Thống kê lượt gọi AI (CSV)
+          </button>
+          <div className={`flex items-center gap-2 px-2.5 py-2 text-[11px] border-t border-slate-100 mt-1 ${cloud?.canWrite ? 'text-emerald-700' : 'text-slate-500'}`}>
+            {cloud?.canWrite ? <Cloud className="w-3.5 h-3.5" /> : <HardDrive className="w-3.5 h-3.5" />}
+            <span className="leading-snug">{storageTitle}</span>
+          </div>
+        </div>
+      )}
+
+      {/* v10.7: hộp xác nhận xuất PDF khi bản dịch chưa hoàn chỉnh (thay window.confirm) */}
+      {exportAsk && (
+        <div className="absolute inset-0 z-40 bg-slate-900/30 flex items-center justify-center p-4">
+          <div className="w-[440px] max-w-full bg-white rounded-xl shadow-xl border border-slate-200 p-4 space-y-3">
+            <div className="text-sm font-bold text-slate-800">Bản dịch chưa hoàn chỉnh</div>
+            <div className="text-xs text-slate-600 whitespace-pre-line max-h-60 overflow-auto">{exportAsk.problems.join('\n')}</div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => { exportAsk.resolve(false); setExportAsk(null); }} className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`}>Huỷ</button>
+              <button onClick={() => { exportAsk.resolve(true); setExportAsk(null); }} className={`${iconBtn} bg-emerald-600 text-white hover:bg-emerald-700`}>
+                <Download className="w-3.5 h-3.5" /><span>Vẫn xuất {exportAsk.count} trang</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

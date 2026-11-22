@@ -4857,7 +4857,10 @@ export default function App() {
                 isFullScreen ? "flex w-1/2" : (mobileViewMode === 'translation' ? "flex h-full md:w-1/2" : (mobileViewMode === 'split' ? "flex h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0 md:w-1/2" : (showTranslationPanel ? "hidden md:flex w-1/2" : "hidden")))
               )}
             >
-              <div className="h-11 border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-sm overflow-x-auto no-scrollbar">
+              {/* v10.7: thanh công cụ khung dịch cuộn ngang được (thanh cuộn mảnh, kéo / lăn chuột) — trước đây ẩn thanh cuộn
+                  nên nút cuối (PDF) bị khuất mà không kéo ra được */}
+              <div className="h-11 border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-sm overflow-x-auto overflow-y-hidden [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:bg-slate-300 [&::-webkit-scrollbar-thumb]:rounded-full"
+                onWheel={e => { const el = e.currentTarget; if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && el.scrollWidth > el.clientWidth) el.scrollLeft += e.deltaY; }}>
                 <div className="flex items-center gap-3 min-w-max">
                   <div className="flex items-center gap-2">
                     <div className="flex md:hidden items-center gap-0.5 mr-1">
@@ -4955,7 +4958,7 @@ export default function App() {
                 </div>
                 
                 {translationPanelMode === 'layout' && (
-                  <div ref={setLayoutToolbarEl} className="flex items-center gap-1 flex-1 min-w-max justify-end ml-3" />
+                  <div ref={setLayoutToolbarEl} className="flex items-center gap-1 flex-1 min-w-max justify-end ml-2" />
                 )}
                 <div className={cn("flex items-center gap-1.5 md:gap-3 min-w-max ml-0 md:ml-4 flex-wrap pb-2 md:pb-0", translationPanelMode === 'layout' && "hidden")}>
                   {/* Tải tập tin Word đã dịch */}
