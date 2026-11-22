@@ -698,6 +698,7 @@ const slimOcr = (ocr: OcrBlock[]) => ocr.map(o => ({
  *  - dấu chấm AI tự thêm vào cuối tiêu đề / nhãn ngắn ("8.2 Nhiễu do chuyển động.") khi bản gốc không có.
  */
 export function polishTranslations(blocks: LayoutBlock[], translations: Record<string, string>) {
+  dropMisplaced(blocks.filter(b => b.translatable), translations);
   for (const b of blocks) {
     let v = translations[b.id];
     if (!v || !b.translatable) continue;
@@ -720,6 +721,25 @@ export function polishTranslations(blocks: LayoutBlock[], translations: Record<s
       }
       if (!done) break;
     }
+    // 1b) v10.10: bản gốc VIẾT HOA toàn bộ (tiêu đề "PREFACE", "1. SHAPE", tab dọc "MAMMOGRAPHY", bìa sách) mà bản dịch
+    //     viết thường → viết hoa như bản gốc ("1. hình dáng" → "1. HÌNH DÁNG", BI-RADS; "hướng dẫn cần thiết của CLARK", bìa Clark)
+    {
+      const srcPlain = src.replace(/<\/?\d+>/g, '');
+      const LS0 = srcPlain.match(/\p{L}/gu) || [];
+      const realWord = (srcPlain.match(/\p{L}{4,}/gu) || []).some(w => (w.match(/[AEIOUY]/g) || []).length >= 2);
+      if (LS0.length >= 4 && realWord && LS0.every(ch => ch === ch.toUpperCase()) && /\p{Ll}/u.test(v.replace(/<\/?\d+>/g, ''))) {
+        v = v.replace(/(<\/?\d+>)|([^<]+)/g, (m, tag) => tag ? m : m.toLocaleUpperCase('vi'));
+      }
+    }
+    // 1c) v10.10: nhãn mục ("I.", "2.", "A.") vẽ thành khối riêng bên trái mà AI lặp lại ở đầu bản dịch → "I. I. CÁC LOẠI…"
+    {
+      const lm = v.replace(/^(<\d+>)?\s*/, '').match(/^([IVXLC]+|\d{1,2}|[A-Z])\.\s+/);
+      if (lm && !src.replace(/<\/?\d+>/g, '').trim().startsWith(lm[1] + '.')) {
+        const lab = lm[1] + '.';
+        const hasLabel = blocks.some(o => o !== b && o.plain.trim() === lab && Math.abs(o.top - b.top) < 0.6 * b.size && o.x1 <= b.x0 + 1);
+        if (hasLabel) v = v.replace(/^((<\d+>)?\s*)([IVXLC]+|\d{1,2}|[A-Z])\.\s+/, '$1');
+      }
+    }
     const plainV = v.replace(/<\/?\d+>/g, '');
     // 2) VIẾT HOA toàn bộ trong khi bản gốc không
     const LV = plainV.match(/\p{L}/gu) || [], LS = src.match(/\p{L}/gu) || [];
@@ -740,7 +760,7 @@ export function polishTranslations(blocks: LayoutBlock[], translations: Record<s
     else {
       const srcCapsRun = /(\b[A-Z]{2,}\b[\s-]+){1,}\b[A-Z]{2,}\b/.test(src.replace(/<\/?\d+>/g, '')) &&
         (src.match(/\b[A-Z]{2,}\b/g) || []).some(w => w.length >= 4 && /[AEIOU]/.test(w) && !/^(ECG|EKG|CCTA|CTCA|SPECT|TAVR|TAVI|ASCVD)$/.test(w));
-      if (!srcCapsRun) {
+      if (!srcCapsRun && !(LS.length >= 4 && LS.every(ch => ch === ch.toUpperCase()))) {
         const keepUp = new Set((src.match(/[\p{L}\d-]+/gu) || []).filter(t => /\p{Lu}.*\p{Lu}/u.test(t) && t === t.toUpperCase()));
         v = v.replace(/((?:[\p{Lu}\d][\p{Lu}\d-]*\p{Lu}[\p{Lu}\d-]*|[\p{Lu}]{2,})(?:\s+(?:[\p{Lu}\d][\p{Lu}\d-]*\p{Lu}[\p{Lu}\d-]*|[\p{Lu}]{2,}))+)/gu, (run) => {
           const ws = run.split(/\s+/);
@@ -915,6 +935,36 @@ export function localCell(text: string): string | undefined {
 }
 
 /** Bản dịch trùng nguyên văn câu gốc tiếng Anh (AI bỏ quên) — không tính tên riêng, số, tài liệu tham khảo. */
+/**
+ * v10.10: AI gán nhầm bản dịch của đoạn văn cho tiêu đề ngắn bên cạnh (tiêu đề "“NON-SIMPLE” CYSTS" hiện nguyên đoạn dịch
+ * của đoạn dưới, Interventional US tr.94): bản dịch dài gấp nhiều lần câu gốc ngắn VÀ trùng phần đầu với bản dịch của khối
+ * khác trên trang → bỏ bản dịch đó (khối được dịch bù / hiện trong danh sách "Sửa lỗi").
+ */
+export function dropMisplaced(blocks: { id: string; text: string }[], out: Record<string, string>) {
+  const plain = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim();
+  const wc = (t: string) => (plain(t).match(/\S+/g) || []).length;
+  for (const b of blocks) {
+    const v = out[b.id];
+    if (!v) continue;
+    const ns = wc(b.text), nv = wc(v);
+    if (ns > 8 || nv < 4 * ns + 10) continue;
+    const head = plain(v).toLowerCase().slice(0, 40);
+    if (head.length < 25) continue;
+    const dup = blocks.some(o => o !== b && out[o.id] && wc(o.text) > 2 * ns && plain(out[o.id]).toLowerCase().includes(head));
+    if (dup) delete out[b.id];
+  }
+  // v10.10: AI lệch mã khối (bìa sách: khối "CLINICAL ULTRASOUND" nhận "JAN DODGEON", tên tác giả nhận chữ rác của khối dưới):
+  // bản dịch trùng nguyên văn chữ gốc của KHỐI KHÁC (không phải của chính nó) → bỏ để dịch bù
+  const srcSet = new Map<string, string>();
+  for (const b of blocks) srcSet.set(plain(b.text).toLowerCase(), b.id);
+  for (const b of blocks) {
+    const v = out[b.id];
+    if (!v) continue;
+    const k = plain(v).toLowerCase();
+    if (k.length >= 4 && k !== plain(b.text).toLowerCase() && srcSet.has(k) && srcSet.get(k) !== b.id && /\p{L}{2}/u.test(k)) delete out[b.id];
+  }
+}
+
 function isUntranslated(src: string, v: string): boolean {
   const plain = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
   const a = plain(src);
@@ -1051,6 +1101,7 @@ async function translateBlocks(
   };
   await Promise.all(Array.from({ length: Math.min(plan.parallel, chunks.length) }, runOne));
   checkAbort(signal);
+  dropMisplaced(blocks, out);
   // Khối AI bỏ sót HOẶC trả nguyên văn tiếng Anh (thỉnh thoảng xảy ra) → dịch bù một lần
   const missing = blocks.filter(b => !out[b.id] || isUntranslated(b.text, out[b.id]));
   if (missing.length) {
@@ -1693,7 +1744,7 @@ function openLayoutDBOnce(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v37'; // v37: chú thích hình 2 cột không nối dòng đầu sang cột bên, nhãn Hình/Bảng giữ chữ đậm khi AI bỏ thẻ; // v36: ô lưu đồ có viền, bìa không giãn chữ, dòng Editors/tên tác giả chân trang riêng, cột viết tắt không co, tiêu đề bảng không kéo cột nhỏ, cụm lặp / VIẾT HOA / dấu chấm thừa trong bản dịch, ô chỉ có từ viết tắt giữ nguyên; // v35: cột viết tắt giữ nguyên, tên tác giả giữ nguyên, dòng căn đều có số/chỉ số không vỡ, thân bài dưới bảng không bị coi là ô bảng, bảng có kẻ tách ô cột hẹp, cỡ chữ bảng theo đa số ô; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
+const ENGINE_VERSION = 'v38'; // v38: dòng mục lục có số trang cột phải tách riêng, bảng kẻ không bị coi là khung lưu đồ, dòng căn đều không nối sang cột bên, giữ VIẾT HOA như bản gốc; // v37: chú thích hình 2 cột không nối dòng đầu sang cột bên, nhãn Hình/Bảng giữ chữ đậm khi AI bỏ thẻ; // v36: ô lưu đồ có viền, bìa không giãn chữ, dòng Editors/tên tác giả chân trang riêng, cột viết tắt không co, tiêu đề bảng không kéo cột nhỏ, cụm lặp / VIẾT HOA / dấu chấm thừa trong bản dịch, ô chỉ có từ viết tắt giữ nguyên; // v35: cột viết tắt giữ nguyên, tên tác giả giữ nguyên, dòng căn đều có số/chỉ số không vỡ, thân bài dưới bảng không bị coi là ô bảng, bảng có kẻ tách ô cột hẹp, cỡ chữ bảng theo đa số ô; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch

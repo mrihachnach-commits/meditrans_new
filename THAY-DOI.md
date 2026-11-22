@@ -858,3 +858,31 @@ Thêm vào bộ hồi quy: CT tim tr.12, 35, 44, 48, 56, 57, 68, 73, 103, 108 (s
 - Atlas còn nhiều đoạn/chú thích giữ tiếng Anh (khoảng tr.159, 177, 187–217, 238, 249, 265–286, 306–330, 355–386). Đây là các khối AI chưa trả bản dịch. Khi bấm Xuất PDF, chọn **"Sửa lỗi N trang"** để dịch bù các trang này.
 
 **Lưu ý khi cập nhật**: engine đổi sang v37 nên các trang đã dịch sẽ tự dàn lại từ bản dịch đã lưu (không tốn token). Riêng chú thích 2 cột được tách lại thành 2 khối mới → trang đó sẽ hiện trong danh sách "Sửa lỗi" để dịch bù phần chú thích.
+
+## v10.10 — Rà bản dịch v10.9 của 5 cuốn (engine v38)
+
+**Viết hoa / viết thường (BI-RADS, Clark's)**
+- Dòng gốc VIẾT HOA toàn bộ ("PREFACE", "1. SHAPE", "ANATOMY", "SECTION 2: IMAGING", "NORMAL VARIANTS", tab dọc "MAMMOGRAPHY", bìa sách) → bản dịch được **ép viết hoa cả dòng bằng code** sau khi dịch, không chỉ dựa vào prompt. Hết "PHẦN 2: hình ảnh", "Biến thể BÌNH THƯỜNG", "1. hình dáng".
+- Nhãn mục vẽ riêng ("I.") mà AI lặp lại trong bản dịch → bỏ ("I. I. CÁC LOẠI…").
+- Prompt (dịch thường + OCR trang scan) thêm luật rõ: giữ hoa/thường như gốc, không trộn hoa/thường trong một tiêu đề; giữ nguyên tên người, học vị, từ viết tắt; mỗi khối giữ đúng phần chữ và thứ tự của nó.
+
+**Tên tác giả, học vị**
+- Dòng "Tên, MD, PhD and Tên, MBBS" được giữ nguyên, không gửi AI (trước đây thành "Bác sĩ đa khoa, Tiến sĩ").
+
+**Bản dịch lệch khối (bìa Clark's)**
+- Bản dịch trùng nguyên văn chữ gốc của khối khác (tên tác giả nhảy lên chỗ tiêu đề) hoặc bản dịch dài gấp nhiều lần tiêu đề ngắn (Interventional tr.94) → bị loại và dịch bù.
+- Chữ rác của lớp chữ OCR ("@SElr.fcSip") giữ nguyên, không dịch.
+
+**Mục lục (Clark's)**
+- Dòng mục lục có số trang in thành cột riêng bên phải: mỗi dòng là một mục riêng, chữ được dùng chỗ trống tới số trang → hết gộp mục, hết "Tài liệu tham / khảo" lệch số trang.
+
+**Dàn trang**
+- Dòng căn đều cột trái không còn bị nối sang dòng đầu cột phải (Interventional tr.51).
+- Ghi chú dưới bảng "Data from Ref. [2]" tách khỏi câu sau (Interventional tr.181).
+- Nhãn "Hình 2.20" giữ màu/đậm cả chữ "Hình" khi AI chỉ bọc thẻ quanh số.
+- Bảng có kẻ (Bảng 19.2 CT tim tr.237): ô không còn bị nhận nhầm là khung lưu đồ → không căn giữa, cùng cỡ chữ với bảng.
+- Các cột của cùng một bảng chênh cỡ chữ tối đa 0,06 (Bảng 5.8 CT tim tr.57).
+
+**Về model gpt-4.1-nano**: phần lớn lỗi hoa/thường, dịch học vị, lệch khối là do model nano làm ẩu; nay đã có code kiểm tra và sửa sau khi dịch nên kết quả ổn định dù dùng nano. Nếu muốn chất lượng câu chữ tốt hơn, có thể nhập model mạnh hơn (vd. gpt-4.1-mini) ở ô model dịch giữ định dạng.
+
+**Không phải lỗi phần mềm**: Atlas, Interventional, CT tim không còn khối tiếng Anh chưa dịch.

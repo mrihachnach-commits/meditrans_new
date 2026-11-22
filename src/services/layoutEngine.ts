@@ -223,6 +223,16 @@ function isTranslatableText(text: string): boolean {
   if (/^(https?:\/\/|www\.)\S+$/i.test(t)) return false;
   if (/^(doi:?\s*)?10\.\d{4,}\/\S+$/i.test(t)) return false;
   if (/^\S+@\S+\.\S+$/.test(t)) return false;
+  // v10.10: dòng tên tác giả kèm học vị ("Wendie A. Berg, MD, PhD and Wei Tse Yang, MBBS") → giữ nguyên (trước đây AI dịch
+  // học vị thành "Bác sĩ đa khoa, Tiến sĩ", mục lục BI-RADS)
+  {
+    const DEG = /^(MD|PhD|MBBS|MBChB|DO|MSc|MS|MA|BSc|BA|MPH|MBA|CGC|RN|RT|RDMS|RVT|RDCS|FRCR|FRCP|FRANZCR|FACR|FSBI|FSRU|FAIUM|DMRD|DCR|DMU|PgCert|PgDip|MRCP|FRCS|Jr|Sr|II|III)\.?$/;
+    const toks = t.replace(/[,;]/g, ' ').split(/\s+/).filter(Boolean);
+    if (toks.some(w => DEG.test(w)) && /,\s*(MD|PhD|MBBS|DO|MSc|CGC|RN|FRCR|MPH|RDMS|DCR)\b/.test(t) &&
+      toks.every(w => DEG.test(w) || /^(and|&|với|và)$/i.test(w) || /^\p{Lu}[\p{L}'’\-]*\.?$/u.test(w) || /^\p{Lu}\.(\p{Lu}\.)*$/u.test(w))) return false;
+  }
+  // v10.10: chữ rác của lớp chữ OCR trên bìa ("@SElr.fcSip" — logo nhà xuất bản đọc sai) → giữ nguyên
+  if (/^@\S*$/.test(t) || (/@/.test(t) && !/\s\p{L}{3,}\s/u.test(t) && t.length < 25)) return false;
   if (/^(page|trang)?\s*\d+(\s*(of|\/)\s*\d+)?$/i.test(t)) return false;
   // số trang La Mã — v10.4: phải đúng cú pháp số La Mã và cùng kiểu hoa/thường ("Mild", "Civil", "Dim" từng bị coi là số
   // La Mã nên không được dịch)
@@ -1046,7 +1056,11 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[], rules: H
         // Arrhythmogenic", CT tim tr.208): khác font đậm/thường + có khe cột ngay đó → hai cột khác nhau
         const fontJump = prev.bold !== it.bold && it.font !== prev.font && gap < 0.35 * mainSize && (/^\s*\d/.test(it.str) || it.size > 1.03 * prev.size) &&
           gutters.some(g => g > prev.x + 0.5 * mainSize && g < it.x + 1.5 * mainSize);
-        if (gutterBreak || fontJump || labelBreak || sizeBreak || (tableBreak && !captionRun) || (gap > 1.2 * mainSize && !justifiedGap && !captionRun)) flush();
+        // v10.10: dòng căn đều cột trái chạm sát dòng đầu cột phải (khe chỉ ≈ 1,1 cỡ chữ, cột phải chỉ có vài dòng nên không
+        // dò ra khe cột): mẩu sau thẳng mép trái với dòng kề của cột phải và không dòng lân cận nào chạy qua khe → sang cột khác
+        // ("…all breast masses, whether" | "completely excise small benign nodules", Interventional US tr.51)
+        const colJump = !!jg && jg.exact >= 1 && jg.covered === 0 && gap > 1.0 * mainSize && sameFont && !leaderNum;
+        if (colJump || gutterBreak || fontJump || labelBreak || sizeBreak || (tableBreak && !captionRun) || (gap > 1.2 * mainSize && !justifiedGap && !captionRun)) flush();
       }
       cur.push(it);
     }
@@ -1239,6 +1253,10 @@ export function findBoxes(img: ImageData, rules: HRule[]): TextBox[] {
     const b = rules.filter(r => r.y > t.y + 12 && r.y - t.y < 0.3 * H && Math.abs(r.x0 - t.x0) < tol && Math.abs(r.x1 - t.x1) < tol)
       .sort((p, q) => p.y - q.y)[0];
     if (!b) continue;
+    // v10.10: cạnh trên/dưới chạy tiếp sang ô bên cạnh (đường kẻ hàng bảng dài hơn cùng độ cao) → ô bảng, không phải
+    // khung lưu đồ (Bảng 19.2 CT tim tr.237: ô "Asymptomatic severe AS" bị coi là khung → căn giữa, mất cỡ chữ chung của bảng)
+    const runsOn = (e: HRule) => rules.some(r => r !== e && Math.abs(r.y - e.y) <= 3 && (r.x0 < e.x0 - 2 * tol || r.x1 > e.x1 + 2 * tol) && Math.min(r.x1, e.x1) - Math.max(r.x0, e.x0) > -2 * tol);
+    if (runsOn(t) || runsOn(b)) continue;
     // có đường kẻ khác cắt ngang giữa (hàng bảng) → không phải một khung
     if (rules.some(r => r !== t && r !== b && r.y > t.y + 3 && r.y < b.y - 3 && Math.min(r.x1, t.x1) - Math.max(r.x0, t.x0) > 0.5 * w)) continue;
     const y0 = Math.round(t.y + 3), y1 = Math.round(b.y - 3);
@@ -1640,7 +1658,8 @@ export function buildBlocks(
       const blockWidth = b.x1 - b.x0;
       const lastText = last.text.trim();
       const segText = seg.text.trim();
-      const lastEndsPunct = /[.:;?!]$/.test(lastText);
+      // v10.10: ghi chú dưới bảng "Data from Ref. [2]" (kết thúc bằng trích dẫn) cũng là câu đã dứt
+      const lastEndsPunct = /[.:;?!]$/.test(lastText) || /\[[\d,–\-\s]+\]$/.test(lastText);
       const segStartsUpper = /^[\p{Lu}\p{N}(]/u.test(segText);
       // Dòng trước ngắn bất thường (ngắt đoạn): hoặc khối >= 2 dòng, hoặc dòng trước kết thúc bằng dấu chấm và dòng sau viết hoa
       // v10.2: chữ căn trái không đều mép phải (chú thích hình "in dark green, age" / "standardized, per") — chỉ là ngắt
@@ -1677,6 +1696,10 @@ export function buildBlocks(
       // v10.7: dòng "e-mail: …" ở chân trang tác giả thuộc khối địa chỉ ngay trên (trước đây tách riêng → bản dịch địa chỉ
       // ngắn lại, dòng e-mail đứng trơ cách xa — CT tim tr.187, 319)
       const emailLine = /^e-?mail\s*:/i.test(segText) && Math.abs(seg.x0 - b.x0) < 0.5 * b.size;
+      // v10.10: dòng mục lục có số trang in thành cột riêng bên phải (không có dấu chấm dẫn): mỗi dòng có số trang cùng hàng
+      // là một mục riêng — trước đây các mục liền nhau bị nhập thành đoạn, bản dịch ngắt dòng lệch số trang (mục lục Clark's)
+      const pageNumOn = (l: Segment) => segments.some(n => n !== l && /^\d{1,4}$/.test(n.text.trim()) && Math.abs(n.y - l.y) < 0.4 * l.size && n.x0 > l.x1 + 0.8 * l.size && n.x0 - l.x1 < 40 * l.size);
+      if (pageNumOn(last) && pageNumOn(seg)) continue;
       if (((prevShort && !centeredPair) || indentStart) && !(rightCont && !leftAligned) && !emailLine) continue;
       if (gap < bestGap) { bestGap = gap; bestBlock = b; }
     }
@@ -2011,6 +2034,11 @@ type Word = Piece[];
  */
 export function restoreTags(src: string, v: string): string {
   if (!src || !v || !/<\d+>/.test(src)) return v;
+  // v10.10: nhãn "<1>Fig. 2.20</1>" mà AI chỉ bọc thẻ quanh số ("Hình <1>2.20</1>") → chữ "Hình" mất màu/đậm: kéo thẻ ra cả nhãn
+  {
+    const ms = src.match(/^\s*<(\d+)>\s*(?:figs?\.?|figures?|tables?|tab\.)\s*[\d.\-–]+[a-z]?\s*<\/\1>/i);
+    if (ms) v = v.replace(new RegExp(`^(\\s*)(hình|bảng|fig\\.?|figure|table)\\s*<${ms[1]}>\\s*([\\d.\\-–]+[a-z]?)\\s*<\\/${ms[1]}>`, 'iu'), (_m, sp, w, n) => `${sp}<${ms[1]}>${w} ${n}</${ms[1]}>`);
+  }
   const spans: { k: string; inner: string }[] = [];
   const re = /<(\d+)>([\s\S]*?)<\/\1>/g;
   let m: RegExpExecArray | null;
@@ -2804,6 +2832,10 @@ export function paintTranslatedPage(
         if (o.x1 <= b.x0 + 1) left = Math.max(left, o.x1 + 0.8 * b.size);
       }
       extRight = right > b.x1 ? freeSide(img, b, stats.bg, b.x1 + 0.15 * b.size, right) : 0;
+      // v10.10: dòng mục lục có số trang ở cột phải → khoảng giữa chữ và số trang là chỗ trống của chính dòng đó
+      // (trước đây "References" → "Tài liệu tham / khảo" bị ngắt 2 dòng lệch số trang, mục lục Clark's)
+      const pn = blocks.find(o => o !== b && /^\d{1,4}$/.test(o.plain.trim()) && Math.abs(o.top - b.top) < 0.5 * b.size && o.x0 > b.x1 + 0.8 * b.size && o.x0 - b.x1 < 40 * b.size);
+      if (pn && b.align === 'left') extRight = Math.max(extRight, pn.x0 - 1.0 * b.size - b.x1);
       if (b.align === 'center') {
         const extL = left < b.x0 ? freeSide(img, b, stats.bg, b.x0 - 0.15 * b.size, left) : 0;
         extLeft = extRight = Math.min(extL, extRight);
@@ -3242,6 +3274,7 @@ export function paintTranslatedPage(
       return Math.max(0.68, md - mn <= 0.2 ? mn : md - 0.08);
     };
     // v10.6: các cột của cùng một bảng không chênh nhau quá 0,12 (cột ngắn được to hơn chút, không to hẳn)
+    // v10.10: 0,12 → 0,06: cột đầu chữ to hẳn cạnh cột thuốc chữ nhỏ trông lệch (Bảng 5.8 CT tim tr.57)
     const tblMin = new Map<string, number>();
     buckets.forEach((list, key) => {
       if (!key.startsWith('tbl') || list.length < 2) return;
@@ -3251,7 +3284,7 @@ export function paintTranslatedPage(
     buckets.forEach((list, key) => {
       if (list.length < (key.startsWith('line') ? 4 : 2)) return;
       let target = targetOf(list, key);
-      if (key.startsWith('tbl')) target = Math.min(target, (tblMin.get(key.slice(0, key.indexOf('c', 3))) ?? target) + 0.12);
+      if (key.startsWith('tbl')) target = Math.min(target, (tblMin.get(key.slice(0, key.indexOf('c', 3))) ?? target) + 0.06);
       for (const p of list) {
         const sc = p.lo.size / p.orig.size;
         if (sc <= target + 0.01) continue;
