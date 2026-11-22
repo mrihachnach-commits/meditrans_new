@@ -969,6 +969,9 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
         // lại (< 1,2 cỡ chữ) → trước đây 2 ô bị nối thành 1 dòng rồi nhập luôn vào hàng trên. Khe nằm đúng vị trí khe
         // cột của ≥2 dòng lân cận và không dòng nào có chữ chạy qua → tách ô.
         const tableBreak = !!jg && !leaderNum && ((jg.aligned >= 2 && jg.covered === 0) ||
+          // v10.6: cột bảng khít (khe chỉ ≈ 1 cỡ chữ, bảng 19.7 CT tim tr.245): ≥ 2 dòng lân cận có ô bắt đầu ĐÚNG mép này
+          // → sang ô khác, kể cả khi ô sau viết thường ("…mass on valve or" | "lesion that is attached…")
+          (jg.exact >= 2 && jg.exact >= jg.covered && gap > 0.85 * mainSize) ||
           (jg.exact >= 1 && jg.oneSided && jg.aligned > jg.covered && /^\s*[\p{Lu}\p{N}≤≥<>±(]/u.test(it.str)) ||
           // v10.4: khoảng trống rất rộng (≥ 3,5 cỡ chữ) mà mảnh sau thẳng mép trái với một mảnh ở dòng kề = sang cột bảng khác
           // ("descending artery" | "artery (LCx)" bảng 18 đoạn SCCT) — dòng dàn đều không bao giờ hở rộng như vậy
@@ -984,7 +987,10 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[]): Segment
         const sizeBreak = gap > 0.5 * Math.min(it.size, curSize) &&
           Math.abs(it.size - curSize) > 0.1 * Math.max(it.size, curSize) &&
           letterCount(curText) >= 2 && (letterCount(it.str) >= 2 || LABEL_RE.test(it.str.trim()));
-        if (gutterBreak || labelBreak || sizeBreak || tableBreak || (gap > 1.2 * mainSize && !justifiedGap)) flush();
+        // v10.6: dòng đầu chú thích hình/bảng căn đều ("Fig. 19.11 Aortic   Dissection   Related   Aortic") có khe rộng
+        // giữa các từ viết hoa trùng khe dòng dưới → từng bị cắt thành ô bảng, mẩu giữa vẽ chồng lên chú thích (CT tim tr.238)
+        const captionRun = !gutterBreak && !(jg && jg.exact >= 2) && sameFont && gap <= 2 * mainSize && /^(fig\.?|figure|table|tab\.)\s*\d/i.test(curText);
+        if (gutterBreak || labelBreak || sizeBreak || (tableBreak && !captionRun) || (gap > 1.2 * mainSize && !justifiedGap && !captionRun)) flush();
       }
       cur.push(it);
     }
@@ -1208,10 +1214,34 @@ export function markFormulaBlocks(blocks: LayoutBlock[]): number {
   return isF.size;
 }
 
+/** Đường ngang là gạch chân chữ: nằm ngay dưới đường chân của các mẩu chữ cùng dòng và chữ phủ ≥ 85% chiều dài. */
+export function isUnderlineRule(r: HRule, items: NormItem[]): boolean {
+  const near = items.filter(it => it.str.trim() && it.size > 0 && r.y > it.y && r.y < it.y + 0.32 * it.size &&
+    it.x < r.x1 && it.x + it.w > r.x0);
+  if (!near.length) return false;
+  const size = Math.max(...near.map(it => it.size));
+  const iv = near.map(it => [Math.max(r.x0, it.x), Math.min(r.x1, it.x + it.w)] as [number, number]).sort((a, b) => a[0] - b[0]);
+  let covered = 0, cs = iv[0][0], ce = iv[0][1], maxGap = 0;
+  for (const [a, b] of iv.slice(1)) {
+    maxGap = Math.max(maxGap, a - ce);
+    if (a <= ce + 0.6 * size) ce = Math.max(ce, b);
+    else { covered += ce - cs; cs = a; ce = b; }
+  }
+  covered += ce - cs;
+  if (covered >= 0.85 * (r.x1 - r.x0)) return true;
+  // dòng căn đều giãn rộng: gạch chân bắt đầu / kết thúc đúng ở đầu / cuối chữ, khoảng trống giữa các từ < 2,5 cỡ chữ
+  const minX = Math.min(...near.map(it => it.x)), maxX = Math.max(...near.map(it => it.x + it.w));
+  return near.length >= 2 && Math.abs(r.x0 - minX) < 0.5 * size && Math.abs(r.x1 - Math.min(maxX, r.x1)) < 0.5 * size &&
+    r.x0 >= minX - 0.5 * size && maxGap < 2.5 * size;
+}
+
 export function buildBlocks(
   items: NormItem[], pageWidth: number, pageHeight = pageWidth * 1.414, gutterOverride?: number[], rules: HRule[] = [],
 ): LayoutBlock[] {
   const gutters = gutterOverride ?? defaultGutters(splitLeadingBullets(items));
+  // v10.6: gạch chân chữ (nằm sát dưới đường chân chữ, chữ phủ gần kín chiều dài) không phải đường kẻ bảng.
+  // Trước đây gạch chân các mục "Selection of the best cardiac phase:" làm cả cột văn bản bị coi là bảng có kẻ.
+  rules = rules.filter(r => !isUnderlineRule(r, items));
   const segments = buildSegments(items, gutters).filter(s => s.text.length > 0);
   segments.sort((a, b) => a.y - b.y || a.x0 - b.x0);
 
@@ -2265,6 +2295,54 @@ export function paintTranslatedPage(
    * Xoá một vùng: nếu bản "không chữ" thật sự đã mất chữ ở vùng này (chữ vector) → chép nền thật
    * (giữ ảnh, khung, đường kẻ, nền màu). Ngược lại (chữ nằm trong ảnh / trang scan) → tô màu nền.
    */
+  const scrubUnderlines = (b: LayoutBlock, x0: number, y0: number, x1: number, y1: number, bg: RGB) => {
+    const xa = Math.max(0, Math.floor(x0)), xb = Math.min(W, Math.ceil(x1));
+    const ya = Math.max(0, Math.floor(y0)), yb = Math.min(H, Math.ceil(y1));
+    const rw = xb - xa, rh = yb - ya;
+    if (rw < 8 || rh < 6) return;
+    const part = ctx.getImageData(xa, ya, rw, rh);
+    const p = part.data;
+    const inkP = (x: number, y: number) => {
+      if (x < 0 || y < 0 || x >= rw || y >= rh) return false;
+      const i = (y * rw + x) * 4;
+      return Math.abs(p[i] - bg.r) + Math.abs(p[i + 1] - bg.g) + Math.abs(p[i + 2] - bg.b) > 90;
+    };
+    const od = img.data;
+    const inkOrig = (gx: number, gy: number) => {
+      if (gx < 0 || gy < 0 || gx >= W || gy >= H) return false;
+      const i = (gy * W + gx) * 4;
+      return Math.abs(od[i] - bg.r) + Math.abs(od[i + 1] - bg.g) + Math.abs(od[i + 2] - bg.b) > 90;
+    };
+    const minRun = Math.max(12, 1.5 * b.size);
+    const gap = Math.max(3, Math.round(0.18 * b.size));
+    let changed = false;
+    for (let y = 0; y < rh; y++) {
+      let run = 0;
+      for (let x = 0; x <= rw; x++) {
+        if (x < rw && inkP(x, y)) { run++; continue; }
+        if (run >= minRun) {
+          const a = x - run;
+          let thick = 0;
+          for (let t = a; t < x; t++) if (inkP(t, y - gap) || inkP(t, y + gap)) thick++;
+          // đường kẻ thật (bảng, khung) chạy tiếp ra ngoài vùng → giữ
+          let beyond = false;
+          for (let k = 2; k <= 6 && !beyond; k++) beyond = inkOrig(xa + a - k, ya + y) || inkOrig(xa + x - 1 + k, ya + y);
+          if (thick < 0.2 * run && !beyond) {
+            for (let yy = Math.max(0, y - 1); yy <= Math.min(rh - 1, y + 2); yy++) {
+              for (let t = a; t < x; t++) {
+                if (!inkP(t, yy)) continue;
+                const i = (yy * rw + t) * 4;
+                p[i] = bg.r; p[i + 1] = bg.g; p[i + 2] = bg.b;
+              }
+            }
+            changed = true;
+          }
+        }
+        run = 0;
+      }
+    }
+    if (changed) ctx.putImageData(part, xa, ya);
+  };
   const erase = (x: number, y: number, w: number, h: number, bg: RGB, size = 0, both = false) => {
     const xa = Math.max(0, Math.floor(x)), ya = Math.max(0, Math.floor(y));
     const xb = Math.min(W, Math.ceil(x + w)), yb = Math.min(H, Math.ceil(y + h));
@@ -2710,7 +2788,10 @@ export function paintTranslatedPage(
         }
         // (trong nhóm chảy, mục 1 dòng được xuống dòng và đẩy các mục sau xuống; cả nhóm thu nhỏ ĐỀU nếu thiếu chỗ —
         // trước đây từng mục tự thu nhỏ riêng → chữ to nhỏ xen kẽ trong cùng danh sách)
-        if (b.lineCount === 1 && lo.lines.length > 1 && inf.free < 0.6 * b.size && (!cascade || (b.bold && b.size > 1.08 * pageMedSize))) {
+        // v10.6: ô bảng có kẻ 1 dòng (hàng "C", "D" chỉ cao 1 dòng) cũng vậy, kể cả khi nằm trong nhóm chảy — xuống dòng
+        // sẽ tràn qua đường kẻ hàng
+        const rowCell = !!b.tableId && i < g.length - 1 && g[i + 1].top - b.bottom < 1.2 * b.size;
+        if (b.lineCount === 1 && lo.lines.length > 1 && inf.free < 0.6 * b.size && (!cascade || rowCell || (b.bold && b.size > 1.08 * pageMedSize))) {
           // Không còn chỗ bên dưới (tiêu đề trên thanh màu, nhãn sát hình) → thu nhỏ riêng khối này để giữ 1 dòng
           for (let s2 = s - 0.03; s2 >= 0.6 - 1e-6; s2 -= 0.03) {
             const ov = overrides[i];
@@ -2818,7 +2899,9 @@ export function paintTranslatedPage(
   const cellSizes = new Map<string, number[]>();
   for (const i of cellIdx) {
     const tid = groups[i].find(b => b.tableId)?.tableId ?? pseudoTid(groups[i]);
-    const k = tid ? `${tid}|${Math.round(groupSize(groups[i]))}` : String(Math.round(groupSize(groups[i])));
+    // v10.6: bảng có kẻ → cỡ chung theo TỪNG CỘT (cột mô tả ngắn không bị kéo nhỏ theo cột số liệu dài; CT tim tr.237)
+    const colOf = tid && tid.startsWith('r') ? `|c${Math.round(groups[i][0].x0 / (2 * groups[i][0].size))}` : '';
+    const k = tid ? `${tid}${colOf}|${Math.round(groupSize(groups[i]))}` : String(Math.round(groupSize(groups[i])));
     (cellSizes.get(k) || cellSizes.set(k, []).get(k)!).push(i);
   }
   cellSizes.forEach((list, key) => {
@@ -2826,10 +2909,17 @@ export function paintTranslatedPage(
     // (ô tràn — không vừa ở cỡ nào — không quyết định cỡ chung nhưng vẫn vẽ cùng cỡ chung với cả bảng)
     const okList = list.filter(i => !fitted[i].overflow);
     if (!okList.length) return;
-    const cs = okList.map(i => fitted[i].s).sort((x, y) => x - y);
+    // v10.6: cỡ THỰC đã vẽ (khối 1 dòng hết chỗ bên dưới được thu nhỏ riêng → nhỏ hơn s của nhóm)
+    const eff = (i: number) => Math.min(fitted[i].s, ...fitted[i].los.map((lo, k) => lo.size / groups[i][k].size));
+    const cs = okList.map(eff).sort((x, y) => x - y);
     // (một ô quá dài không kéo cả bảng xuống: cỡ chung không thấp hơn mức của đa số ô quá 0,2 — ô đó tự thu nhỏ thêm)
-    const shared = key.startsWith('r') ? Math.max(0.62, cs[0], cs[Math.floor(0.25 * (cs.length - 1))] - 0.2) : Math.max(0.85, cs[Math.floor(0.3 * (cs.length - 1))]);
-    for (const i of list) if (fitted[i].s > shared + 0.005) fitted[i] = fitGroup(groups[i], shared);
+    // v10.6: bảng có kẻ: tính cả ô tràn (đã ở cỡ nhỏ nhất) — trước đây cột toàn ô tràn chỉ còn vài nhóm vừa khung quyết
+    // định cỡ chung → nhóm đó chữ to, các dòng cạnh bên chữ nhỏ (CT tim tr.237 "Aortic Vmax…")
+    const csAll = list.map(eff).sort((x, y) => x - y);
+    const shared = key.startsWith('r')
+      ? Math.max(0.68, Math.min(Math.max(cs[0], cs[Math.floor(0.25 * (cs.length - 1))] - 0.2), csAll[Math.floor(0.25 * (csAll.length - 1))]))
+      : Math.max(0.85, cs[Math.floor(0.3 * (cs.length - 1))]);
+    for (const i of list) if (fitted[i].s > shared + 0.005 && (!key.startsWith('r') || Math.max(...fitted[i].los.map((lo, k) => lo.size / groups[i][k].size)) > shared + 0.005)) fitted[i] = fitGroup(groups[i], shared);
   });
 
   groups.forEach((g, gi) => {
@@ -2873,21 +2963,36 @@ export function paintTranslatedPage(
     // chú giải) → cùng cỡ vẽ; trước đây dòng dài bị thu nhỏ còn dòng ngắn giữ cỡ gốc, to nhỏ xen kẽ
     const lineClass = (p: typeof plans[number]) => p.orig.lineCount === 1 && (p.orig.italic || Math.abs(p.orig.size - bodySize) > 0.06 * bodySize) &&
       (info.get(p.orig.id)?.words.length ?? 99) <= 24 ? `line${p.orig.italic ? 'i' : ''}` : '';
-    const classOf = (p: typeof plans[number]) => p.orig.leader ? 'toc' : rowMate.has(p.orig.id) ? 'cell' : lineClass(p);
+    // v10.6: ô bảng có kẻ → theo bảng + cột (cả dòng in đậm "Mild AS:" và các dòng số liệu không có ô cùng hàng);
+    // trước đây chỉ ô có "bạn cùng hàng" được đồng bộ → dòng số liệu chữ to cạnh dòng khác chữ nhỏ (CT tim tr.237)
+    const classOf = (p: typeof plans[number]) => p.orig.leader ? 'toc'
+      : p.orig.tableId ? `tbl${p.orig.tableId}c${Math.round(p.orig.x0 / (2 * p.orig.size))}`
+      : rowMate.has(p.orig.id) ? 'cell' : lineClass(p);
     const buckets = new Map<string, typeof plans>();
     for (const p of plans) {
       const c = classOf(p);
       if (!c) continue;
-      const k = `${c}|${Math.round(p.orig.size)}|${p.orig.bold}`;
+      const k = `${c}|${Math.round(p.orig.size)}|${c.startsWith('tbl') ? '' : p.orig.bold}`;
       (buckets.get(k) || buckets.set(k, []).get(k)!).push(p);
     }
-    buckets.forEach((list, key) => {
-      if (list.length < (key.startsWith('line') ? 4 : 2)) return;
+    const targetOf = (list: typeof plans, key: string) => {
       const scales = list.map(p => p.lo.size / p.orig.size);
       // cỡ chung gần mức phổ biến; dòng nào buộc phải nhỏ hơn hẳn giữ cỡ riêng (không kéo cả nhóm xuống)
       // Chênh lệch nhỏ (≤ 0,2) → mọi dòng cùng một cỡ (cỡ nhỏ nhất), như bản in; chỉ dòng nhỏ hơn hẳn mới giữ cỡ riêng
       const mn = Math.min(...scales), md = median(scales);
-      const target = Math.max(0.68, md - mn <= 0.2 ? mn : md - 0.08);
+      return Math.max(0.68, md - mn <= (key.startsWith('tbl') ? 0.3 : 0.2) ? mn : md - 0.08);
+    };
+    // v10.6: các cột của cùng một bảng không chênh nhau quá 0,12 (cột ngắn được to hơn chút, không to hẳn)
+    const tblMin = new Map<string, number>();
+    buckets.forEach((list, key) => {
+      if (!key.startsWith('tbl') || list.length < 2) return;
+      const t = key.slice(0, key.indexOf('c', 3));
+      tblMin.set(t, Math.min(tblMin.get(t) ?? Infinity, targetOf(list, key)));
+    });
+    buckets.forEach((list, key) => {
+      if (list.length < (key.startsWith('line') ? 4 : 2)) return;
+      let target = targetOf(list, key);
+      if (key.startsWith('tbl')) target = Math.min(target, (tblMin.get(key.slice(0, key.indexOf('c', 3))) ?? target) + 0.06);
       for (const p of list) {
         const sc = p.lo.size / p.orig.size;
         if (sc <= target + 0.01) continue;
@@ -2978,6 +3083,7 @@ export function paintTranslatedPage(
   }
 
   /* --- Xoá chữ gốc (cả khoảng giữa các khối trong nhóm và phần giãn) --- */
+  const scrubJobs: (() => void)[] = [];
   for (const b of targets) {
     const inf = info.get(b.id)!;
     const g = groupOf.get(b.id)!;
@@ -3036,11 +3142,18 @@ export function paintTranslatedPage(
       }
     }
     erase(left, top, right - left, bottom - top, inf.stats.bg, b.size, !!b.figLabel);
+    // v10.6: gạch chân của bản gốc (đường vector) còn nguyên trong nền "không chữ" → sau khi chữ dịch chảy lại, nét gạch
+    // nằm giữa dòng mới trông như gạch ngang chữ. Xoá các nét ngang mảnh nằm gọn trong khối (không chạy ra ngoài như kẻ bảng).
+    if (!b.tableId && !b.figLabel && !b.rotate && !b.fromOcr && b.translatable) {
+      const bx = { b, x0: Math.max(left, b.x0 - 0.3 * b.size), y0: top, x1: Math.min(right, b.x1 + 0.3 * b.size), y1: Math.max(bottom, b.bottom + 0.35 * b.size), bg: inf.stats.bg };
+      scrubJobs.push(() => scrubUnderlines(bx.b, bx.x0, bx.y0, bx.x1, bx.y1, bx.bg)); // chạy sau khi xoá hết (khối kề chép lại nền)
+    }
     if (b.dropCap) {
       const dc = b.dropCap;
       erase(dc.x - 0.08 * dc.size, dc.baseline - 0.82 * dc.size, dc.w + 0.1 * dc.size, 0.92 * dc.size, inf.stats.bg, b.size);
     }
   }
+  for (const f of scrubJobs) f();
   for (const k of keepPatches) ctx.putImageData(k.patch, k.x, k.y);
 
   /* --- Dời ký hiệu đầu dòng theo mục (sao chép nguyên điểm ảnh gốc) --- */

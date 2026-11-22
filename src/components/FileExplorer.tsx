@@ -492,18 +492,19 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
   return (
     <div className="flex flex-col h-full bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100">
       {/* Header */}
-      <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-white sticky top-0 z-10">
-        <div className="flex items-center gap-4">
-          <div className="bg-indigo-600 p-2.5 rounded-2xl shadow-lg shadow-indigo-100">
-            <Folder className="text-white w-6 h-6" />
+      {/* v10.6: điện thoại — tiêu đề + tab ở trên, thanh tìm/sắp xếp xuống hàng dưới (trước đây bóp tab, tràn thanh sắp xếp) */}
+      <div className="p-4 sm:p-6 border-b border-slate-100 flex flex-col md:flex-row md:items-center md:justify-between gap-3 bg-white sticky top-0 z-10">
+        <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+          <div className="bg-indigo-600 p-2 sm:p-2.5 rounded-2xl shadow-lg shadow-indigo-100 shrink-0 self-start">
+            <Folder className="text-white w-5 h-5 sm:w-6 sm:h-6" />
           </div>
-          <div>
-            <h2 className="text-xl font-display font-bold text-slate-800">Quản lý tài liệu</h2>
-            <div className="flex bg-slate-50 p-1 rounded-xl border border-slate-100 mt-2">
+          <div className="min-w-0">
+            <h2 className="text-lg sm:text-xl font-display font-bold text-slate-800 leading-tight whitespace-nowrap">Quản lý tài liệu</h2>
+            <div className="inline-flex bg-slate-50 p-1 rounded-xl border border-slate-100 mt-2">
               <button 
                 onClick={() => { setViewMode('my'); setCurrentFolderId(null); setPath([{id: null, name: 'Root'}]); }}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                  "px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 sm:gap-2 whitespace-nowrap",
                   viewMode === 'my' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
                 )}
               >
@@ -513,7 +514,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
               <button 
                 onClick={() => { setViewMode('shared'); setCurrentFolderId(null); setPath([{id: 'shared', name: 'Được chia sẻ'}]); }}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                  "px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 sm:gap-2 whitespace-nowrap",
                   viewMode === 'shared' ? "bg-white shadow-sm text-indigo-600" : "text-slate-400 hover:text-slate-600"
                 )}
               >
@@ -522,7 +523,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
               </button>
             </div>
             {viewMode === 'my' && (
-              <div className="flex items-center gap-1 mt-2">
+              <div className="flex items-center gap-1 mt-2 flex-wrap">
                 {path.map((p, i) => (
                   <React.Fragment key={p.id || 'root'}>
                     <button 
@@ -539,7 +540,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap md:flex-nowrap md:justify-end">
           <div className="relative hidden sm:block">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input 
@@ -619,7 +620,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, onUplo
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6 no-scrollbar">
+      <div className="flex-1 overflow-y-auto p-3 sm:p-6 no-scrollbar">
         {loading ? (
           <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-4">
             <Loader2 className="w-10 h-10 animate-spin text-indigo-500" />

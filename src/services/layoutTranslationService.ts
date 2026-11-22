@@ -2,6 +2,7 @@
  * MediTrans AI — Dịch giữ định dạng (xuất ảnh)
  * Kết nối pdf.js ↔ layoutEngine ↔ GeminiService, lưu đệm IndexedDB và xuất PDF dạng ảnh.
  */
+import { pageScopedSignal } from './aiTelemetry';
 import { isReferenceLine } from '../utils/translateBoost';
 import { glossaryExact, getGlossaryText } from './medicalGlossary';
 import { findColumnChains, joinChainText, splitChainTranslation } from './columnChain';
@@ -855,19 +856,28 @@ function isUntranslated(src: string, v: string): boolean {
   return stop >= 2;
 }
 
+/** v10.6: chạy các phần với tối đa `n` phần cùng lúc (dịch bù / dịch lại số liệu trước đây gửi hết một lượt). */
+async function runPool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const i = next++; out[i] = await fn(items[i]); } };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, worker));
+  return out;
+}
+
 /**
  * v10.4: đối chiếu số liệu / đơn vị / dấu. Khối lệch được dịch lại ĐÚNG MỘT lần; bản mới chỉ được nhận khi khớp hoàn toàn,
  * còn không thì GIỮ bản dịch đầu và ghi lý do để người dùng duyệt (không vòng lặp, không tự sửa số).
  */
 async function numericRetry(
   translator: LayoutBlockTranslator, blocks: LayoutBlock[], out: Record<string, string>,
-  plan: { chars: number; blocks: number }, signal?: AbortSignal, notes?: Record<string, string>,
+  plan: { chars: number; blocks: number; parallel?: number }, signal?: AbortSignal, notes?: Record<string, string>,
 ) {
   const numBad = blocks.filter(b => b.translatable && out[b.id] && checkNumeric(b.text, out[b.id]));
   if (!numBad.length) return;
   try {
-    const again = await Promise.all(chunkBlocks(numBad, plan.blocks, plan.chars).map(chunk =>
-      translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal)));
+    const again = await runPool(chunkBlocks(numBad, plan.blocks, plan.chars), plan.parallel || 3, chunk =>
+      translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal));
     const fresh: Record<string, string> = Object.assign({}, ...again);
     for (const b of numBad) {
       const first = checkNumeric(b.text, out[b.id])!;
@@ -966,8 +976,8 @@ async function translateBlocks(
   const missing = blocks.filter(b => !out[b.id] || isUntranslated(b.text, out[b.id]));
   if (missing.length) {
     try {
-      const again = await Promise.all(chunkBlocks(missing, plan.blocks, plan.chars).map(chunk =>
-        translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal)));
+      const again = await runPool(chunkBlocks(missing, plan.blocks, plan.chars), plan.parallel, chunk =>
+        translator.translateLayoutBlocks(chunk.map(b => ({ id: b.id, text: b.text })), signal));
       again.forEach(r => {
         for (const [id, v] of Object.entries(r)) {
           const b = missing.find(x => x.id === id);
@@ -1190,6 +1200,22 @@ export async function translatePageWithLayout(
   translator: LayoutBlockTranslator,
   signal?: AbortSignal,
   opts: { forceOcr?: boolean; ocrFigures?: boolean } = {},
+): Promise<LayoutPageResult> {
+  // v10.6: tín hiệu huỷ riêng của trang, gắn số trang → bộ đếm lượt gọi AI ghi đúng trang (các trang chạy song song)
+  const scoped = pageScopedSignal(signal, pageNumber);
+  try {
+    return await translatePageWithLayoutInner(pdfDoc, pageNumber, translator, scoped.signal, opts);
+  } finally {
+    scoped.done();
+  }
+}
+
+async function translatePageWithLayoutInner(
+  pdfDoc: PDFDocumentProxy,
+  pageNumber: number,
+  translator: LayoutBlockTranslator,
+  signal: AbortSignal | undefined,
+  opts: { forceOcr?: boolean; ocrFigures?: boolean },
 ): Promise<LayoutPageResult> {
   await ensureLayoutFonts();
   let analyzed = await analyzePage(pdfDoc, pageNumber, translator, signal);
@@ -1585,7 +1611,7 @@ function openLayoutDBOnce(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v33'; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
+const ENGINE_VERSION = 'v34'; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch

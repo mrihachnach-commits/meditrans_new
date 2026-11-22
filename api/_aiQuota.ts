@@ -27,6 +27,8 @@ const RATE_PER_MIN = Number(process.env.SYSTEM_AI_RATE_PER_MIN || 120);
 const MAX_CONCURRENT = Number(process.env.SYSTEM_AI_MAX_CONCURRENT || 6);
 const DAILY_TOKENS = Number(process.env.SYSTEM_AI_DAILY_TOKENS ?? 5_000_000);
 const INFLIGHT_STALE_MS = 3 * 60_000;
+/** v10.6: giới hạn đồng thời gửi kèm mỗi phản hồi (header X-AI-Concurrency-Limit) để trình duyệt đặt đúng mức. */
+export const AI_MAX_CONCURRENT = MAX_CONCURRENT;
 
 export interface QuotaTicket {
   uid: string;
@@ -37,7 +39,7 @@ export interface QuotaDenied {
   status: 429;
   retryAfter: number;
   error: string;
-  reason: "rate" | "concurrency" | "daily";
+  reason: "rate" | "concurrency" | "daily" | "busy";
 }
 
 /** Ngày theo giờ Việt Nam (UTC+7) — hạn mức ngày đặt lại lúc 0 giờ Việt Nam. */
@@ -79,6 +81,7 @@ function memRelease(uid: string) { const b = mem.get(uid); if (b) b.inflight = M
 function deny(reason: QuotaDenied["reason"], retryAfter: number, extra = ""): QuotaDenied {
   const msg = reason === "rate" ? "Bạn gửi quá nhiều yêu cầu trong một phút. Vui lòng thử lại sau ít giây."
     : reason === "concurrency" ? "Đang có quá nhiều yêu cầu dịch chạy cùng lúc. Vui lòng chờ vài giây."
+    : reason === "busy" ? "Máy chủ đang bận ghi nhận lượt dùng, thử lại sau 1 giây."
     : `Bạn đã dùng hết hạn mức AI hệ thống hôm nay${extra}. Hạn mức đặt lại lúc 0 giờ (giờ Việt Nam).`;
   return { status: 429, retryAfter: Math.max(1, retryAfter), error: msg, reason };
 }
@@ -128,8 +131,9 @@ export async function acquireQuota(db: any, uid: string, estTotal: number, opts:
   } catch (e: any) {
     const code = String(e?.code ?? "");
     if (code === "10" || /ABORTED|contention|lock timeout/i.test(String(e?.message || ""))) {
-      if (attempt < 4) { await new Promise(r => setTimeout(r, 50 + Math.random() * 150 * (attempt + 1))); continue; }
-      return deny("concurrency", 2);
+      // v10.6: thử nhiều lần hơn; vẫn tranh chấp thì trả lý do "busy" (trình duyệt chỉ chờ ngắn, KHÔNG hạ số luồng)
+      if (attempt < 7) { await new Promise(r => setTimeout(r, 40 + Math.random() * 120 * (attempt + 1))); continue; }
+      return deny("busy", 1);
     }
     console.warn(`[aiQuota] Firestore không dùng được (${e?.code || ""} ${String(e?.message || e).slice(0, 120)}) → dùng bộ đếm trong bộ nhớ.`);
     const d = memAcquire(uid, now);

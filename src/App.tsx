@@ -4413,11 +4413,11 @@ export default function App() {
       </AnimatePresence>
       {/* Header */}
       {(!isFullScreen && !(pdfDoc && window.innerWidth < 768)) && (
-        <header className="h-14 border-b border-slate-200 bg-white flex items-center justify-between px-4 shrink-0 shadow-sm z-30">
+        <header className="h-14 border-b border-slate-200 bg-white flex items-center justify-between gap-2 px-2 sm:px-4 shrink-0 shadow-sm z-30">
           {file || pdfDoc ? (
             <button aria-label="Quay lại quản lý file" 
               onClick={clearFile}
-              className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500 mr-2"
+              className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500 mr-0 sm:mr-2 shrink-0"
               title="Quay lại quản lý file"
             >
               <ArrowLeft className="w-5 h-5" />
@@ -4425,24 +4425,24 @@ export default function App() {
           ) : null}
           <LogoWithText onClick={handleGoHome} />
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2 min-w-0 shrink-0">
           {pdfDoc && (
-            <div className="hidden md:flex items-center bg-slate-50 rounded-full px-3 py-1 gap-2 border border-slate-100 max-w-[300px]">
+            <div className="hidden lg:flex items-center bg-slate-50 rounded-full px-3 py-1 gap-2 border border-slate-100 max-w-[220px] xl:max-w-[300px] min-w-0">
               <FileText className="w-3.5 h-3.5 text-slate-400" />
               <span className="text-xs font-medium text-slate-600 truncate">{currentFileName}</span>
             </div>
           )}
           
-          <div className="h-6 w-px bg-slate-200 mx-1 hidden md:block" />
+          <div className="h-6 w-px bg-slate-200 mx-1 hidden lg:block" />
           
           {pdfDoc && (
             <button 
               onClick={clearFile}
-              className="flex items-center gap-1.5 px-3 py-1.5 hover:bg-slate-100 text-slate-500 hover:text-indigo-600 rounded-full transition-all text-[10px] font-bold uppercase tracking-wider"
+              className="shrink-0 flex items-center gap-1.5 px-2.5 xl:px-3 py-1.5 hover:bg-slate-100 text-slate-500 hover:text-indigo-600 rounded-full transition-all text-[10px] font-bold uppercase tracking-wider"
               title="Đóng tài liệu hiện tại"
             >
               <X className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Đóng file</span>
+              <span className="hidden xl:inline whitespace-nowrap">Đóng file</span>
             </button>
           )}
 
@@ -4452,26 +4452,26 @@ export default function App() {
                 setShowAdminPanel(true);
                 fetchAllUsers();
               }}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 text-white rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm hover:bg-amber-600"
+              className="shrink-0 flex items-center gap-1.5 px-2.5 xl:px-3 py-1.5 bg-amber-500 text-white rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm hover:bg-amber-600"
               title="Quản trị hệ thống"
             >
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Quản trị</span>
+              <span className="hidden xl:inline whitespace-nowrap">Quản trị</span>
             </button>
           )}
 
           <button 
             onClick={() => setShowDrivePickerModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 border border-indigo-100 text-indigo-600 hover:bg-indigo-100 rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm"
+            className="shrink-0 flex items-center gap-1.5 px-2.5 xl:px-3 py-1.5 bg-indigo-50 border border-indigo-100 text-indigo-600 hover:bg-indigo-100 rounded-full transition-all text-[10px] font-bold uppercase tracking-wider shadow-sm"
             title="Mở hoặc chọn tài liệu từ Google Drive"
           >
             <HardDrive className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Google Drive</span>
+            <span className="hidden xl:inline whitespace-nowrap">Google Drive</span>
           </button>
 
           <button aria-label="Cài đặt hệ thống" 
             onClick={() => setShowSettings(true)}
-            className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
+            className="p-1.5 sm:p-2 shrink-0 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
             title="Cài đặt hệ thống"
           >
             <Settings className="w-4 h-4" />
@@ -4480,7 +4480,7 @@ export default function App() {
           {userRole === 'admin' && (
             <button aria-label="Quản lý API Keys" 
               onClick={() => setShowApiSettings(true)}
-              className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
+              className="p-1.5 sm:p-2 shrink-0 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
               title="Quản lý API Keys"
             >
               <Key className="w-4 h-4" />
@@ -4522,10 +4522,10 @@ export default function App() {
 
           {isAuthReady && (
             user ? (
-              <div className="flex items-center gap-2 pl-1">
-                <div className="hidden lg:flex flex-col items-end mr-1">
-                  <span className="text-[10px] font-bold text-slate-700 leading-none">{user.displayName || 'Người dùng'}</span>
-                  <span className="text-[8px] text-slate-400 font-medium">{user.email}</span>
+              <div className="flex items-center gap-2 pl-1 shrink-0">
+                <div className="hidden xl:flex flex-col items-end mr-1 max-w-[160px] min-w-0">
+                  <span className="text-[10px] font-bold text-slate-700 leading-none truncate max-w-full">{user.displayName || 'Người dùng'}</span>
+                  <span className="text-[8px] text-slate-400 font-medium truncate max-w-full">{user.email}</span>
                 </div>
                 <div className="relative group">
                   <img 
@@ -4567,7 +4567,7 @@ export default function App() {
       <main className="flex-1 flex overflow-hidden relative bg-slate-50">
         <UploadStatus tasks={uploadTasks} onDismiss={dismissUploadTask} />
         {showExplorer ? (
-          <div className="flex-1 p-4 sm:p-8 overflow-hidden">
+          <div className="flex-1 p-2 sm:p-8 overflow-hidden">
             <FileExplorer 
               onFileSelect={handleFileSelectFromExplorer} 
               onUploadStart={startUpload} 
@@ -4581,8 +4581,8 @@ export default function App() {
           <div className="flex-1 flex flex-col md:flex-row divide-y md:divide-y-0 md:divide-x divide-slate-200 min-h-0 w-full overflow-hidden relative">
             {/* Left Side: Original PDF */}
             <div className={cn(
-              "flex flex-col bg-slate-100 overflow-hidden border-r border-slate-200 transition-all duration-300 ease-in-out relative",
-              isFullScreen ? "w-1/2" : (showTranslationPanel ? "w-full md:w-1/2" : "w-full"),
+              "flex flex-col bg-slate-100 overflow-hidden border-r border-slate-200 transition-all duration-300 ease-in-out relative min-w-0",
+              isFullScreen ? "w-1/2" : (showTranslationPanel || mobileViewMode !== 'pdf' ? "w-full md:w-1/2" : "w-full"),
               mobileViewMode === 'pdf' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[45%] shrink-0 md:h-full" : "hidden md:flex")
             )}>
               <div className="h-11 bg-white border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-sm overflow-x-auto no-scrollbar">
@@ -4850,8 +4850,11 @@ export default function App() {
               animate={{ x: 0, opacity: 1 }}
               exit={{ x: 300, opacity: 0 }}
               className={cn(
-                "flex flex-col bg-white overflow-hidden transition-all duration-300",
-                isFullScreen ? "flex w-1/2" : (mobileViewMode === 'translation' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0" : (showTranslationPanel ? "hidden md:flex w-1/2" : "hidden")))
+                // v10.6: luôn chia đôi trên màn hình rộng + min-w-0 — trước đây chế độ xem điện thoại ("translation"/"split")
+                // còn lưu lại khi mở trên máy tính thì khung dịch không có bề rộng cố định, thanh công cụ (min-w-max) đẩy
+                // khung bản gốc bên trái bị bóp gần hết ("tràn viền", tuỳ thiết bị)
+                "flex flex-col bg-white overflow-hidden transition-all duration-300 min-w-0",
+                isFullScreen ? "flex w-1/2" : (mobileViewMode === 'translation' ? "flex h-full md:w-1/2" : (mobileViewMode === 'split' ? "flex h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0 md:w-1/2" : (showTranslationPanel ? "hidden md:flex w-1/2" : "hidden")))
               )}
             >
               <div className="h-11 border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-sm overflow-x-auto no-scrollbar">
@@ -6825,11 +6828,11 @@ export default function App() {
                       onChange={(e) => { setProxyMaxConcurrent(parseInt(e.target.value, 10)); showToast(`Đã đặt tối đa ${e.target.value} yêu cầu đồng thời.`, 'success'); }}
                       className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-bold outline-none cursor-pointer"
                     >
-                      {[2, 3, 4, 6, 8, 10, 12].map(n => <option key={n} value={n}>{n}{n === 8 ? ' (mặc định)' : ''}</option>)}
+                      {[2, 3, 4, 6, 8, 10, 12].map(n => <option key={n} value={n}>{n}{n === 6 ? ' (mặc định)' : ''}</option>)}
                     </select>
                   </div>
                   <p className="text-[10px] text-slate-400 leading-tight">
-                    Trần số yêu cầu gửi ShopAIKey cùng lúc (dịch nhiều đoạn/nhiều trang song song). Web tự tăng dần tới mức này và tự giảm khi ShopAIKey báo quá tải (429). Hay bị 429 → chọn thấp hơn.
+                    Trần số yêu cầu gửi ShopAIKey cùng lúc (dịch nhiều đoạn/nhiều trang song song). Web tự tăng dần tới mức này; bị 429 thì giảm còn khoảng 70% trong 2,5 phút rồi tăng dần lại. Key hệ thống không vượt quá giới hạn máy chủ báo (mặc định 6).
                   </p>
                 </div>
               </div>

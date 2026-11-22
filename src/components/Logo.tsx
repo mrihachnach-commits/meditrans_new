@@ -57,15 +57,16 @@ export const LogoWithText: React.FC<{ className?: string; onClick?: () => void }
   return (
     <div 
       onClick={onClick}
-      className={`flex items-center gap-2.5 ${onClick ? 'cursor-pointer hover:opacity-85 transition-opacity' : ''} ${className}`}
+      className={`flex items-center gap-2 sm:gap-2.5 shrink-0 min-w-0 ${onClick ? 'cursor-pointer hover:opacity-85 transition-opacity' : ''} ${className}`}
       title={onClick ? "Về trang chủ" : undefined}
     >
-      <Logo size={34} />
-      <div className="flex flex-col">
-        <span className="font-display font-bold text-xl text-slate-800 tracking-tight leading-none">
+      <Logo size={30} className="shrink-0 sm:!w-[34px] sm:!h-[34px]" />
+      {/* v10.6: chữ logo không xuống dòng, không bị cắt đầu chữ trên điện thoại / máy tính bảng */}
+      <div className="flex flex-col justify-center min-w-0">
+        <span className="font-display font-bold text-lg sm:text-xl text-slate-800 tracking-tight leading-tight whitespace-nowrap">
           MediTrans <span className="text-sky-600">AI</span>
         </span>
-        <span className="text-[10px] font-medium text-slate-500 uppercase tracking-[0.2em] mt-0.5">
+        <span className="hidden sm:block text-[9px] font-medium text-slate-500 uppercase tracking-[0.18em] leading-none whitespace-nowrap">
           Medical Translation
         </span>
       </div>

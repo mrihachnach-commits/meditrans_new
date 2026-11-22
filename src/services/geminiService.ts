@@ -4,6 +4,7 @@ import { TranslationService, TranslationOptions } from "./translationService";
 import { cleanLatex } from "../utils/textFormatting";
 import { auth } from "../firebase";
 import { glossaryPrompt, glossaryCompact } from "./medicalGlossary";
+import { recordAiCall, pageOfSignal } from "./aiTelemetry";
 
 /** Chờ có thể huỷ: bấm Dừng là thoát ngay, không phải đợi hết thời gian chờ thử lại (tới 8 giây). */
 function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
@@ -16,39 +17,60 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Bộ điều tiết chung cho MỌI yêu cầu gửi qua proxy (ShopAIKey / key hệ thống /api/ai/chat):
- *  - Giới hạn số yêu cầu chạy cùng lúc (mặc định 2, chỉnh bằng localStorage "mediTrans_proxyMaxConcurrent")
- *    và giãn nhịp giữa các lần bắt đầu gửi — dịch nhiều trang/nhiều phần song song không dồn cục lên proxy.
- *  - Proxy báo quá tải (429, 5xx, "overload"…) → hạ xuống 1 yêu cầu/lần và TẠM DỪNG mọi yêu cầu theo Retry-After
- *    (hoặc lùi dần 4 → 8 → 16 → 30 giây), sau đó tăng dần trở lại khi gửi thành công liên tục.
+ * v10.6 — Bộ điều tiết chung cho MỌI yêu cầu gửi qua proxy (ShopAIKey / key hệ thống /api/ai/chat), kiểu AIMD:
+ *  - Trần = giới hạn đồng thời server báo trong header "X-AI-Concurrency-Limit" (key hệ thống), không có thì 6.
+ *    Ô "Số yêu cầu đồng thời" trong Cài đặt chỉ được hạ trần này, không vượt quá server.
+ *  - Bắt đầu 3, tăng 1 sau mỗi 3 lần trả lời tốt (tăng nhanh khi chưa từng bị 429).
+ *  - Bị 429 thật (hết lượt / quá nhiều yêu cầu): giảm còn ~70% MỘT LẦN cho cả đợt — các yêu cầu đã gửi trước lúc giảm
+ *    mà nhận 429 không bị phạt thêm (v10.5 trừ dần 5 → 4 → 3 → 2 cho cùng một đợt nghẽn). Mức mới giữ 2,5 phút,
+ *    sau đó thử tăng lại từng nấc, mỗi nấc cách nhau ≥ 20 giây trả lời tốt.
+ *  - Lỗi 5xx / rớt mạng / server bận ghi sổ (reason "busy"): chỉ tạm dừng ngắn, KHÔNG hạ mức.
+ *  - Độ trễ tăng mạnh (thời gian trả lời / token ra > 1,8 lần mức tốt nhất gần đây) → đứng yên, không tăng tiếp.
  */
 class ProxyGate {
   private active = 0;
   private waiters: (() => void)[] = [];
-  private limit = 3;              // v8.4: bắt đầu 3 yêu cầu cùng lúc, tăng dần khi proxy trả lời tốt
+  private limit = 3;
   private pauseUntil = 0;
   private lastStart = 0;
   private okStreak = 0;
   private overloads = 0;
-  /** Ngưỡng an toàn học được: số yêu cầu cùng lúc vừa gây quá tải − 1 (giữ 10 phút, không thử vượt lại). */
-  private learnedCap = Infinity;
-  private learnedUntil = 0;
+  /** Mỗi lần hạ mức → epoch tăng; yêu cầu mang epoch cũ nhận 429 là cùng đợt nghẽn, không hạ thêm. */
+  private epoch = 0;
+  /** Mức đã hạ giữ trong một khoảng ngắn. */
+  private holdCap = Infinity;
+  private holdUntil = 0;
+  /** Sau một lần 429: thời điểm còn phải tăng chậm (mỗi nấc cách nhau 20 giây). */
+  private slowRampUntil = 0;
+  private lastRaise = 0;
+  /** Giới hạn đồng thời server báo (0 = chưa biết). */
+  private serverMax = 0;
+  /** Độ trễ (ms / token ra): mức tốt nhất (trôi chậm lên) và trung bình gần đây. */
+  private latBest = 0;
+  private latRecent = 0;
   constructor(private readonly spacingMs = 150) {}
-  /** Trần số yêu cầu cùng lúc (mặc định 6; chỉnh bằng localStorage "mediTrans_proxyMaxConcurrent", 1–10). */
-  get max(): number {
+  /** Ô trong Cài đặt (1–12), không đặt thì 0. */
+  private get userMax(): number {
     try {
       const v = parseInt((typeof window !== 'undefined' && localStorage.getItem('mediTrans_proxyMaxConcurrent')) || '', 10);
       if (v >= 1 && v <= 12) return v;
     } catch { /* ignore */ }
-    return 8; // v8.4: mặc định 8 (gpt-4.1-mini trả lời nhanh, proxy chịu tốt); tự hạ khi bị 429
+    return 0;
+  }
+  /** Trần số yêu cầu cùng lúc: key hệ thống = min(Cài đặt, server báo); key riêng = Cài đặt; mặc định 6. */
+  get max(): number {
+    const user = this.userMax;
+    if (this.serverMax) return user ? Math.min(user, this.serverMax) : this.serverMax; // key hệ thống: không vượt server
+    return user || 6; // key ShopAIKey riêng: theo Cài đặt, mặc định 6
   }
   private get cap(): number {
-    if (Date.now() > this.learnedUntil) this.learnedCap = Infinity;
-    return Math.min(this.max, this.learnedCap);
+    if (Date.now() > this.holdUntil) this.holdCap = Infinity;
+    return Math.min(this.max, this.holdCap);
   }
-  get current(): number { return Math.min(this.limit, this.cap); }
+  get current(): number { return Math.max(1, Math.min(this.limit, this.cap)); }
   private wakeAll() { const w = this.waiters; this.waiters = []; w.forEach(f => f()); }
-  async acquire(signal?: AbortSignal): Promise<void> {
+  /** Xin một chỗ gửi; trả về epoch lúc gửi (đưa lại cho onOverload). */
+  async acquire(signal?: AbortSignal): Promise<number> {
     for (;;) {
       if (signal?.aborted) throw new Error('Translation aborted');
       const now = Date.now();
@@ -57,7 +79,7 @@ class ProxyGate {
       if (this.active < lim && wait <= 0) {
         this.active++;
         this.lastStart = now;
-        return;
+        return this.epoch;
       }
       if (this.active < lim || this.pauseUntil > now) {
         await sleepAbortable(Math.max(20, wait), signal);
@@ -76,29 +98,48 @@ class ProxyGate {
     const w = this.waiters.shift();
     if (w) w();
   }
-  /** Thành công liên tục → tăng dần số yêu cầu cùng lúc (tới trần). */
-  onSuccess() {
+  /** Đọc header giới hạn của server (key hệ thống). */
+  noteHeaders(res: Response) {
+    const v = parseInt(res.headers.get('x-ai-concurrency-limit') || '', 10);
+    if (v >= 1 && v <= 50 && v !== this.serverMax) { this.serverMax = v; this.wakeAll(); }
+  }
+  /** Trả lời tốt → cập nhật độ trễ, tăng dần số yêu cầu cùng lúc (tới trần). */
+  onSuccess(ms = 0, outTokens = 0) {
     this.overloads = 0;
-    if (++this.okStreak >= 3 && this.limit < this.cap) { this.limit++; this.okStreak = 0; this.wakeAll(); }
+    if (ms > 0 && outTokens >= 20) {
+      const per = ms / outTokens;
+      this.latRecent = this.latRecent ? this.latRecent * 0.7 + per * 0.3 : per;
+      // mức tốt nhất trôi lên chậm (đổi model / trang dài hơn) để không kẹt mãi
+      this.latBest = !this.latBest || per < this.latBest ? per : this.latBest * 1.01;
+    }
+    const slow = this.latBest > 0 && this.latRecent > 1.8 * this.latBest;
+    const now = Date.now();
+    const gap = now < this.slowRampUntil ? 20_000 : 0;
+    if (++this.okStreak >= 3 && this.limit < this.cap && !slow && now - this.lastRaise >= gap) {
+      this.limit++; this.okStreak = 0; this.lastRaise = now; this.wakeAll();
+    }
   }
-  /** Quá tải → giảm một nửa số yêu cầu cùng lúc và tạm dừng theo Retry-After / lùi dần 3 → 6 → 12 → 24 giây. */
-  /** Proxy lỗi tạm thời (5xx, rớt mạng) — không phải do gửi quá nhiều → chỉ dừng ngắn, không hạ ngưỡng. */
-  onServerError() {
+  /** Proxy lỗi tạm thời (5xx, rớt mạng, server bận ghi sổ) — không phải do gửi quá nhiều → chỉ dừng ngắn, không hạ mức. */
+  onServerError(pauseMs = 800) {
     this.okStreak = 0;
-    this.pauseUntil = Math.max(this.pauseUntil, Date.now() + 800);
+    this.pauseUntil = Math.max(this.pauseUntil, Date.now() + pauseMs);
   }
-  onOverload(retryAfterMs?: number) {
+  /** 429 thật → giảm còn ~70% một lần cho cả đợt và tạm dừng theo Retry-After / lùi dần. */
+  onOverload(sentEpoch: number, retryAfterMs?: number) {
     this.okStreak = 0;
-    // Quá tải khi đang chạy N yêu cầu → ngưỡng an toàn là N−1 (tối thiểu 1); không thử vượt lại trong 10 phút
-    const atLoad = Math.max(1, this.active);
-    this.learnedCap = Math.max(1, Math.min(this.learnedCap, atLoad - 1 || 1));
-    this.learnedUntil = Date.now() + 10 * 60 * 1000;
-    // Đã biết ngưỡng an toàn (N−1) → dùng luôn ngưỡng đó, không chia đôi rồi phải tăng lại từ từ
-    this.limit = Math.max(1, this.learnedCap);
     const backoff = retryAfterMs && retryAfterMs > 0 ? Math.min(60000, retryAfterMs) : Math.min(16000, 1500 * 2 ** this.overloads);
-    this.overloads++;
     this.pauseUntil = Math.max(this.pauseUntil, Date.now() + backoff);
-    console.warn(`[MediTrans] Proxy quá tải → tạm dừng ${Math.round(backoff / 1000)} giây, giảm còn ${this.limit} yêu cầu/lần.`);
+    if (sentEpoch < this.epoch) return; // cùng đợt nghẽn đã hạ rồi
+    this.overloads++;
+    this.epoch++;
+    const now = Date.now();
+    const level = Math.max(this.current, Math.min(this.active, this.cap));
+    this.limit = Math.max(1, Math.floor(level * 0.7));
+    this.holdCap = this.limit;
+    this.holdUntil = now + 150_000;
+    this.slowRampUntil = now + 10 * 60_000;
+    this.lastRaise = now;
+    console.warn(`[MediTrans] Proxy quá tải → tạm dừng ${Math.round(backoff / 1000)} giây, giảm còn ${this.limit} yêu cầu/lần (giữ 2,5 phút rồi tăng dần lại).`);
   }
 }
 const proxyGate = new ProxyGate();
@@ -118,7 +159,21 @@ function isOverloadStatus(status: number, text = ''): boolean {
 }
 /** Bị từ chối vì gửi quá nhiều / quá nhanh (khác lỗi máy chủ tạm thời). */
 function isRateLimit(status: number, text = ''): boolean {
-  return status === 429 || /rate.?limit|too many|overload|quá tải|capacity|concurren/i.test(text);
+  // v10.6: chỉ 429 hoặc lỗi 4xx ghi rõ giới hạn tốc độ; 5xx (kể cả "overloaded") là lỗi tạm thời, không hạ mức
+  return status === 429 || (status >= 400 && status < 500 && /rate.?limit|too many|concurren/i.test(text));
+}
+/** v10.6: phản ứng của bộ điều tiết với một phản hồi lỗi. */
+function gateOnHttpError(sentEpoch: number, res: Response, errText: string) {
+  let reason = '';
+  try { reason = String(JSON.parse(errText)?.reason || ''); } catch { /* */ }
+  if (res.status === 429 && reason === 'busy') proxyGate.onServerError(1000); // server bận ghi sổ, không phải quá tải
+  else if (res.status === 429 && reason === 'daily') { /* hết hạn mức ngày — báo lỗi, không đổi mức */ }
+  else if (isRateLimit(res.status, errText)) proxyGate.onOverload(sentEpoch, retryAfterMs(res));
+  else if (isOverloadStatus(res.status, errText)) proxyGate.onServerError();
+}
+/** Loại lượt gọi cho bộ đếm. */
+function callKind(model: string): string {
+  return model === '__layout_fixed__' ? 'giu-dinh-dang' : model === '__ocr_fixed__' ? 'ocr' : 'dich-thuong';
 }
 function retryAfterMs(res: Response): number | undefined {
   const h = res.headers.get('retry-after');
@@ -372,8 +427,11 @@ export class GeminiService implements TranslationService {
   public isFastProxyModel(engine?: string): boolean {
     if (!this.usesProxy()) return false;
     const m = this.mapModelForOpenAI(engine || this.modelName);
+    // v10.6: xếp theo TÊN model (đã đo), không theo tham số suy nghĩ: gpt-5.x / gpt-6 / o-series dù tắt suy nghĩ
+    // vẫn chậm hơn gpt-4.1-mini 2–3 lần → chia phần to hơn, ít luồng hơn.
+    if (/^(gpt-5|gpt-6|o\d)/i.test(m)) return false;
     const r = GeminiService.reasoningFor(m);
-    return !r || r === 'none'; // v10.4: gpt-6-luna tắt suy nghĩ = model nhanh
+    return !r || r === 'none';
   }
   /** Cách chia trang dịch thường thành các phần chạy song song. */
   public parallelPlan(engine?: string): { minChars: number; maxParts: number; targetChars: number } {
@@ -722,7 +780,16 @@ export class GeminiService implements TranslationService {
 
     dlog(`[MediTrans] Calling Stream (${requestUrl}) using model: ${mappedModel}`);
 
-    await proxyGate.acquire(signal);
+    const sentEpoch = await proxyGate.acquire(signal);
+    const t0 = Date.now();
+    const rec = (status: number | string, extra: Partial<{ tin: number; tout: number; treason: number; finish: string }> = {}) =>
+      recordAiCall({ t: t0, page: pageOfSignal(signal), kind: callKind(model), model: mappedModel, status, ms: Date.now() - t0, ...extra });
+    let streamOk = false, sFinish = '', sUsage: any = null;
+    const note = (parsed: any) => {
+      const f = parsed?.choices?.[0]?.finish_reason;
+      if (f) sFinish = String(f);
+      if (parsed?.usage) sUsage = parsed.usage;
+    };
     try {
     let response: Response;
     try {
@@ -736,12 +803,14 @@ export class GeminiService implements TranslationService {
         signal
       });
     } catch (e) {
-      if (!signal?.aborted) proxyGate.onServerError(); // lỗi mạng / proxy cắt kết nối
+      if (!signal?.aborted) { proxyGate.onServerError(); rec('mang'); } // lỗi mạng / proxy cắt kết nối
       throw e;
     }
+    proxyGate.noteHeaders(response);
 
     if (!response.ok) {
       const errText = await response.text();
+      rec(response.status);
       // Kho key hệ thống trống / đã bị tắt → báo giao diện cập nhật trạng thái "[Hệ thống] ShopAIKey"
       if (response.status === 503 && key.trim() === 'system_proxy') { try { window.dispatchEvent(new Event('meditrans:system-pool-changed')); } catch { /* */ } }
       if (response.status === 403 && key.trim() === 'system_proxy') {
@@ -749,11 +818,10 @@ export class GeminiService implements TranslationService {
       }
       if (response.status === 400 && GeminiService.negotiateReasoning(mappedModel, body.reasoning_effort, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (400): đổi mức suy nghĩ`);
         if (GeminiService.noteProxyModelError(mappedModel, response.status, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (${response.status}): ${errText.slice(0, 200)}`);
-      if (isRateLimit(response.status, errText)) proxyGate.onOverload(retryAfterMs(response));
-        else if (isOverloadStatus(response.status, errText)) proxyGate.onServerError();
+      gateOnHttpError(sentEpoch, response, errText);
       throw new Error(`ShopAIKey/Proxy Error (${response.status}): ${errText}`);
     }
-    proxyGate.onSuccess();
+    streamOk = true;
 
     if (!response.body) {
       throw new Error("Response body is empty");
@@ -782,6 +850,7 @@ export class GeminiService implements TranslationService {
           const jsonStr = trimmed.slice(5).trim();
           try {
             const parsed = JSON.parse(jsonStr);
+            note(parsed);
             const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.message?.content;
             if (content) {
               yieldedAny = true;
@@ -805,6 +874,11 @@ export class GeminiService implements TranslationService {
       }
     }
     } finally {
+      if (streamOk) {
+        const u = sUsage;
+        proxyGate.onSuccess(Date.now() - t0, Number(u?.completion_tokens) || 0);
+        rec(200, { tin: Number(u?.prompt_tokens) || 0, tout: Number(u?.completion_tokens) || 0, treason: Number(u?.completion_tokens_details?.reasoning_tokens) || 0, finish: sFinish });
+      }
       proxyGate.release();
     }
   }
@@ -818,7 +892,9 @@ export class GeminiService implements TranslationService {
     signal?: AbortSignal,
     maxTokens = 8192,
     /** Yêu cầu proxy trả JSON hợp lệ (response_format json_object) — giảm lỗi JSON hỏng ở dịch giữ định dạng. */
-    jsonMode = false
+    jsonMode = false,
+    /** v10.6: nhận lại lý do dừng của model (finish_reason; "length" = bị cắt cụt vì hết max_tokens). */
+    meta?: { finish?: string }
   ): Promise<string> {
     const cleanBaseUrl = this.getProxyBaseUrl();
     const mappedModel = this.mapModelForOpenAI(model);
@@ -870,7 +946,10 @@ export class GeminiService implements TranslationService {
 
     dlog(`[MediTrans] Calling Non-Stream (${requestUrl}) using model: ${mappedModel}`);
 
-    await proxyGate.acquire(signal);
+    const sentEpoch = await proxyGate.acquire(signal);
+    const t0 = Date.now();
+    const rec = (status: number | string, extra: Partial<{ tin: number; tout: number; treason: number; finish: string }> = {}) =>
+      recordAiCall({ t: t0, page: pageOfSignal(signal), kind: callKind(model), model: mappedModel, status, ms: Date.now() - t0, ...extra });
     let data: any;
     try {
       let response: Response;
@@ -885,12 +964,14 @@ export class GeminiService implements TranslationService {
           signal
         });
       } catch (e) {
-        if (!signal?.aborted) proxyGate.onServerError(); // lỗi mạng / proxy cắt kết nối
+        if (!signal?.aborted) { proxyGate.onServerError(); rec('mang'); } // lỗi mạng / proxy cắt kết nối
         throw e;
       }
+      proxyGate.noteHeaders(response);
 
       if (!response.ok) {
         const errText = await response.text();
+        rec(response.status);
         // Kho key hệ thống trống / đã bị tắt → báo giao diện cập nhật trạng thái "[Hệ thống] ShopAIKey"
         if (response.status === 503 && key.trim() === 'system_proxy') { try { window.dispatchEvent(new Event('meditrans:system-pool-changed')); } catch { /* */ } }
         if (response.status === 403 && key.trim() === 'system_proxy') {
@@ -905,13 +986,15 @@ export class GeminiService implements TranslationService {
           throw new Error('PROXY_MODEL_UNAVAILABLE (400): bỏ response_format');
         }
         if (GeminiService.noteProxyModelError(mappedModel, response.status, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (${response.status}): ${errText.slice(0, 200)}`);
-        if (isRateLimit(response.status, errText)) proxyGate.onOverload(retryAfterMs(response));
-        else if (isOverloadStatus(response.status, errText)) proxyGate.onServerError();
+        gateOnHttpError(sentEpoch, response, errText);
         throw new Error(`ShopAIKey/Proxy Error (${response.status}): ${errText}`);
       }
       data = await response.json();
-      proxyGate.onSuccess();
       const u = data?.usage;
+      const finish = String(data?.choices?.[0]?.finish_reason || '');
+      proxyGate.onSuccess(Date.now() - t0, Number(u?.completion_tokens) || 0);
+      rec(200, { tin: Number(u?.prompt_tokens) || 0, tout: Number(u?.completion_tokens) || 0, treason: Number(u?.completion_tokens_details?.reasoning_tokens) || 0, finish });
+      if (meta) meta.finish = finish;
       if (u) console.log(`[MediTrans] Token (${mappedModel}): vào ${u.prompt_tokens ?? '?'}, ra ${u.completion_tokens ?? '?'}${u.completion_tokens_details?.reasoning_tokens ? ` (trong đó suy nghĩ ${u.completion_tokens_details.reasoning_tokens})` : ''}.`);
     } finally {
       proxyGate.release();
@@ -1804,8 +1887,11 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
 
       try {
         let raw = '';
+        let truncated = false;
         if (this.isCurrentKeyProxy(key)) {
-          raw = await this.callOpenAINonStream(key, GeminiService.LAYOUT_MODEL, systemInstruction, prompt, '', signal, 8192, true);
+          const meta: { finish?: string } = {};
+          raw = await this.callOpenAINonStream(key, GeminiService.LAYOUT_MODEL, systemInstruction, prompt, '', signal, 8192, true, meta);
+          truncated = meta.finish === 'length';
         } else {
           const gm = this.googleModel(key, this.modelName);
           const genModel = ai.getGenerativeModel({
@@ -1814,7 +1900,30 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
             generationConfig: GeminiService.genConfig(gm, { temperature: 0.1, responseMimeType: 'application/json' }),
           });
           const result = await genModel.generateContent(prompt, signal ? ({ signal } as any) : undefined);
-          raw = (await result.response).text() || '';
+          const resp = await result.response;
+          raw = resp.text() || '';
+          truncated = String((resp as any)?.candidates?.[0]?.finishReason || '') === 'MAX_TOKENS';
+        }
+        // v10.6: model dừng vì hết max_tokens (bản dịch bị cắt cụt) → giữ các khối đã đủ, khối cuối có thể dở dang
+        // nên bỏ; phần còn lại chia đôi và dịch tiếp NGAY (trước đây chờ bước dịch bù của cả trang).
+        if (truncated && blocks.length > 1) {
+          let got: Record<string, string> = {};
+          try { got = parse(raw); } catch { /* không đọc được gì */ }
+          const lastDone = [...blocks].reverse().find(b => got[b.id]);
+          if (lastDone) delete got[lastDone.id];
+          const rest = blocks.filter(b => !got[b.id]);
+          console.warn(`[MediTrans] Bản dịch bị cắt cụt (hết max_tokens) → dịch tiếp ${rest.length}/${blocks.length} khối thành 2 phần.`);
+          if (rest.length) {
+            const mid = Math.ceil(rest.length / 2);
+            const parts = rest.length > 1 ? [rest.slice(0, mid), rest.slice(mid)] : [rest];
+            const more = await Promise.all(parts.map(p => this.translateLayoutBlocks(p, signal).catch(e => {
+              if (signal?.aborted) throw e;
+              return {} as Record<string, string>; // phần lỗi → bước dịch bù của trang lo
+            })));
+            for (const m of more) Object.assign(got, m);
+          }
+          GeminiService.lastSuccessfulKey = key;
+          return got;
         }
         const parsed = parse(raw);
         GeminiService.lastSuccessfulKey = key;

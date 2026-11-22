@@ -790,3 +790,46 @@ Thêm vào bộ hồi quy: CT tim tr.12, 35, 44, 48, 56, 57, 68, 73, 103, 108 (s
 - Thân bài 2 cột không còn bị giãn sang khe cột (chỉ ô bảng / mục cùng cột mới được dùng chỗ trống bên phải).
 - Nhãn hình căn phải ngắn ("lumen" → "lòng mạch") mà bên trái là nét hình → tràn sang vùng trắng bên phải, giữ cỡ chữ như các nhãn khác.
 - Cài đặt → Cấu hình Proxy Engine: thêm 2 ô chọn model riêng cho **Dịch giữ định dạng** (mặc định gpt-4.1-mini) và **OCR giữ định dạng** (mặc định gemini-3.1-flash-lite). Model có suy nghĩ tự được tắt suy nghĩ; chọn model GPT cho OCR thì có thêm hướng dẫn toạ độ khung chữ.
+
+## v10.6 — Tốc độ proxy (AIMD), bộ đếm token, bảng CT tim tr.237/238/242/245, AUTO giữ định dạng, giao diện điện thoại
+
+### 1. Bộ điều tiết proxy (hết cảnh tụt 5 → 4 → 3 → 2 yêu cầu rồi kẹt 10 phút)
+- Mức tối đa = giới hạn server báo qua header `X-AI-Concurrency-Limit` (key hệ thống, mặc định 6). Key ShopAIKey riêng: theo Cài đặt, mặc định 6 (trước 8, lệch với server 6 → 429 thừa).
+- Một đợt 429 chỉ hạ MỘT lần, còn ~70% (6 → 4). Yêu cầu gửi trước lúc hạ mà nhận 429 không bị phạt thêm.
+- Mức đã hạ giữ 2,5 phút (trước 10 phút), sau đó tăng 1 nấc mỗi ≥ 20 giây trả lời tốt; độ trễ/token tăng > 1,8 lần thì đứng yên.
+- Lỗi 5xx / rớt mạng / server bận ghi sổ chỉ tạm dừng ngắn, không hạ mức.
+- Server (api/ai/chat.ts): trả slot "đang chạy" TRƯỚC khi gửi kết quả (trước đây trả sau → yêu cầu kế tiếp bị 429 "quá nhiều yêu cầu" dù chưa tới 6); tranh chấp Firestore thử lại nhiều hơn, còn tranh chấp thì trả `reason: "busy"` (trình duyệt chỉ chờ 1 giây); 429 do ShopAIKey ghi `reason: "upstream"`.
+
+### 2. Token / tốc độ
+- Dịch bù khối sót và dịch lại khối lệch số liệu chạy tối đa `plan.parallel` phần cùng lúc (trước gửi hết một lượt).
+- Model "nhanh" xếp theo TÊN: gpt-5.x / gpt-6 / o-series dù tắt suy nghĩ vẫn chia phần to, ít luồng (gpt-6-luna chậm hơn gpt-4.1-mini 2–3 lần).
+- Bản dịch bị cắt cụt (`finish_reason = length` / Gemini `MAX_TOKENS`): giữ các khối đã đủ, bỏ khối cuối dở dang, phần còn lại chia đôi dịch tiếp ngay.
+- **Bộ đếm lượt gọi AI** (nút "Thống kê" trên thanh Giữ định dạng): theo trang — số lượt, lỗi/thử lại, token vào/ra/suy nghĩ, thời gian, số lần bị cắt cụt; **Xuất CSV** (phần tổng theo trang + từng lượt gọi). Chỉ lưu trong trình duyệt.
+
+### 3. Dàn trang (ENGINE v34)
+- **CT tim tr.242**: gạch chân mục "Selection of the best cardiac phase:" bị coi là đường kẻ bảng → cả cột thành "bảng" (đoạn đầu cột bị tách, lặp chữ). Nay gạch chân (sát dưới chân chữ, chữ phủ kín) bị loại khỏi danh sách đường kẻ, và nét gạch chân gốc còn trong nền được xoá (không còn thành gạch ngang giữa chữ dịch / đường kẻ thừa). Chữ dịch không còn gạch chân.
+- **Tr.245 Bảng 19.7**: cột khít (khe ≈ 1 cỡ chữ) — dòng "…mass on valve or" + "lesion that is attached…" bị nối thành một → ô đè ô. Nay ≥ 2 dòng lân cận có ô bắt đầu đúng mép đó là tách ô.
+- **Tr.237 Bảng 19.2 / tr.245**: cỡ chữ bảng đồng bộ theo từng cột (các cột chênh nhau ≤ 0,06), tính cả dòng số liệu không có ô cùng hàng và cỡ thật đã thu nhỏ — hết cảnh dòng chữ to cạnh dòng chữ tí hon. Ô 1 dòng (hàng C, D) thu nhỏ để giữ 1 dòng thay vì tràn qua đường kẻ.
+- **Tr.238**: dòng đầu chú thích căn đều "Fig. 19.11 Aortic   Dissection   Related   Aortic" không còn bị cắt thành mẩu chồng lên chú thích.
+- Lưu ý: ảnh tr.237 chị gửi có dòng "Vận tốc ĐM chủ" tách khỏi số liệu — bản hiện tại không còn tách ở đây (do lỗi chỉ số dưới "max" đã sửa ở v10.5); trang đã lưu từ bản cũ cần bấm Dịch lại.
+
+### 4. Giữ định dạng: AUTO + dịch trước
+- Nút **AUTO** (luôn hiện chữ, cả máy tính bảng/điện thoại) + ô chọn **số trang dịch trước** (+0…+10, mặc định +2): bật thì tự dịch trang đang xem và N trang tiếp theo (bỏ trang đã có bản dịch / bản lưu). Nhớ lựa chọn trên máy.
+- Thanh công cụ Giữ định dạng cuộn ngang được trên màn hình hẹp (không bị cắt nút).
+
+### 5. Giao diện điện thoại / máy tính bảng
+- Logo "MediTrans AI" không còn bị cắt đầu chữ / xuống dòng; dòng "Medical Translation" ẩn trên điện thoại.
+- Thanh đầu trang: nút Đóng file / Quản trị / Google Drive chỉ hiện chữ trên màn hình rộng (≥ 1280px), tên người dùng cắt gọn; tên file ẩn dưới 1024px.
+- Trang chủ "Quản lý tài liệu": tiêu đề + tab "Của tôi / Được chia sẻ" không bị bóp; thanh tìm kiếm/sắp xếp/nút xuống hàng dưới trên điện thoại.
+- **Tràn viền ở Dịch thường** (khung bản gốc bị bóp còn một dải): chế độ xem điện thoại ("Bản dịch"/"Chia đôi") còn lưu khi mở trên máy tính → khung dịch không có bề rộng cố định, thanh công cụ đẩy khung trái. Nay màn hình ≥ 768px luôn chia đôi 50/50.
+
+## v10.6.1 — Sửa lỗi xuất PDF giữ định dạng báo "Đã huỷ xuất PDF"
+
+**File sửa (chỉ 1 file):** `src/components/LayoutTranslatePanel.tsx`
+
+- **Nguyên nhân:** khi còn trang chưa dịch / khối thiếu bản dịch / lệch số liệu, nút PDF hỏi lại bằng `window.confirm`. App chạy trong iframe (AI Studio, trình xem nhúng) thì hộp thoại bị chặn → `confirm` trả `false` ngay → app báo "Đã huỷ xuất PDF" mà người dùng không thấy câu hỏi nào.
+- **Sửa:** thay `window.confirm` bằng hộp xác nhận trong app (state `exportAsk`, trả Promise<boolean>), hai nút "Huỷ" và "Vẫn xuất N trang".
+- Khi đang xuất, nút PDF hiện "Đang xuất x/y" và bị khoá (không bấm chồng).
+- Xuất PDF được cả khi đang dịch nhiều trang (trước đây nút PDF bị khoá trong lúc dịch).
+- Nút đỏ khi đang dịch nhiều trang đổi chữ từ "279/339" thành "Dừng dịch 279/339" — trước đây dễ nhầm là tiến độ xuất PDF, bấm vào là dừng dịch.
+- Không đổi: vẫn xuất MỘT file PDF duy nhất, tên `MediTrans_<tên file>_ban-dich-giu-dinh-dang.pdf`; dựng lại trang khi xuất chỉ dùng bản dịch đã lưu (`noAi = true`), không gọi AI.

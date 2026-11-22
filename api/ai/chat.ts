@@ -2,7 +2,7 @@ import admin from "firebase-admin";
 import { firebaseConfig, getAdminApp, getAdminFirestore } from "../../lib/firebaseAdmin.js";
 import { getEffectiveUserLevel } from "../../src/types";
 import { isPrimaryAdminToken } from "../_utils.js";
-import { acquireQuota, releaseQuota, estimateTokens, isDenied, usageFromJson } from "../_aiQuota";
+import { acquireQuota, releaseQuota, estimateTokens, isDenied, usageFromJson, AI_MAX_CONCURRENT } from "../_aiQuota";
 
 let roundRobinCounter = 0;
 
@@ -199,16 +199,27 @@ export default async function handler(req: any, res: any) {
 
   // v10.4: xin hạn mức (nguyên tử qua Firestore): tần suất / số yêu cầu đồng thời / token trong ngày
   const est = estimateTokens(messages, cappedMaxTokens);
+  // v10.6: báo giới hạn đồng thời cho trình duyệt (bộ điều tiết phía máy đặt trần theo số này, không đoán 8)
+  res.setHeader?.("X-AI-Concurrency-Limit", String(AI_MAX_CONCURRENT));
   const ticket = await acquireQuota(adminDb, uid, est.total, { unlimitedDaily: isPrimaryAdmin });
   if (isDenied(ticket)) {
     res.setHeader?.("Retry-After", String(ticket.retryAfter));
     return res.status(429).json({ error: ticket.error, reason: ticket.reason });
   }
   let usage: { input: number; output: number } | null = null;
+  // v10.6: trả slot "đang chạy" NGAY TRƯỚC khi gửi kết quả về trình duyệt. Trước đây trả slot sau khi đã gửi →
+  // trình duyệt nhận kết quả, gửi yêu cầu kế tiếp trong lúc server chưa trừ inflight → bị 429 "quá nhiều yêu cầu"
+  // dù thực tế chưa tới 6 yêu cầu.
+  let released = false;
+  const releaseOnce = async () => {
+    if (released) return;
+    released = true;
+    await releaseQuota(adminDb, ticket, usage, est.input);
+  };
   try {
     return await forwardUpstream();
   } finally {
-    await releaseQuota(adminDb, ticket, usage, est.input);
+    await releaseOnce();
   }
 
   async function forwardUpstream() {
@@ -308,6 +319,7 @@ export default async function handler(req: any, res: any) {
           }
         }
         usage = streamUsage || { input: est.input, output: Math.ceil(outChars / 3) };
+        await releaseOnce();
         res.end();
         return;
       } else {
@@ -315,6 +327,7 @@ export default async function handler(req: any, res: any) {
         const json = await upstreamRes.json().catch(() => null);
         if (!json) return res.status(502).json({ error: "AI Provider trả về dữ liệu không hợp lệ." });
         usage = usageFromJson(json) || { input: est.input, output: Math.ceil(String(json?.choices?.[0]?.message?.content || "").length / 3) };
+        await releaseOnce();
         return res.status(200).json(json);
       }
     } catch (fetchErr: any) {
@@ -334,6 +347,7 @@ export default async function handler(req: any, res: any) {
   if (failStatuses.length > 0 && failStatuses.every(st => st === 429)) {
     res.setHeader?.("Retry-After", "5");
     return res.status(429).json({
+      reason: "upstream",
       error: "Các API Key hệ thống đang hết lượt tạm thời (429). Vui lòng thử lại sau ít giây."
     });
   }
