@@ -10,6 +10,7 @@ let roundRobinCounter = 0;
 // Model khác (đắt: gpt-4o, gpt-4.5, claude, o3, *-pro…) phải được thêm có chủ đích qua biến môi trường SYSTEM_AI_ALLOWED_MODELS.
 const ALLOWED_MODELS = new Set([
   "gpt-6-luna", // v10.4
+  "gpt-4.1-nano", // v10.8: mặc định dịch giữ định dạng
   "gpt-4.1-mini",
   "gpt-4o-mini",
   "gpt-4.1",

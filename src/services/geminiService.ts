@@ -561,7 +561,9 @@ export class GeminiService implements TranslationService {
   public static readonly PROXY_DEEP_MODEL = 'gemini-3.1-flash-lite';
   public static readonly PROXY_OCR_MODEL = 'gemini-3.1-flash-lite';
   /** Model chọn được cho dịch giữ định dạng / OCR (phải nằm trong danh sách cho phép của api/ai/chat.ts). */
-  public static readonly PROXY_MODEL_CHOICES = ['gpt-4.1-mini', 'gpt-6-luna', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite', 'gpt-4o-mini', 'gpt-4.1'];
+  /** v10.8: model mặc định của dịch giữ định dạng (người dùng nhập được model khác trong Cài đặt). */
+  public static readonly PROXY_LAYOUT_MODEL = 'gpt-4.1-nano';
+  public static readonly PROXY_MODEL_CHOICES = ['gpt-4.1-nano', 'gpt-4.1-mini', 'gpt-6-luna', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite', 'gpt-4o-mini', 'gpt-4.1'];
   public static currentOcrModel(): string {
     const v = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_proxyModelOcr') : null)?.trim() || '';
     return GeminiService.PROXY_MODEL_CHOICES.includes(v) ? v : GeminiService.PROXY_OCR_MODEL;
@@ -578,7 +580,8 @@ export class GeminiService implements TranslationService {
     const ls = (k: string) => (typeof window !== 'undefined' ? localStorage.getItem(k) : null)?.trim() || '';
     // v10.4: dịch giữ định dạng / OCR giữ định dạng có ô chọn model riêng trong Cài đặt (chỉ các model được phép)
     const pick = (k: string, def: string) => { const v = ls(k); return GeminiService.PROXY_MODEL_CHOICES.includes(v) ? v : def; };
-    if (modelName === GeminiService.LAYOUT_MODEL) return pick('mediTrans_proxyModelLayout', GeminiService.PROXY_NORMAL_MODEL);
+    // v10.8: dịch giữ định dạng: người dùng tự nhập tên model (mặc định gpt-4.1-nano)
+    if (modelName === GeminiService.LAYOUT_MODEL) { const v = ls('mediTrans_proxyModelLayout'); return /^[\w.\-:/]{2,80}$/.test(v) ? v : GeminiService.PROXY_LAYOUT_MODEL; }
     if (modelName === GeminiService.OCR_MODEL) return pick('mediTrans_proxyModelOcr', GeminiService.PROXY_OCR_MODEL);
     if (GeminiService.isDeepEngine(modelName)) return ls('mediTrans_customOpenAIModelDeep') || GeminiService.PROXY_DEEP_MODEL;
     return ls('mediTrans_customOpenAIModelNormal') || ls('mediTrans_customOpenAIModel') || GeminiService.PROXY_NORMAL_MODEL;
@@ -1637,7 +1640,7 @@ ${scope}
 For each block return:
 - "box_2d": [ymin, xmin, ymax, xmax] integers 0-1000 (relative to image height/width) tightly enclosing the block's text
 - "text": the exact original text (join lines with single spaces, remove end-of-line hyphenation). Table-of-contents entries: one block per entry, keep the leader dots as " ....... " followed by the page number (e.g. "V. GUIDANCE ....... 788")
-- "v": natural, accurate Vietnamese medical translation of "text" (for table-of-contents entries end with " ....... " and the same page number) (keep numbers, units, symbols, drug/gene names, abbreviations, person names, journal names, URLs, DOIs unchanged; Figure n → Hình n, Table n → Bảng n; ALL-CAPS stays ALL-CAPS, but when only SOME words are capitalized for emphasis uppercase only their Vietnamese translation ("OVAL mass" → "Khối BẦU DỤC"); join words hyphenated at line ends ("Guid-ance" → "Guidance"); reference-list entries and page numbers: return unchanged; no Markdown, no line breaks)
+- "v": natural, accurate Vietnamese medical translation of "text" (for table-of-contents entries end with " ....... " and the same page number) (keep numbers, units, symbols, drug/gene names, abbreviations, person names, journal names, URLs, DOIs unchanged; Figure n → Hình n, Table n → Bảng n; ALL-CAPS stays ALL-CAPS, but when only SOME words are capitalized for emphasis uppercase only their Vietnamese translation ("OVAL mass" → "Khối BẦU DỤC"); join words hyphenated at line ends ("Guid-ance" → "Guidance"); reference-list entries and page numbers: return unchanged; in an abbreviation list the abbreviation itself stays as written but its expansion/definition ("Coronary artery disease", "Appropriate use criteria") MUST be translated; no Markdown, no line breaks)
 - "lines": number of text lines of the block on the image
 - "bold", "italic": true if most of the block is bold / italic
 - "bold_lead": true if ONLY the leading label of the block is bold (e.g. "Figure 1" / "Table 2" at the start of a caption)

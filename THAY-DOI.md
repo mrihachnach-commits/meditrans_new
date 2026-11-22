@@ -833,3 +833,17 @@ Thêm vào bộ hồi quy: CT tim tr.12, 35, 44, 48, 56, 57, 68, 73, 103, 108 (s
 - Thân bài nằm ngay dưới bảng không còn bị coi là ô bảng rồi co nhỏ (tr.135, 221, 323, 332); chú thích hình cạnh bảng không bị co.
 - Dòng "e-mail:" ở chân trang đi liền với khối địa chỉ tác giả.
 - Trang đã dịch bằng bản cũ cần bấm Dịch lại để áp dụng.
+
+## v10.8 — Rà lại toàn bộ bản xuất v10.7 (engine v36) + nút "Sửa lỗi" khi xuất PDF
+- Xuất PDF: hộp hỏi khi bản dịch chưa hoàn chỉnh có thêm nút **Sửa lỗi N trang**. Trang thiếu bản dịch được dịch bù phần thiếu, trang lệch số liệu được dịch lại cả trang. Chạy song song chung cơ chế dịch đồng loạt (cùng số luồng, thanh tiến độ, nút "Dừng dịch"). Xong thì bấm Xuất PDF lại.
+- Engine lên v36: mọi trang đã lưu tự dựng lại theo cách dàn trang mới khi mở / xuất, dùng lại bản dịch đã lưu (không tốn token).
+- Sơ đồ / lưu đồ: nhận ra ô có viền; chữ trong ô dịch chung một cụm, dùng hết lòng ô, căn giữa; gạch đầu dòng vẽ trong ô tách đúng mục (CT tim tr.62, 66, 139, 171).
+- Bìa và trang tên sách: tên sách không còn giãn hở "Hướng   Dẫn"; dòng "Editors" tách khỏi dòng tên.
+- Chân trang đầu chương: tên tác giả đứng riêng một dòng, không dồn vào địa chỉ.
+- Danh mục viết tắt: định nghĩa AI để nguyên tiếng Anh ("Coronary artery disease") được dịch bù; định nghĩa dài không còn bị co nhỏ hơn các dòng khác (tr.31, 42).
+- Ô bảng chỉ có từ viết tắt ("CXR", "CACS", "PCI") giữ nguyên, không bị dịch bung rồi tràn (tr.73).
+- Bảng: ô tiêu đề dịch dài không còn kéo cả cột chữ nhỏ (tr.44); bảng viết tắt không bị nhận nhầm là bảng có kẻ.
+- Dòng căn đều trong cột cạnh bảng không còn bị cắt thành 2 mẩu đè chữ (tr.81).
+- Bản dịch: bỏ cụm từ bị AI lặp liền nhau (tr.52), tiêu đề bị VIẾT HOA toàn bộ hoặc một phần được viết thường lại (tr.68, 93, 155), bỏ dấu chấm thừa cuối tiêu đề (tr.88).
+- Tài liệu tham khảo cuối cột (vắt sang trang sau) giữ nguyên, không bị dịch (tr.145).
+- Dịch giữ định dạng: model mặc định đổi sang **gpt-4.1-nano**. Ô model trong Cài đặt giờ là ô tự nhập (có gợi ý sẵn), gõ tên model bất kỳ proxy hỗ trợ; để trống = gpt-4.1-nano. Máy chủ (key hệ thống) đã cho phép gpt-4.1-nano.

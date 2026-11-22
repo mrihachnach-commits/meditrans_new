@@ -94,8 +94,10 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   // v10.7: tiến độ xuất + hộp xác nhận trong app (window.confirm bị chặn trong khung nhúng / một số trình duyệt
   // → trả về "Huỷ" ngay, báo "Đã huỷ xuất PDF" dù người dùng chưa chọn gì)
   const [exportProgress, setExportProgress] = useState<{ done: number; total: number } | null>(null);
-  const [exportAsk, setExportAsk] = useState<{ problems: string[]; count: number; resolve: (ok: boolean) => void } | null>(null);
-  const askExport = (problems: string[], count: number) => new Promise<boolean>(resolve => setExportAsk({ problems, count, resolve }));
+  // v10.8: hộp hỏi có thêm lựa chọn "Sửa lỗi" (dịch bù trang thiếu, dịch lại cả trang lệch số liệu)
+  type ExportChoice = 'export' | 'cancel' | 'fix';
+  const [exportAsk, setExportAsk] = useState<{ problems: string[]; count: number; fixable: number; resolve: (c: ExportChoice) => void } | null>(null);
+  const askExport = (problems: string[], count: number, fixable: number) => new Promise<ExportChoice>(resolve => setExportAsk({ problems, count, fixable, resolve }));
   const [loadingCache, setLoadingCache] = useState(true);
   // v10.6: tự dịch + dịch trước N trang (giống chế độ dịch thường); nhớ lựa chọn trên máy
   const [autoFollow, setAutoFollowState] = useState(() => { try { return localStorage.getItem('mediTrans_layoutAuto') === '1'; } catch { return false; } });
@@ -302,7 +304,8 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   useEffect(() => () => { rebuildAbortRef.current?.abort(); }, [currentPage]);
 
   /* -------- dịch -------- */
-  const runPages = useCallback(async (pages: number[], force = false) => {
+  // v10.8: fillOnly = các trang chỉ cần DỊCH BÙ khối thiếu (dựng lại từ bản lưu + gọi AI cho khối thiếu), chạy chung hàng đợi
+  const runPages = useCallback(async (pages: number[], force = false, fillOnly?: Set<number>) => {
     if (!translator) {
       showToast('Chưa có API Key để dịch. Vui lòng thêm Key trong Cài đặt.', 'error');
       return;
@@ -340,7 +343,10 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         setInFlight(prev => [...prev, p]);
         setErrors(prev => { const n = { ...prev }; delete n[p]; return n; });
         try {
-          if (!force && cloudPairsRef.current[p]?.length) {
+          if (fillOnly?.has(p) && cloudPairsRef.current[p]?.length) {
+            const r = await rebuildFromCloud(p, controller.signal, false); // dịch bù: chỉ gọi AI cho khối còn thiếu
+            if (!r && !controller.signal.aborted) throw new Error('Không dựng lại được trang từ bản lưu');
+          } else if (!force && cloudPairsRef.current[p]?.length) {
             await rebuildFromCloud(p, controller.signal); // đã có bản dịch lưu trên đám mây → không gọi AI
           } else {
             // Trang scan / lớp chữ lỗi được tự nhận diện và dịch bằng OCR bên trong hàm này
@@ -376,6 +382,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     onBulkStateChange?.({ running: false, done: finished, total: todo.length });
     if (fatal) showToast('Dừng dịch: không có API Key khả dụng hoặc tài khoản chưa đủ quyền.', 'error');
     if (controller.signal.aborted) showToast(`Đã dừng. Hoàn thành ${ok} trang.`, 'info');
+    else if (fillOnly) showToast(`Đã sửa ${ok}/${todo.length} trang (dịch bù ${todo.filter(p => fillOnly.has(p)).length}, dịch lại ${todo.filter(p => !fillOnly.has(p)).length}).` + (ok < todo.length ? ` ${todo.length - ok} trang chưa sửa được.` : '') + ' Bấm "Xuất PDF" lại để tải file.', ok < todo.length ? 'info' : 'success');
     else if (todo.length > 1 && ok > 0) showToast(`Đã dịch giữ định dạng ${ok} trang.`, 'success');
   }, [translator, pdfDoc, docKey, showToast, rebuildFromCloud, pushToCloud, onBulkStateChange]);
 
@@ -421,6 +428,18 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     setResults(prev => { const n = { ...prev }; delete n[currentPage]; return n; });
     runPages([currentPage], true);
   };
+
+  /* -------- v10.8: "Sửa lỗi" từ hộp xuất PDF -------- */
+  const fixPendingRef = useRef<{ fill: number[]; redo: number[] } | null>(null);
+  const runFix = useCallback(async (fill: number[], redo: number[]) => {
+    // Chạy chung cơ chế dịch đồng loạt: cùng số luồng song song, cùng thanh tiến độ và nút "Dừng dịch"
+    if (redo.length) {
+      redo.forEach(p => rebuildFailedRef.current.delete(p));
+      await deleteLayoutPages(docKey, redo);
+      setResults(prev => { const n = { ...prev }; redo.forEach(p => delete n[p]); return n; });
+    }
+    await runPages([...fill, ...redo], true, new Set(fill));
+  }, [docKey, runPages]);
 
   /* -------- sửa bản dịch -------- */
   const openEditor = (onlyNumeric = false) => {
@@ -527,9 +546,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       if (failed.length) problems.push(`• ${failed.length} trang lỗi khi dựng lại (bị bỏ khỏi file): ${fmt(failed)}`);
       if (untranslatedPages.length || untranslatedRef.current) problems.push(`• Trang còn khối chưa có bản dịch (giữ chữ gốc): ${untranslatedPages.length ? fmt(untranslatedPages) : `${untranslatedRef.current} khối`}`);
       if (numericPages.length) problems.push(`• ${numericPages.length} trang có khối lệch số liệu so với bản gốc, chưa duyệt: ${fmt(numericPages)}`);
-      if (problems.length && !(await askExport(problems, pages.length))) {
-        showToast('Đã huỷ xuất PDF.', 'info');
-        return;
+      if (problems.length) {
+        const fixable = new Set([...untranslatedPages, ...numericPages]).size;
+        const choice = await askExport(problems, pages.length, fixable);
+        if (choice === 'cancel') { showToast('Đã huỷ xuất PDF.', 'info'); return; }
+        if (choice === 'fix') { fixPendingRef.current = { fill: untranslatedPages.filter(p => !numericPages.includes(p)), redo: numericPages }; return; }
       }
       // v9.0: luôn xuất MỘT file PDF duy nhất cho toàn bộ các trang (trước đây chia 150 trang/file).
       // Ảnh trang được đọc lần lượt từ ổ đĩa và nhúng thẳng vào PDF nên vẫn nhẹ bộ nhớ.
@@ -542,6 +563,12 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     } finally {
       setExporting(false);
       setExportProgress(null);
+      const fx = fixPendingRef.current;
+      fixPendingRef.current = null;
+      if (fx) {
+        if (running) showToast('Đang dịch — hãy đợi xong hoặc dừng rồi bấm "Sửa lỗi" lại.', 'info');
+        else runFix(fx.fill, fx.redo);
+      }
     }
   };
 
@@ -706,8 +733,14 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
             <div className="text-sm font-bold text-slate-800">Bản dịch chưa hoàn chỉnh</div>
             <div className="text-xs text-slate-600 whitespace-pre-line max-h-60 overflow-auto">{exportAsk.problems.join('\n')}</div>
             <div className="flex gap-2 justify-end">
-              <button onClick={() => { exportAsk.resolve(false); setExportAsk(null); }} className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`}>Huỷ</button>
-              <button onClick={() => { exportAsk.resolve(true); setExportAsk(null); }} className={`${iconBtn} bg-emerald-600 text-white hover:bg-emerald-700`}>
+              <button onClick={() => { exportAsk.resolve('cancel'); setExportAsk(null); }} className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`}>Huỷ</button>
+              {exportAsk.fixable > 0 && (
+                <button onClick={() => { exportAsk.resolve('fix'); setExportAsk(null); }} className={`${iconBtn} bg-amber-500 text-white hover:bg-amber-600`}
+                  title="Trang thiếu bản dịch: dịch bù phần thiếu. Trang lệch số liệu: dịch lại cả trang. Xong thì bấm Xuất PDF lại.">
+                  <RefreshCw className="w-3.5 h-3.5" /><span>Sửa lỗi {exportAsk.fixable} trang</span>
+                </button>
+              )}
+              <button onClick={() => { exportAsk.resolve('export'); setExportAsk(null); }} className={`${iconBtn} bg-emerald-600 text-white hover:bg-emerald-700`}>
                 <Download className="w-3.5 h-3.5" /><span>Vẫn xuất {exportAsk.count} trang</span>
               </button>
             </div>

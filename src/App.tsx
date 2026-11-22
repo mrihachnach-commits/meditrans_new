@@ -6790,8 +6790,41 @@ export default function App() {
                 </div>
 
                 {/* v10.4: Model Proxy cho Dịch giữ định dạng / OCR giữ định dạng */}
+                {/* v10.8: Dịch giữ định dạng — tự nhập tên model (mặc định gpt-4.1-nano) */}
+                <div className="space-y-2 pt-3 border-t border-slate-100">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                    Model Proxy cho Dịch giữ định dạng:
+                  </label>
+                  <input
+                    type="text"
+                    list="layout-model-list"
+                    defaultValue={localStorage.getItem('mediTrans_proxyModelLayout') || ''}
+                    placeholder="Mặc định: gpt-4.1-nano"
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      const prev = localStorage.getItem('mediTrans_proxyModelLayout') || '';
+                      if (v === prev) return;
+                      if (v && !/^[\w.\-:/]{2,80}$/.test(v)) { showToast('Tên model không hợp lệ (chỉ chữ, số, dấu . - _ : /).', 'error'); return; }
+                      if (v) localStorage.setItem('mediTrans_proxyModelLayout', v); else localStorage.removeItem('mediTrans_proxyModelLayout');
+                      showToast(`Dịch giữ định dạng dùng ${v || 'gpt-4.1-nano (mặc định)'}.`, 'success');
+                    }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:ring-2 focus:ring-emerald-500 outline-none text-slate-800"
+                  />
+                  <datalist id="layout-model-list">
+                    <option value="gpt-4.1-nano" />
+                    <option value="gpt-4.1-mini" />
+                    <option value="gpt-4o-mini" />
+                    <option value="gpt-4.1" />
+                    <option value="gpt-6-luna" />
+                    <option value="gemini-3.1-flash-lite" />
+                    <option value="gemini-3.5-flash-lite" />
+                    <option value="gemini-3-flash-preview" />
+                  </datalist>
+                  <p className="text-[10px] text-slate-400 leading-tight">Dịch các khối chữ của trang PDF có lớp chữ (tab &quot;Giữ định dạng&quot;). Gõ tên model bất kỳ mà proxy hỗ trợ, hoặc để trống để dùng gpt-4.1-nano. Với key hệ thống, model ngoài danh sách cho phép sẽ tự về model mặc định của máy chủ.</p>
+                </div>
                 {([
-                  ['mediTrans_proxyModelLayout', 'Model Proxy cho Dịch giữ định dạng:', 'gpt-4.1-mini', 'Dịch các khối chữ của trang PDF có lớp chữ (tab "Giữ định dạng"). Trả JSON, cần model nhanh.'],
                   ['mediTrans_proxyModelOcr', 'Model Proxy cho OCR giữ định dạng:', 'gemini-3.1-flash-lite', 'Đọc trang scan / chữ trong hình kèm toạ độ khung chữ. Model Gemini cho toạ độ chính xác nhất.'],
                 ] as const).map(([key, label, def, hint]) => (
                   <div key={key} className="space-y-2 pt-3 border-t border-slate-100">

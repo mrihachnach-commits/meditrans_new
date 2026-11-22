@@ -27,6 +27,7 @@ import {
   FontStyleInfo,
   LayoutBlock,
   findHRules,
+  findBoxes,
   PaintReport,
   RawTextItem,
 } from './layoutEngine';
@@ -498,7 +499,9 @@ export async function analyzePage(
     checkAbort(signal);
     // v10.3: đường kẻ ngang (hàng bảng) lấy từ bản vẽ không chữ → không nối dòng vắt qua đường kẻ
     const rules = !r.scanned && r.clean ? findHRules(r.clean) : [];
-    const blocks: LayoutBlock[] = r.scanned ? [] : [...buildBlocks(r.items, r.canvas.width, r.canvas.height, gutters, rules), ...r.rotBlocks];
+    // v10.8: khung chữ nhật có viền (ô lưu đồ) — chữ trong khung nối thành cụm và được dùng hết lòng khung
+    const boxes = !r.scanned && r.clean && rules.length ? findBoxes(r.clean, rules) : [];
+    const blocks: LayoutBlock[] = r.scanned ? [] : [...buildBlocks(r.items, r.canvas.width, r.canvas.height, gutters, rules, boxes), ...r.rotBlocks];
     markFormulaBlocks(blocks); // v10.4: công thức toán giữ nguyên xi bản gốc
     return { ...r, blocks };
   } catch (e) {
@@ -686,6 +689,74 @@ const slimOcr = (ocr: OcrBlock[]) => ocr.map(o => ({
   serif: o.serif, align: o.align, dir: o.dir || undefined,
 }));
 
+/**
+ * v10.8: sửa các lỗi hay gặp trong câu AI trả về, trước khi vẽ:
+ *  - cụm từ bị lặp liền nhau ("Chức năng tâm thu thất giảm nặng Chức năng tâm thu thất giảm nặng", "hội chứng xoang bệnh
+ *    hội chứng xoang bệnh" — Bảng 5.1 CT tim) → bỏ phần lặp;
+ *  - tiêu đề bản gốc viết thường mà bản dịch VIẾT HOA TOÀN BỘ ("CÁC QUY TRÌNH THU NHẬN…", "NHIỄU CỨNG CHÙM TIA") → viết
+ *    thường lại, giữ nguyên các từ viết tắt có trong bản gốc (CT, CCTA…);
+ *  - dấu chấm AI tự thêm vào cuối tiêu đề / nhãn ngắn ("8.2 Nhiễu do chuyển động.") khi bản gốc không có.
+ */
+export function polishTranslations(blocks: LayoutBlock[], translations: Record<string, string>) {
+  for (const b of blocks) {
+    let v = translations[b.id];
+    if (!v || !b.translatable) continue;
+    const src = b.plain.replace(/\s+/g, ' ').trim();
+    // 1) cụm lặp liền nhau (≥ 3 từ), bản gốc không lặp
+    for (let guard = 0; guard < 4; guard++) {
+      const w = v.split(/(\s+)/);
+      const words = w.filter((_, i) => i % 2 === 0);
+      let done = false;
+      for (let n = Math.floor(words.length / 2); n >= 3 && !done; n--) {
+        for (let i = 0; i + 2 * n <= words.length && !done; i++) {
+          const a = words.slice(i, i + n).join(' ').toLowerCase().replace(/[.,;:]+$/, '');
+          const c = words.slice(i + n, i + 2 * n).join(' ').toLowerCase().replace(/[.,;:]+$/, '');
+          if (a === c && /\p{L}{2}/u.test(a) && !src.toLowerCase().includes(a + ' ' + a)) {
+            const keep = words.slice(0, i + n).concat(words.slice(i + 2 * n));
+            v = keep.join(' ');
+            done = true;
+          }
+        }
+      }
+      if (!done) break;
+    }
+    const plainV = v.replace(/<\/?\d+>/g, '');
+    // 2) VIẾT HOA toàn bộ trong khi bản gốc không
+    const LV = plainV.match(/\p{L}/gu) || [], LS = src.match(/\p{L}/gu) || [];
+    const allUp = (L: string[]) => L.length >= 6 && L.every(ch => ch === ch.toUpperCase());
+    if (allUp(LV) && !allUp(LS) && LS.some(ch => ch !== ch.toUpperCase())) {
+      const keepUp = new Set((src.match(/[\p{L}\d-]+/gu) || []).filter(t => /\p{Lu}.*\p{Lu}/u.test(t) && t === t.toUpperCase()));
+      let first = true;
+      v = v.replace(/(<\/?\d+>)|([\p{L}\d][\p{L}\d-]*)/gu, (m, tag) => {
+        if (tag) return m;
+        if (keepUp.has(m)) { first = false; return m; }
+        const low = m.toLocaleLowerCase('vi');
+        if (first && /\p{L}/u.test(m)) { first = false; return low.charAt(0).toLocaleUpperCase('vi') + low.slice(1); }
+        return low;
+      });
+    }
+    // 2b) chuỗi ≥ 2 từ VIẾT HOA chen giữa câu ("Hiểu ĐƯỜNG ĐI BÌNH THƯỜNG của LAD") khi bản gốc không có cụm viết hoa nào
+    //     (chỉ có từ viết tắt) → viết thường, giữ từ viết tắt của bản gốc
+    else {
+      const srcCapsRun = /(\b[A-Z]{2,}\b[\s-]+){1,}\b[A-Z]{2,}\b/.test(src.replace(/<\/?\d+>/g, '')) &&
+        (src.match(/\b[A-Z]{2,}\b/g) || []).some(w => w.length >= 4 && /[AEIOU]/.test(w) && !/^(ECG|EKG|CCTA|CTCA|SPECT|TAVR|TAVI|ASCVD)$/.test(w));
+      if (!srcCapsRun) {
+        const keepUp = new Set((src.match(/[\p{L}\d-]+/gu) || []).filter(t => /\p{Lu}.*\p{Lu}/u.test(t) && t === t.toUpperCase()));
+        v = v.replace(/((?:[\p{Lu}\d][\p{Lu}\d-]*\p{Lu}[\p{Lu}\d-]*|[\p{Lu}]{2,})(?:\s+(?:[\p{Lu}\d][\p{Lu}\d-]*\p{Lu}[\p{Lu}\d-]*|[\p{Lu}]{2,}))+)/gu, (run) => {
+          const ws = run.split(/\s+/);
+          if (ws.filter(w => !keepUp.has(w)).length < 2) return run;
+          return ws.map(w => keepUp.has(w) ? w : w.toLocaleLowerCase('vi')).join(' ');
+        });
+      }
+    }
+    // 3) dấu chấm cuối thừa ở tiêu đề / nhãn ngắn
+    if (/\.\s*(<\/\d+>)?\s*$/.test(v) && !/[.!?…:;)\]]\s*$/.test(src) && src.split(' ').length <= 12 && b.lineCount <= 2 && !/\.\.\s*$/.test(v)) {
+      v = v.replace(/\.(\s*(<\/\d+>)?\s*)$/, '$1');
+    }
+    translations[b.id] = v;
+  }
+}
+
 async function finishPage(
   analyzed: Analyzed,
   pageNumber: number,
@@ -704,6 +775,7 @@ async function finishPage(
       if (ocr?.length) pairs.push({ s: OCR_PAIR_KEY, v: JSON.stringify(slimOcr(ocr)) });
       if (extraOcr?.length) pairs.push({ s: OCR_EXTRA_KEY, v: JSON.stringify(slimOcr(extraOcr)) });
       if (!scanned) {
+        polishTranslations(blocks, translations);
         report = paintTranslatedPage(ctx, blocks, translations, analyzed.clean, analyzed.img);
         // v10.4: câu gốc lặp lại ở nhiều vị trí trên trang mà bản dịch KHÁC nhau → lưu đủ từng bản theo thứ tự xuất hiện
         // (trước đây chỉ lưu bản đầu, mở lại thì mọi vị trí dùng chung bản đầu)
@@ -850,6 +922,13 @@ function isUntranslated(src: string, v: string): boolean {
   const words = a.match(/[a-z]{2,}/g) || [];
   if (words.length === 0) return false;
   // Khối ngắn (tiêu đề 1–3 từ): sót nếu toàn là từ tiếng Anh thông dụng (tên riêng, thuốc, viết tắt không bị bắt)
+  // v10.8: cụm 2–3 từ có từ viết thường thông dụng tiếng Anh ("Coronary artery disease", "Appropriate use criteria" — cột
+  // nghĩa của danh mục viết tắt) mà AI trả nguyên văn → sót (tên riêng viết hoa mọi từ như "American Heart Association" vẫn giữ)
+  if (words.length >= 2 && words.length < 4) {
+    const raw = src.replace(/<\/?\d+>/g, '').trim().split(/\s+/);
+    const lowerWords = raw.filter(w => /^[a-z]{3,}[,.;:)]?$/.test(w));
+    if (lowerWords.length >= 1 && !/^(in vivo|in vitro|et al|ad hoc|per se)$/i.test(a)) return true;
+  }
   if (words.length < 4) return words.every(w => COMMON_EN.has(w)) && words.some(w => w.length >= 4);
   if (/\bet al\.|\bdoi\b|\b(19|20)\d{2}[;:,]\s*\d/.test(a)) return false;
   const stop = words.filter(w => /^(the|and|of|with|is|are|was|were|for|in|on|to|by|from|as|or|that|this|which|be|may|can|not|has|have)$/.test(w)).length;
@@ -1127,7 +1206,10 @@ export function referenceZone(blocks: LayoutBlock[]): Set<string> {
     if (b.bold && !strong.includes(b)) continue;
     const peers = strong.filter(r => r !== b && Math.abs(r.size - b.size) < 0.06 * r.size && Math.abs(r.x0 - b.x0) < 1.2 * r.size);
     const peerCount = strong.includes(b) ? peers.length + 1 : peers.length;
-    if (peerCount >= 2 && cue.test(b.plain)) out.add(b.id);
+    // v10.8: mục cuối cột vắt sang trang sau (chưa tới năm / doi) — nhận theo dạng "14. Anders K, Achenbach S, …"
+    // (trước đây bị dịch, chữ nhỏ tí ở chân cột — CT tim tr.145)
+    const authorStart = /^\[?\d{1,3}[.)\]]?\s+[\p{Lu}][\p{L}'’\-]+(\s[\p{Lu}][\p{L}'’\-]+)?\s+[A-Z]{1,3}[,.]/u;
+    if (peerCount >= 2 && (cue.test(b.plain) || authorStart.test(b.plain.trim()))) out.add(b.id);
   }
   return out;
 }
@@ -1611,7 +1693,7 @@ function openLayoutDBOnce(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v35'; // v35: cột viết tắt giữ nguyên, tên tác giả giữ nguyên, dòng căn đều có số/chỉ số không vỡ, thân bài dưới bảng không bị coi là ô bảng, bảng có kẻ tách ô cột hẹp, cỡ chữ bảng theo đa số ô; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
+const ENGINE_VERSION = 'v36'; // v36: ô lưu đồ có viền, bìa không giãn chữ, dòng Editors/tên tác giả chân trang riêng, cột viết tắt không co, tiêu đề bảng không kéo cột nhỏ, cụm lặp / VIẾT HOA / dấu chấm thừa trong bản dịch, ô chỉ có từ viết tắt giữ nguyên; // v35: cột viết tắt giữ nguyên, tên tác giả giữ nguyên, dòng căn đều có số/chỉ số không vỡ, thân bài dưới bảng không bị coi là ô bảng, bảng có kẻ tách ô cột hẹp, cỡ chữ bảng theo đa số ô; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch
