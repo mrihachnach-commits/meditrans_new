@@ -159,6 +159,7 @@ export default async function handler(req: any, res: any) {
   res.on?.('close', () => {
     if (!res.writableEnded) abortController.abort();
   });
+  const failStatuses: number[] = [];
   const startIndex = roundRobinCounter % systemKeys.length;
   roundRobinCounter = (roundRobinCounter + 1) % systemKeys.length;
 
@@ -185,12 +186,15 @@ export default async function handler(req: any, res: any) {
         const errText = await upstreamRes.text().catch(() => "");
         console.warn(`[api/ai/chat] Key ${maskedKey} returned status ${upstreamRes.status}: ${errText.substring(0, 150)}`);
         
-        if ([401, 429].includes(upstreamRes.status) || upstreamRes.status >= 500) {
+        // Key hệ thống hỏng (401/403), hết số dư (402), hết lượt (429), máy chủ lỗi (5xx) → thử key hệ thống kế tiếp
+        if ([401, 402, 403, 429].includes(upstreamRes.status) || upstreamRes.status >= 500) {
           lastErrorMsg = `Upstream status ${upstreamRes.status}: ${errText.substring(0, 100)}`;
+          failStatuses.push(upstreamRes.status);
           continue;
         }
 
-        return res.status(upstreamRes.status).json({
+        // Lỗi do yêu cầu (400/404/413…) → trả về nguyên mã; KHÔNG trả 403 để trình duyệt không hiểu nhầm là "chưa đủ Level"
+        return res.status(upstreamRes.status === 403 ? 502 : upstreamRes.status).json({
           error: `Lỗi từ AI Provider (${upstreamRes.status}): ${errText.substring(0, 200)}`
         });
       }
@@ -232,8 +236,19 @@ export default async function handler(req: any, res: any) {
     }
   }
 
+  // Mọi key chỉ đang hết lượt tạm thời → trả 429 + Retry-After để trình duyệt tự giãn nhịp gửi (trước đây trả 502)
+  if (failStatuses.length > 0 && failStatuses.every(st => st === 429)) {
+    res.setHeader?.("Retry-After", "5");
+    return res.status(429).json({
+      error: "Các API Key hệ thống đang hết lượt tạm thời (429). Vui lòng thử lại sau ít giây.",
+      details: lastErrorMsg
+    });
+  }
+  const allRejected = failStatuses.length > 0 && failStatuses.every(st => st === 401 || st === 403 || st === 402);
   return res.status(502).json({
-    error: "Tất cả các API Key hệ thống hiện đang bận hoặc quá tải. Vui lòng thử lại sau.",
+    error: allRejected
+      ? "Tất cả API Key hệ thống bị ShopAIKey từ chối (sai key / hết số dư). Quản trị viên cần kiểm tra kho key hệ thống."
+      : "Tất cả các API Key hệ thống hiện đang bận hoặc quá tải. Vui lòng thử lại sau.",
     details: lastErrorMsg
   });
 }

@@ -7,13 +7,17 @@ import React, { useState, useRef, useEffect, useCallback, useMemo, memo } from '
 import * as pdfjs from 'pdfjs-dist';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { PDFDocument } from 'pdf-lib';
-import { GeminiService, getProxyMaxConcurrent } from './services/geminiService';
+import { GeminiService, getProxyMaxConcurrent, setProxyMaxConcurrent } from './services/geminiService';
 import { Logo, LogoWithText } from './components/Logo';
 import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
 import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
 import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, clearCachedMediTransFolderId, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
+import { guardedWrite, FIRESTORE_QUOTA_EVENT } from './services/firestoreQuota';
+import { getGlossaryText, setGlossaryText, DEFAULT_GLOSSARY_TEXT } from './services/medicalGlossary';
+import { clearLayoutTranslationMemory, layoutTranslationMemorySize } from './services/layoutTranslationService';
+import { deleteApiKeyReliably, getPendingKeyDeletes, retryPendingKeyDeletes, PENDING_DELETES_EVENT } from './services/keyDeletion';
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { LayoutTranslatePanel } from './components/LayoutTranslatePanel';
 import { buildPageMarkdown } from './services/layoutTranslationService';
@@ -129,7 +133,9 @@ import {
   OperationType,
   handleFirestoreError,
   or,
-  collectionGroup
+  collectionGroup,
+  arrayUnion,
+  arrayRemove
 } from './firebase';
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean, error: Error | null }> {
@@ -197,7 +203,7 @@ function formatErrorMessage(error: any): string {
   const message = error.message || String(error);
   
   if (message.includes('403') || message.toLowerCase().includes('permission_denied') || message.toLowerCase().includes('denied access')) {
-    return 'Lỗi 403: API Key hoặc Project bị từ chối truy cập. Vui lòng kiểm tra lại Key hoặc Project trong Google AI Studio.';
+    return 'Lỗi 403: API Key bị ShopAIKey từ chối (key sai, bị khoá hoặc hết hạn). Vui lòng kiểm tra lại Key trong Kho API Key.';
   }
   
   if (message.includes('429') || message.toLowerCase().includes('quota') || message.toLowerCase().includes('resource_exhausted')) {
@@ -358,6 +364,23 @@ export default function App() {
   const activeDriveFileRef = useRef<DriveFileMetadata | null>(null);
   const activeFileBufferRef = useRef<ArrayBuffer | null>(null);
 
+  // Lưu bản dịch 1 trang lên Firestore: bỏ qua khi nội dung y hệt lần trước, im lặng khi hết hạn mức ghi miễn phí
+  // (bản dịch vẫn nằm trong đệm IndexedDB trên máy)
+  const savePageToCloud = useCallback((ownerId: string, docId: string, page: number, content: string) => {
+    guardedWrite(
+      () => setDoc(doc(db, 'users', ownerId, 'documents', docId, 'pages', page.toString()), {
+        content, status: 'success', updatedAt: serverTimestamp()
+      }, { merge: true }),
+      `page/${ownerId}/${docId}/${page}`, content,
+    ).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    const onQuota = () => showToast('Firebase đã hết hạn mức ghi miễn phí hôm nay. Bản dịch vẫn được lưu trên máy này; đồng bộ lên tài khoản sẽ tự chạy lại sau khi hạn mức được đặt lại (khoảng 15:00 giờ Việt Nam).', 'info');
+    window.addEventListener(FIRESTORE_QUOTA_EVENT, onQuota);
+    return () => window.removeEventListener(FIRESTORE_QUOTA_EVENT, onQuota);
+  }, []);
+
   useEffect(() => {
     translationsRef.current = translations;
     const docKey = fileId || currentFileName;
@@ -475,9 +498,8 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showApiSettings, setShowApiSettings] = useState(false);
   const [showProxyModal, setShowProxyModal] = useState(false);
-  const [activeKeyFolder, setActiveKeyFolder] = useState<'all' | 'gemini' | 'shopaikey'>(() => {
-    return (localStorage.getItem('mediTrans_activeKeyFolder') as any) || 'all';
-  });
+  // v8.5: web chỉ dùng key ShopAIKey → luôn dùng nhóm "shopaikey" (cài đặt nhóm cũ 'all'/'gemini' được chuyển tự động)
+  const [activeKeyFolder, setActiveKeyFolder] = useState<'all' | 'gemini' | 'shopaikey'>('shopaikey');
 
   useEffect(() => {
     localStorage.setItem('mediTrans_activeKeyFolder', activeKeyFolder);
@@ -487,12 +509,12 @@ export default function App() {
     if (!k) return false;
     if (k.isSystem) return true;
     const val = (k.value || '').trim();
-    if (val.startsWith('AIzaSy')) return false; // key Google Gemini luôn là key Google, kể cả khi lỡ gắn nhãn ShopAIKey
-    const eng = (k.engine || '').toLowerCase();
-    return val.startsWith('sk-') || val.startsWith('sh-') || val.startsWith('sai-') || eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy');
+    // v8.5: chỉ dùng ShopAIKey — mọi key trừ key Google cũ (AIzaSy…) đều là key ShopAIKey (không phụ thuộc tiền tố sk-)
+    return !!val && !val.startsWith('AIzaSy');
   };
 
-  const matchesKeyFolder = (k: { value?: string; engine?: string; isSystem?: boolean }, folder: 'all' | 'gemini' | 'shopaikey') => {
+  const matchesKeyFolder = (k: { value?: string; engine?: string; isSystem?: boolean; disabled?: boolean }, folder: 'all' | 'gemini' | 'shopaikey') => {
+    if (k.disabled) return false; // key hệ thống đã bị quản trị viên tắt → không dùng để dịch
     if (folder === 'all') return true;
     const isShop = isKeyShopAIKey(k);
     if (folder === 'shopaikey') return isShop;
@@ -502,23 +524,22 @@ export default function App() {
 
   const [testingKeyId, setTestingKeyId] = useState<string | null>(null);
   const [keyTestResults, setKeyTestResults] = useState<Record<string, { success: boolean; resultText?: string; error?: string; latencyMs?: number }>>({});
+  const [keyLastTestAt, setKeyLastTestAt] = useState<Record<string, number>>({});
   const [newKeyTestResult, setNewKeyTestResult] = useState<{ success?: boolean; resultText?: string; error?: string; latencyMs?: number; loading?: boolean } | null>(null);
 
   const handleTestKey = async (keyId: string, keyValue: string) => {
-    if (keyId === 'system_proxy' || keyId.startsWith('system_')) {
-      showToast("Key hệ thống được bảo mật và quản lý bởi máy chủ.", "info");
-      return;
-    }
+    // v8.5: key hệ thống cũng được dịch thử THẬT qua máy chủ (/api/ai/chat) thay vì chỉ báo "đã bảo mật"
     setTestingKeyId(keyId);
     try {
-      const rec = userKeys.find(k => k.id === keyId);
-      const res = await translationService.current.testSingleKeyTranslation(keyValue, "Hello world! Testing translation AI.", rec ? (isKeyShopAIKey(rec) ? 'proxy' : 'google') : undefined);
+      const isSys = keyId === 'system_proxy' || keyId.startsWith('system_');
+      const res = await translationService.current.testSingleKeyTranslation(isSys ? 'system_proxy' : keyValue, "Hello world! Testing translation AI.", 'proxy');
+      setKeyLastTestAt(prev => ({ ...prev, [keyId]: Date.now() }));
       setKeyTestResults(prev => ({
         ...prev,
         [keyId]: res
       }));
       // Thành công / chỉ tạm hết lượt → "active"; key sai hoặc bị Google từ chối hẳn → "error" (đưa xuống cuối hàng xoay key)
-      const keyBroken = !res.success && (res.errorKind === 'key' || res.errorKind === 'model');
+      const keyBroken = !res.success && res.errorKind === 'key'; // chỉ key bị ShopAIKey từ chối (401/403) mới đánh dấu Lỗi
       if ((res.success || keyBroken || res.errorKind === 'quota') && user) {
         const targetKey = userKeys.find(k => k.id === keyId);
         if (targetKey && !targetKey.isSystem && targetKey.id !== 'system_proxy' && !keyId.startsWith('system_') && (targetKey.ownerId === user.uid || userRole === 'admin')) {
@@ -577,6 +598,55 @@ export default function App() {
     }
   };
 
+  // v8.5: hiển thị key ShopAIKey đang được dùng (key ưu tiên + key vừa dịch thành công gần nhất)
+  const [lastOkKey, setLastOkKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!showSettings && !showApiSettings) return;
+    const tick = () => setLastOkKey(GeminiService.getLastSuccessfulKey());
+    tick();
+    const t = setInterval(tick, 2000);
+    return () => clearInterval(t);
+  }, [showSettings, showApiSettings]);
+
+  const keyLabel = (k: any) => k.id === 'system_proxy' ? k.name : `${k.name} (…${String(k.value || '').trim().slice(-4)})`;
+
+  const renderActiveKeyInfo = () => {
+    const usable = userKeys.filter(k => isKeyShopAIKey(k) && !k.disabled && (k.id === 'system_proxy' || k.value?.trim()));
+    const sysOff = userKeys.find(k => k.id === 'system_proxy' && k.disabled);
+    const legacy = userKeys.filter(k => !k.isSystem && k.value?.trim() && !isKeyShopAIKey(k));
+    const errors = usable.filter(k => k.status === 'error').length;
+    const primary = usable.find(k => k.id === selectedKeyId) || usable.find(k => k.status !== 'error') || usable[0];
+    const lastRec = lastOkKey ? usable.find(k => (k.id === 'system_proxy' ? 'system_proxy' : (k.value || '').trim()) === lastOkKey) : undefined;
+    return (
+      <div className="space-y-1 pt-1 text-[10.5px] text-slate-600">
+        <p>
+          <span className="font-bold text-slate-700">Key ưu tiên:</span>{' '}
+          {primary ? <span className="font-mono text-indigo-700">{keyLabel(primary)}</span> : <span className="italic text-slate-400">chưa có</span>}
+          {primary?.status === 'error' && <span className="ml-1 text-rose-600 font-bold">(đang lỗi)</span>}
+        </p>
+        <p>
+          <span className="font-bold text-slate-700">Vừa dịch thành công bằng:</span>{' '}
+          {lastRec ? (
+            <span className="inline-flex items-center gap-1 font-mono text-emerald-700">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>{keyLabel(lastRec)}
+            </span>
+          ) : <span className="italic text-slate-400">chưa có lượt dịch nào trong phiên này</span>}
+        </p>
+        <p className="text-slate-500">
+          {usable.length} key ShopAIKey khả dụng{errors ? `, ${errors} key đang lỗi (được dùng sau cùng)` : ''}. Web tự luân phiên các key khi một key hết lượt.
+        </p>
+        {sysOff && (
+          <p className="text-slate-500">⏸ Key hệ thống đang được quản trị viên tạm tắt — không dùng để dịch.</p>
+        )}
+        {legacy.length > 0 && (
+          <p className="text-amber-700">
+            ⚠ {legacy.length} key Google Gemini cũ (AIzaSy…) không còn được dùng — có thể xoá trong Kho API Key.
+          </p>
+        )}
+      </div>
+    );
+  };
+
   const handleSelectKeyFolder = (folder: 'all' | 'gemini' | 'shopaikey') => {
     setActiveKeyFolder(folder);
     const folderKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && k.value?.trim());
@@ -589,8 +659,7 @@ export default function App() {
     if (!newKey.value.trim()) return;
     setNewKeyTestResult({ loading: true });
     try {
-      const type = isKeyShopAIKey({ value: newKey.value, engine: newKey.engine }) ? 'proxy' : 'google';
-      const res = await translationService.current.testSingleKeyTranslation(newKey.value, "Hello world! Testing translation AI.", type);
+      const res = await translationService.current.testSingleKeyTranslation(newKey.value, "Hello world! Testing translation AI.", 'proxy');
       setNewKeyTestResult({ ...res, loading: false });
     } catch (err: any) {
       setNewKeyTestResult({ success: false, error: err.message || "Lỗi khi chạy thử", loading: false });
@@ -971,31 +1040,66 @@ export default function App() {
   
   const isKeysLoading = user ? (!isOwnedKeysLoaded || !isSharedKeysLoaded) : false;
 
+  // Trạng thái kho key hệ thống (ShopAIKey Pool): hỏi máy chủ vì người dùng thường không đọc được danh sách key hệ thống.
+  // 'unknown' (chưa hỏi được / máy chủ lỗi) → vẫn cho dùng như cũ để không chặn nhầm.
+  const [pendingKeyDeletes, setPendingKeyDeletes] = useState<Set<string>>(() => getPendingKeyDeletes());
+  useEffect(() => {
+    const sync = () => setPendingKeyDeletes(getPendingKeyDeletes());
+    window.addEventListener(PENDING_DELETES_EVENT, sync);
+    return () => window.removeEventListener(PENDING_DELETES_EVENT, sync);
+  }, []);
+  const [systemPool, setSystemPool] = useState<{ state: 'unknown' | 'on' | 'off'; activeCount?: number }>({ state: 'unknown' });
+  useEffect(() => {
+    if (!user || effectiveUserLevel < 2) return;
+    let alive = true;
+    const check = async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken();
+        if (!token) return;
+        const r = await fetch('/api/ai/status', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (alive && typeof j?.available === 'boolean') setSystemPool({ state: j.available ? 'on' : 'off', activeCount: Number(j.activeCount) || 0 });
+      } catch { /* mạng lỗi → giữ trạng thái cũ */ }
+    };
+    check();
+    const t = setInterval(check, 5 * 60 * 1000);
+    const onFocus = () => check();
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('meditrans:system-pool-changed', onFocus);
+    return () => { alive = false; clearInterval(t); window.removeEventListener('focus', onFocus); window.removeEventListener('meditrans:system-pool-changed', onFocus); };
+  }, [user, effectiveUserLevel]);
+
   const userKeys = useMemo(() => {
-    const combined = [...ownedKeys];
+    const combined = ownedKeys.filter(k => !pendingKeyDeletes.has(k.id));
     sharedKeys.forEach(sk => {
+      if (pendingKeyDeletes.has(sk.id)) return;
       if (!combined.find(k => k.id === sk.id)) {
         combined.push(sk);
       }
     });
 
     // Add virtual system ShopAIKey proxy choice for Level >= 2 users
+    // v9.2: theo trạng thái thật của kho key hệ thống — admin tắt hết key trong ShopAIKey Pool → hiện "Đã tắt", không dùng để dịch
     if (effectiveUserLevel >= 2) {
       if (!combined.find(k => k.id === 'system_proxy')) {
+        const off = systemPool.state === 'off';
         combined.push({
           id: 'system_proxy',
-          name: '[Hệ thống] ShopAIKey',
+          name: off ? '[Hệ thống] ShopAIKey (đã tắt)' : '[Hệ thống] ShopAIKey',
           value: 'system_proxy',
           engine: 'shopaikey',
           ownerId: 'system',
-          status: 'active',
-          isSystem: true
+          status: off ? 'error' : 'active',
+          isSystem: true,
+          disabled: off,
+          poolActive: systemPool.activeCount
         });
       }
     }
 
     return combined;
-  }, [ownedKeys, sharedKeys, effectiveUserLevel]);
+  }, [ownedKeys, sharedKeys, effectiveUserLevel, systemPool, pendingKeyDeletes]);
 
   // Ghi nhận loại từng key (Google / ShopAIKey) theo kho key → mọi chức năng (dịch, test, giữ định dạng…) nhận
   // diện key giống nhau. Trước đây chỗ thì xét nhãn, chỗ thì xét tiền tố "sk-" → ShopAIKey không có tiền tố "sk-"
@@ -1012,10 +1116,6 @@ export default function App() {
     const folderVaultKeys = userKeys.filter(k => matchesKeyFolder(k, folder) && (k.id === 'system_proxy' || k.value?.trim()));
     if (folderVaultKeys.length > 0) return true;
 
-    if (folder === 'gemini' || folder === 'all') {
-      const geminiManual = engineKeys[selectedEngine] || engineKeys['gemini-2.5-flash-lite'] || engineKeys['gemini-3.6-flash']; // chỉ dùng key người dùng nhập trong web — KHÔNG lấy GEMINI_API_KEY của môi trường AI Studio (proxy AI Studio chặn generateContent)
-      if (geminiManual && geminiManual.trim()) return true;
-    }
     if (folder === 'shopaikey' || folder === 'all') {
       const proxyManual = engineKeys['shopaikey'] || (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_shopAiKey') : '');
       if (proxyManual && proxyManual.trim()) return true;
@@ -1034,13 +1134,13 @@ export default function App() {
         : 'Tất cả';
 
       if (!hasValidKeysForFolder(activeKeyFolder)) {
-        showToast(`Nhóm Key hiện tại ('${folderLabel}') chưa có API Key khả dụng. Vui lòng chọn nhóm key khác hoặc liên hệ Quản trị viên để thêm Key.`, 'error');
+        showToast(`Chưa có key ShopAIKey khả dụng. Vui lòng thêm key trong Kho API Key hoặc liên hệ Quản trị viên.`, 'error');
         if (userRole === 'admin') {
           setShowApiSettings(true);
         }
         return;
       }
-      showToast(`Đã bật Tự Động Dịch với nhóm Key: ${folderLabel}`, 'success');
+      showToast(`Đã bật Tự Động Dịch (key ShopAIKey)`, 'success');
     }
     setAutoTranslate(prev => !prev);
   }, [autoTranslate, activeKeyFolder, hasValidKeysForFolder]);
@@ -1052,10 +1152,11 @@ export default function App() {
   // Auto-select key logic
   useEffect(() => {
     if (userKeys.length > 0) {
-      const exists = userKeys.some(k => k.id === selectedKeyId);
-      if (!selectedKeyId || !exists) {
-        console.log(`[MediTrans AI] Auto-selecting first available key: ${userKeys[0].name}`);
-        setSelectedKeyId(userKeys[0].id);
+      const usableKeys = userKeys.filter(k => !k.disabled && isKeyShopAIKey(k));
+      const exists = usableKeys.some(k => k.id === selectedKeyId);
+      if ((!selectedKeyId || !exists) && usableKeys.length > 0) {
+        console.log(`[MediTrans AI] Auto-selecting first available key: ${usableKeys[0].name}`);
+        setSelectedKeyId(usableKeys[0].id);
       }
     } else if (selectedKeyId && !isKeysLoading) {
       setSelectedKeyId(null);
@@ -1071,7 +1172,7 @@ export default function App() {
     }
   }, [selectedKeyId]);
   const [isAddingKey, setIsAddingKey] = useState(false);
-  const [newKey, setNewKey] = useState({ name: '', value: '', engine: 'gemini' });
+  const [newKey, setNewKey] = useState({ name: '', value: '', engine: 'shopaikey' });
   const [keyToDelete, setKeyToDelete] = useState<any | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [keyCheckResults, setKeyCheckResults] = useState<{ 
@@ -1297,7 +1398,7 @@ export default function App() {
           setIsLocalOnly(true);
           try {
             const loadingTask = pdfjs.getDocument({
-              data: activeSession.fileBuffer,
+              data: activeSession.fileBuffer.slice(0), // pdf.js chuyển (detach) buffer sang worker → đưa bản sao, giữ bản gốc để lưu phiên
               cMapUrl: PDFJS_CMAP_URL,
               cMapPacked: true,
             });
@@ -1650,19 +1751,24 @@ export default function App() {
       return;
     }
 
-    const isShopKey = isKeyShopAIKey({ value: newKey.value, engine: newKey.engine });
+    if (newKey.value.trim().startsWith('AIzaSy')) {
+      showToast("Web chỉ còn dùng key ShopAIKey. Key Google Gemini (AIzaSy…) không được hỗ trợ nữa.", "error");
+      return;
+    }
+    if (/\s/.test(newKey.value.trim()) || newKey.value.trim().length < 16) {
+      showToast("API Key ShopAIKey không hợp lệ (quá ngắn hoặc có khoảng trắng).", "error");
+      return;
+    }
+    if (userKeys.some(k => k.ownerId === user.uid && (k.value || '').trim() === newKey.value.trim())) {
+      showToast("Key này đã có trong Kho của bạn.", "info");
+      return;
+    }
+    const isShopKey = true;
 
-    // Level 1 Enforcement:
+    // Level 1: không được dùng ShopAIKey (giữ nguyên quy định cũ)
     if (effectiveUserLevel <= 1) {
-      if (isShopKey) {
-        showToast("Tài khoản Level 1 không được phép thêm hoặc sử dụng ShopAIkey. Vui lòng nâng cấp lên Level 2.", "error");
-        return;
-      }
-      const myFreeKeys = userKeys.filter(k => k.ownerId === user.uid && !isKeyShopAIKey(k));
-      if (myFreeKeys.length >= 1) {
-        showToast("Tài khoản Level 1 chỉ được lưu tối đa 1 Key Free AI Studio. Vui lòng chỉnh sửa Key hiện tại hoặc nâng cấp lên Level 2.", "error");
-        return;
-      }
+      showToast("Tài khoản Level 1 không được phép thêm hoặc sử dụng ShopAIKey. Vui lòng nâng cấp lên Level 2.", "error");
+      return;
     }
 
     try {
@@ -1680,7 +1786,7 @@ export default function App() {
       await addDoc(collection(db, 'apiKeys'), keyData);
       showToast("Đã thêm API Key thành công!", "success");
       setIsAddingKey(false);
-      setNewKey({ name: '', value: '', engine: 'gemini' });
+      setNewKey({ name: '', value: '', engine: 'shopaikey' });
       setNewKeyTestResult(null);
     } catch (error: any) {
       console.error("Failed to add key:", error);
@@ -1690,23 +1796,34 @@ export default function App() {
 
   const handleDeleteKey = async (keyId: string) => {
     const path = `apiKeys/${keyId}`;
-    try {
-      await deleteDoc(doc(db, 'apiKeys', keyId));
-      if (selectedKeyId === keyId) setSelectedKeyId(null);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, path);
+    if (selectedKeyId === keyId) setSelectedKeyId(null);
+    const r = await deleteApiKeyReliably(keyId);
+    if (r.outcome === 'deleted') {
+      showToast('Đã xoá Key (máy chủ đã xác nhận).', 'success');
+    } else if (r.outcome === 'pending') {
+      showToast('Firebase đang hết hạn mức ghi hôm nay nên chưa xoá được Key trên máy chủ. Key đã được ẩn và không dùng để dịch trên máy này; web sẽ tự xoá lại khi hạn mức được đặt lại (khoảng 15:00).', 'info');
+    } else {
+      handleFirestoreError(r.error, OperationType.DELETE, path);
     }
   };
+
+  // Key đã xoá trên máy nhưng máy chủ chưa xác nhận → ẩn, và thử xoá lại khi đăng nhập / mỗi 10 phút
+  useEffect(() => {
+    if (!user) return;
+    retryPendingKeyDeletes();
+    const t = setInterval(retryPendingKeyDeletes, 10 * 60 * 1000);
+    return () => clearInterval(t);
+  }, [user]);
 
   /** Thu hồi quyền dùng key đã chia sẻ cho một email. */
   const handleUnshareKey = async (email: string) => {
     if (!user || !showShareKeyModal) return;
     try {
       const docRef = doc(db, 'apiKeys', showShareKeyModal.id);
-      const snap = await getDoc(docRef);
-      if (!snap.exists()) return;
-      const list = ((snap.data().sharedWith || []) as string[]).filter(e => e.toLowerCase() !== email.toLowerCase());
-      await updateDoc(docRef, { sharedWith: list });
+      // Thu hồi nguyên tử (arrayRemove) — gồm cả cách viết hoa/thường khác nhau của cùng email
+      const variants = Array.from(new Set([email, email.toLowerCase(), email.trim(), email.trim().toLowerCase()]));
+      await updateDoc(docRef, { sharedWith: arrayRemove(...variants), updatedAt: serverTimestamp() });
+      setShowShareKeyModal((prev: any) => prev ? { ...prev, sharedWith: (prev.sharedWith || []).filter((e: string) => e.toLowerCase() !== email.toLowerCase()) } : prev);
       showToast(`Đã thu hồi Key khỏi ${email}`, 'success');
     } catch (error: any) {
       handleFirestoreError(error, OperationType.UPDATE, `apiKeys/${showShareKeyModal.id}`);
@@ -1733,8 +1850,10 @@ export default function App() {
         const currentSharedWith = (data.sharedWith || []).map((e: string) => e.toLowerCase());
         
         if (!currentSharedWith.includes(targetEmail)) {
+          // arrayUnion: thêm nguyên tử → 2 lần chia sẻ cùng lúc không ghi đè mất email của nhau
           await updateDoc(docRef, {
-            sharedWith: [...(data.sharedWith || []), targetEmail]
+            sharedWith: arrayUnion(targetEmail),
+            updatedAt: serverTimestamp()
           });
           showToast(`Đã chia sẻ Key với ${targetEmail}`, 'success');
         } else {
@@ -2444,7 +2563,7 @@ export default function App() {
         activeFileBufferRef.current = arrayBuffer;
         activeFileDataRef.current = fileData;
         loadingTask = pdfjs.getDocument({
-          data: arrayBuffer,
+          data: arrayBuffer.slice(0), // bản sao: pdf.js detach buffer → lưu phiên lỗi DataCloneError
           cMapUrl: PDFJS_CMAP_URL,
           cMapPacked: true,
           disableAutoFetch: false,
@@ -2528,7 +2647,7 @@ export default function App() {
       activeDriveFileRef.current = driveFile;
       
       const loadingTask = pdfjs.getDocument({
-        data: arrayBuffer,
+        data: arrayBuffer.slice(0), // bản sao: pdf.js detach buffer → lưu phiên lỗi DataCloneError
         cMapUrl: PDFJS_CMAP_URL,
         cMapPacked: true,
         disableAutoFetch: false,
@@ -3027,10 +3146,11 @@ export default function App() {
           // phần sau hiện ngay khi các phần trước nó xong, giữ đúng thứ tự.
           // Tài liệu tham khảo (≥ 2 mục liền nhau) giữ nguyên, không gửi AI → trang tham khảo gần như 0 token
           const segs = splitReferenceSegments(md.markdown);
+          const pp = svc.parallelPlan?.(engine || selectedEngine) || { minChars: 5000, maxParts: 2, targetChars: 3500 };
           const plan: { text: string; pass: boolean }[] = [];
           for (const sg of segs) {
             if (sg.passthrough) plan.push({ text: sg.text, pass: true });
-            else for (const p of splitMarkdownForParallel(sg.text)) plan.push({ text: p, pass: false });
+            else for (const p of splitMarkdownForParallel(sg.text, pp.minChars, pp.maxParts, pp.targetChars)) plan.push({ text: p, pass: false });
           }
           const parts = plan.map(p => p.text);
           const results = plan.map(p => (p.pass ? p.text : ''));
@@ -3191,7 +3311,7 @@ export default function App() {
           : activeKeyFolder === 'shopaikey' 
           ? 'ShopAIKey / Proxy' 
           : 'Tất cả';
-        showToast(`Nhóm Key hiện tại ('${folderLabel}') chưa có API Key. Vui lòng chọn đúng nhóm key có sẵn trong Cài đặt.`, "error");
+        showToast(`Chưa có key ShopAIKey khả dụng. Vui lòng thêm key trong Kho API Key.`, "error");
         setShowApiSettings(true);
         setIsTranslating(false);
         setActiveTranslation(null);
@@ -3226,9 +3346,7 @@ export default function App() {
           setActiveTranslation({ page: targetPage, content, status: 'success' });
           
           if (user && fileId && fileOwnerId) {
-            setDoc(doc(db, 'users', fileOwnerId, 'documents', fileId, 'pages', targetPage.toString()), {
-              content, status: 'success', updatedAt: serverTimestamp()
-            }, { merge: true }).catch(console.error);
+            savePageToCloud(fileOwnerId, fileId, targetPage, content);
           }
         }
         
@@ -3280,9 +3398,7 @@ export default function App() {
         }
         
         if (user && fileId && fileOwnerId) {
-          setDoc(doc(db, 'users', fileOwnerId, 'documents', fileId, 'pages', pageNum.toString()), {
-            content, status: 'success', updatedAt: serverTimestamp()
-          }, { merge: true }).catch(console.error);
+          savePageToCloud(fileOwnerId, fileId, pageNum, content);
         }
       }
     } catch (error: any) {
@@ -3318,7 +3434,7 @@ export default function App() {
       // We allow space for the current page + the lookahead pool.
       // Proxy (ShopAIKey / key hệ thống): dịch trước tối đa 2 trang để không dồn yêu cầu gây quá tải
       const svcKeys: number = ((translationService.current as any)?.apiKeys || []).length || 1;
-      const MAX_CONCURRENT_PRE_TRANSLATION = (translationService.current as any)?.usesProxy?.() ? 2 : Math.min(5, 1 + svcKeys);
+      const MAX_CONCURRENT_PRE_TRANSLATION = (translationService.current as any)?.usesProxy?.() ? 3 : Math.min(5, 1 + svcKeys);
       const currentConcurrency = translatingPagesRef.current.size;
       const spaceLeft = MAX_CONCURRENT_PRE_TRANSLATION - currentConcurrency;
 
@@ -3349,7 +3465,7 @@ export default function App() {
         : activeKeyFolder === 'shopaikey' 
         ? 'ShopAIKey / Proxy' 
         : 'Tất cả';
-      showToast(`Nhóm Key hiện tại ('${folderLabel}') chưa có API Key. Vui lòng chọn nhóm key khác hoặc thêm Key trước khi dịch toàn bộ.`, 'error');
+      showToast(`Chưa có key ShopAIKey khả dụng. Vui lòng thêm Key trước khi dịch toàn bộ.`, 'error');
       setShowApiSettings(true);
       return;
     }
@@ -3410,7 +3526,8 @@ export default function App() {
     // số trang = số yêu cầu tối đa + 1 (1 trang chuẩn bị sẵn trong lúc chờ).
     if ((translationService.current as any)?.usesProxy?.()) {
       // 4 trang: mỗi trang dài tách 2–3 phần → đủ việc cho bộ điều tiết (tối đa 6 yêu cầu, tự giảm khi quá tải)
-      concurrentLimit = Math.min(4, getProxyMaxConcurrent() + 1);
+      // v8.4: số trang song song theo trần yêu cầu đồng thời (mặc định 8 → 6 trang); bộ điều tiết tự hạ khi bị 429
+      concurrentLimit = Math.min(8, Math.max(3, Math.ceil(getProxyMaxConcurrent() * 0.75)));
     }
     console.log(`[MediTrans] Starting Bulk Translation for ${totalToTranslate} pages with concurrency ${concurrentLimit} (Folder: ${activeKeyFolder})...`);
 
@@ -3465,9 +3582,7 @@ export default function App() {
 
             // Save to Firestore
             if (user && fileId && fileOwnerId) {
-              setDoc(doc(db, 'users', fileOwnerId, 'documents', fileId, 'pages', pageNum.toString()), {
-                content, status: 'success', updatedAt: serverTimestamp()
-              }, { merge: true }).catch(console.error);
+              savePageToCloud(fileOwnerId, fileId, pageNum, content);
             }
           }
         } catch (e) {
@@ -3618,16 +3733,6 @@ export default function App() {
         }
       }
       
-      if (allKeys.length === 0 && (activeKeyFolder === 'gemini' || activeKeyFolder === 'all')) {
-        // Key nhập tay lưu theo chế độ dịch: chế độ khác chưa có key thì dùng key của chế độ còn lại (trước đây
-        // nhập key ở "Cơ bản" rồi chọn "Chuyên sâu" → báo không có key)
-        const manualKey = engineKeys[selectedEngine] || engineKeys['gemini-2.5-flash-lite'] || engineKeys['gemini-3.6-flash']; // chỉ dùng key người dùng nhập trong web — KHÔNG lấy GEMINI_API_KEY của môi trường AI Studio (proxy AI Studio chặn generateContent)
-        if (manualKey && manualKey.trim()) {
-          allKeys.push(manualKey.trim());
-          primaryKey = manualKey.trim();
-          selectedVaultKeyName = "Manual/Env Gemini";
-        }
-      }
     }
 
     // Deduplicate and filter
@@ -5125,19 +5230,6 @@ export default function App() {
                         </button>
                       </div>
                       
-                      {(window as any).aistudio?.openSelectKey && (
-                        <button 
-                          onClick={async () => {
-                            if (translationService.current instanceof GeminiService) {
-                              await (translationService.current as any).openKeySelection();
-                              translateCurrentPage(currentPage, true);
-                            }
-                          }}
-                          className="mt-2 text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:text-indigo-700 underline underline-offset-4"
-                        >
-                          Chọn Key từ AI Studio
-                        </button>
-                      )}
                     </motion.div>
                   ) : (
                     <motion.div 
@@ -5702,7 +5794,7 @@ export default function App() {
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
                         <Folder className="w-3.5 h-3.5 text-indigo-500" />
-                        Nhóm Key áp dụng dịch thuật:
+                        Key ShopAIKey dùng để dịch:
                       </span>
                       {hasValidKeysForFolder(activeKeyFolder) ? (
                         <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200/60 px-2 py-0.5 rounded-full flex items-center gap-1">
@@ -5717,61 +5809,12 @@ export default function App() {
                       )}
                     </div>
 
-                    <div className="grid grid-cols-3 gap-1.5 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => handleSelectKeyFolder('all')}
-                        className={cn(
-                          "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
-                          activeKeyFolder === 'all'
-                            ? "bg-white text-indigo-700 border-indigo-300 shadow-sm"
-                            : "bg-white/60 text-slate-500 border-slate-200 hover:text-slate-800"
-                        )}
-                      >
-                        <span>Tất cả</span>
-                        <span className="text-[9px] bg-slate-200/80 text-slate-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                          {userKeys.length}
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSelectKeyFolder('gemini')}
-                        className={cn(
-                          "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
-                          activeKeyFolder === 'gemini'
-                            ? "bg-white text-indigo-700 border-indigo-300 shadow-sm"
-                            : "bg-white/60 text-slate-500 border-slate-200 hover:text-slate-800"
-                        )}
-                      >
-                        <Cpu className="w-3 h-3 text-indigo-500 shrink-0" />
-                        <span className="truncate">Gemini</span>
-                        <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                          {userKeys.filter(k => matchesKeyFolder(k, 'gemini')).length}
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSelectKeyFolder('shopaikey')}
-                        className={cn(
-                          "py-1.5 px-2 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer border",
-                          activeKeyFolder === 'shopaikey'
-                            ? "bg-white text-sky-700 border-sky-300 shadow-sm"
-                            : "bg-white/60 text-slate-500 border-slate-200 hover:text-slate-800"
-                        )}
-                      >
-                        <Globe className="w-3 h-3 text-sky-500 shrink-0" />
-                        <span className="truncate">ShopAIKey</span>
-                        <span className="text-[9px] bg-sky-100 text-sky-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                          {userKeys.filter(k => matchesKeyFolder(k, 'shopaikey')).length}
-                        </span>
-                      </button>
-                    </div>
+                    {/* v8.5: chỉ dùng ShopAIKey → bỏ chọn nhóm Gemini/Tất cả; hiển thị key đang dùng */}
+                    {renderActiveKeyInfo()}
 
                     {!hasValidKeysForFolder(activeKeyFolder) && (
                       <p className="text-[10px] text-amber-600 font-medium pt-1 flex items-center gap-1">
-                        ⚠ Vui lòng chọn nhóm key khác hoặc cuộn xuống kho key để thêm Key.
+                        ⚠ Chưa có key ShopAIKey. Cuộn xuống Kho API Key để thêm key{effectiveUserLevel >= 2 ? '' : ' (cần tài khoản Level 2)'}.
                       </p>
                     )}
                   </div>
@@ -5788,6 +5831,53 @@ export default function App() {
                       Trang PDF có chữ thật được dựng sẵn cấu trúc (tiêu đề, danh sách nhiều cấp, thứ tự cột) rồi chỉ gửi chữ cho AI dịch, không gửi ảnh. Trang scan, trang có bảng hoặc nhiều nhãn hình tự động dùng cách đọc ảnh.
                     </span>
                   </label>
+
+                  {/* v9.4: Bảng thuật ngữ bắt buộc + bộ nhớ dịch */}
+                  <details className="rounded-xl border border-slate-200 bg-slate-50/60 p-3 group">
+                    <summary className="cursor-pointer text-[11px] font-bold text-slate-800 select-none">
+                      Bảng thuật ngữ y khoa bắt buộc (Anh = Việt)
+                    </summary>
+                    <p className="text-[10px] text-slate-500 leading-snug mt-2">
+                      Mỗi dòng: <code>thuật ngữ tiếng Anh = cách dịch tiếng Việt</code>. Khi dịch (dịch thường và giữ định dạng), web chỉ gửi kèm những thuật ngữ có trong trang để AI dùng đúng và thống nhất trên mọi trang. Lưu trên máy này.
+                    </p>
+                    <textarea
+                      id="meditrans-glossary"
+                      defaultValue={getGlossaryText()}
+                      rows={10}
+                      spellCheck={false}
+                      className="mt-2 w-full px-2.5 py-2 bg-white border border-slate-200 rounded-lg text-[11px] font-mono leading-snug outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <div className="flex flex-wrap gap-2 mt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const el = document.getElementById('meditrans-glossary') as HTMLTextAreaElement | null;
+                          if (el) { setGlossaryText(el.value); showToast('Đã lưu bảng thuật ngữ.', 'success'); }
+                        }}
+                        className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-[10px] font-bold hover:bg-indigo-700"
+                      >Lưu bảng thuật ngữ</button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const el = document.getElementById('meditrans-glossary') as HTMLTextAreaElement | null;
+                          if (el) el.value = DEFAULT_GLOSSARY_TEXT;
+                          setGlossaryText(DEFAULT_GLOSSARY_TEXT);
+                          showToast('Đã khôi phục bảng thuật ngữ mặc định.', 'info');
+                        }}
+                        className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-[10px] font-bold hover:bg-slate-100"
+                      >Khôi phục mặc định</button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const n = layoutTranslationMemorySize();
+                          clearLayoutTranslationMemory();
+                          showToast(`Đã xoá bộ nhớ dịch (${n} chuỗi). Tiêu đề, đầu trang sẽ được dịch lại theo bảng thuật ngữ mới.`, 'info');
+                        }}
+                        className="px-3 py-1.5 bg-white border border-amber-200 text-amber-700 rounded-lg text-[10px] font-bold hover:bg-amber-50"
+                        title="Bộ nhớ dịch: tiêu đề đầu trang, tên sách, tên mục đã dịch được dùng lại y hệt ở mọi trang"
+                      >Xoá bộ nhớ dịch</button>
+                    </div>
+                  </details>
 
                   {autoTranslate && (
                     <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
@@ -5809,7 +5899,7 @@ export default function App() {
                         className="w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-indigo-600"
                       />
                       <p className="text-[9px] text-slate-400 italic">
-                        * Tự động dịch trước các trang tiếp theo theo nhóm Key đã chọn để trải nghiệm đọc mượt mà hơn.
+                        * Tự động dịch trước các trang tiếp theo bằng key ShopAIKey để trải nghiệm đọc mượt mà hơn.
                       </p>
                     </div>
                   )}
@@ -6097,73 +6187,12 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {/* Folder Tabs for Key Vault */}
-                      <div className="bg-slate-100/90 p-1 rounded-2xl flex items-center gap-1 border border-slate-200/60">
-                        <button
-                          type="button"
-                          onClick={() => handleSelectKeyFolder('all')}
-                          className={cn(
-                            "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
-                            activeKeyFolder === 'all'
-                              ? "bg-white text-indigo-700 shadow-sm border border-slate-200"
-                              : "text-slate-500 hover:text-slate-800"
-                          )}
-                        >
-                          <Folder className="w-3.5 h-3.5 text-slate-600" />
-                          <span>Tất cả</span>
-                          <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                            {userKeys.length}
-                          </span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleSelectKeyFolder('gemini')}
-                          className={cn(
-                            "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
-                            activeKeyFolder === 'gemini'
-                              ? "bg-white text-indigo-700 shadow-sm border border-indigo-200"
-                              : "text-slate-500 hover:text-slate-800"
-                          )}
-                        >
-                          <Cpu className="w-3.5 h-3.5 text-indigo-500" />
-                          <span>Thư mục Gemini</span>
-                          <span className="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                            {userKeys.filter(k => matchesKeyFolder(k, 'gemini')).length}
-                          </span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => handleSelectKeyFolder('shopaikey')}
-                          className={cn(
-                            "flex-1 py-1.5 px-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
-                            activeKeyFolder === 'shopaikey'
-                              ? "bg-white text-sky-700 shadow-sm border border-sky-200"
-                              : "text-slate-500 hover:text-slate-800"
-                          )}
-                        >
-                          <Globe className="w-3.5 h-3.5 text-sky-500" />
-                          <span>Thư mục ShopAIKey</span>
-                          <span className="text-[9px] bg-sky-100 text-sky-700 px-1.5 py-0.2 rounded-full font-extrabold">
-                            {userKeys.filter(k => matchesKeyFolder(k, 'shopaikey')).length}
-                          </span>
-                        </button>
-                      </div>
-
                       {/* Folder Scope Indicator Banner */}
                       <div className="bg-sky-50/80 border border-sky-200/80 rounded-xl p-2.5 flex items-center justify-between text-[11px] text-sky-900 shadow-sm flex-wrap gap-2">
                         <div className="flex items-center gap-2">
                           <CheckCircle2 className="w-4 h-4 text-sky-600 shrink-0" />
                           <span>
-                            <strong>Phạm vi chạy key:</strong> Chỉ kích hoạt key trong{" "}
-                            <span className="underline font-bold">
-                              {activeKeyFolder === 'gemini' 
-                                ? 'Thư mục Google Gemini (chỉ APIKey AIzaSy...)' 
-                                : activeKeyFolder === 'shopaikey' 
-                                ? 'Thư mục ShopAIKey / Proxy (chỉ APIKey sk-...)' 
-                                : 'Tất cả các thư mục'}
-                            </span>
+                            <strong>Web chỉ dùng key ShopAIKey.</strong> Bấm vào một key để đặt làm key ưu tiên; các key còn lại tự luân phiên khi key ưu tiên hết lượt.
                           </span>
                         </div>
                         {userKeys.filter(k => matchesKeyFolder(k, activeKeyFolder) && k.status === 'error').length > 0 && (
@@ -6185,35 +6214,23 @@ export default function App() {
                           animate={{ opacity: 1, y: 0 }}
                           className="bg-indigo-50/50 rounded-2xl p-4 border border-indigo-100 mb-4"
                         >
-                          <div className="grid grid-cols-2 gap-3 mb-3">
+                          <div className="mb-3">
                             <input 
                               type="text"
                               placeholder="Tên gợi nhớ (VD: Key ShopAIKey 1)"
                               value={newKey.name}
                               onChange={(e) => setNewKey(prev => ({ ...prev, name: e.target.value }))}
-                              className="px-3 py-2 bg-white border border-indigo-100 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
+                              className="w-full px-3 py-2 bg-white border border-indigo-100 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
                             />
-                            <select
-                              value={newKey.engine}
-                              onChange={(e) => setNewKey(prev => ({ ...prev, engine: e.target.value as any }))}
-                              className="px-3 py-2 bg-white border border-indigo-100 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
-                            >
-                              <option value="gemini">Google Gemini (AIzaSy...)</option>
-                              <option value="shopaikey">ShopAIKey / OpenAI Proxy (sk-...)</option>
-                            </select>
                           </div>
                           <div className="relative">
                             <input 
                               type={showApiKeys ? "text" : "password"}
-                              placeholder="Dán mã API Key (sk-9rskQZJbZv... hoặc AIzaSy...)"
+                              placeholder="Dán API Key ShopAIKey (sk-...)"
                               value={newKey.value}
                               onChange={(e) => {
                                 const val = e.target.value;
-                                setNewKey(prev => ({
-                                  ...prev,
-                                  value: val,
-                                  engine: val.trim().startsWith('sk-') ? 'shopaikey' : val.trim().startsWith('AIzaSy') ? 'gemini' : prev.engine
-                                }));
+                                setNewKey(prev => ({ ...prev, value: val, engine: 'shopaikey' }));
                               }}
                               className="w-full pl-3 pr-10 py-2 bg-white border border-indigo-100 rounded-xl text-xs mb-2 focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
                             />
@@ -6225,9 +6242,9 @@ export default function App() {
                               {showApiKeys ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                             </button>
                           </div>
-                          {newKey.value.trim().startsWith('sk-') && (
-                            <p className="text-[10px] text-sky-600 font-bold mb-3 flex items-center gap-1">
-                              ✨ Đã tự động nhận diện API Key định dạng ShopAIKey / OpenAI (sk-...)
+                          {newKey.value.trim().startsWith('AIzaSy') && (
+                            <p className="text-[10px] text-rose-600 font-bold mb-3 flex items-center gap-1">
+                              ⚠ Đây là key Google Gemini — web chỉ còn dùng key ShopAIKey.
                             </p>
                           )}
                           <div className="flex justify-between items-center gap-2">
@@ -6291,12 +6308,12 @@ export default function App() {
                       )}
 
                       <div className="max-h-[300px] overflow-y-auto pr-2 space-y-2 no-scrollbar">
-                        {userKeys.filter(k => matchesKeyFolder(k, activeKeyFolder)).length === 0 ? (
+                        {userKeys.length === 0 ? (
                           <p className="text-[11px] text-slate-400 text-center py-6 italic border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
-                            Không có Key nào trong {activeKeyFolder === 'gemini' ? 'Thư mục Google Gemini' : activeKeyFolder === 'shopaikey' ? 'Thư mục ShopAIKey / Proxy' : 'kho lưu trữ'}.
+                            Chưa có key ShopAIKey nào trong kho.
                           </p>
                         ) : (
-                          userKeys.filter(k => matchesKeyFolder(k, activeKeyFolder)).map((key) => (
+                          [...userKeys].sort((a, b) => Number(!isKeyShopAIKey(a)) - Number(!isKeyShopAIKey(b))).map((key) => (
                             <div 
                               key={key.id}
                               className={cn(
@@ -6315,22 +6332,44 @@ export default function App() {
                                     <span className="text-xs font-bold text-slate-700">{key.name}</span>
                                     {isKeyShopAIKey(key) ? (
                                       <span className="text-[8px] bg-sky-100 text-sky-700 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1">
-                                        <Globe className="w-2.5 h-2.5" /> ShopAIKey
+                                        <Globe className="w-2.5 h-2.5" /> {key.isSystem ? 'Hệ thống' : 'ShopAIKey'}
                                       </span>
                                     ) : (
-                                      <span className="text-[8px] bg-indigo-100 text-indigo-700 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1">
-                                        <Cpu className="w-2.5 h-2.5" /> Gemini
+                                      <span className="text-[8px] bg-slate-200 text-slate-600 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1" title="Key Google Gemini không còn được dùng — hãy xoá">
+                                        <Cpu className="w-2.5 h-2.5" /> Gemini cũ · không dùng
                                       </span>
                                     )}
-                                    {key.status && (
-                                      <span className={cn(
-                                        "text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter",
-                                        key.status === 'active' ? "bg-emerald-100 text-emerald-600" : "bg-rose-100 text-rose-600"
-                                      )}>
-                                        {key.status === 'active' ? 'Hoạt động' : 'Lỗi'}
+                                    {isKeyShopAIKey(key) && (
+                                      key.disabled ? (
+                                        <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter bg-slate-200 text-slate-600" title="Quản trị viên đã tắt toàn bộ key trong ShopAIKey Pool">
+                                          Đã tắt
+                                        </span>
+                                      ) : keyTestResults[key.id] ? (
+                                        <span className={cn(
+                                          "text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter",
+                                          keyTestResults[key.id].success ? "bg-emerald-100 text-emerald-600"
+                                            : (keyTestResults[key.id] as any).errorKind === 'quota' ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-600"
+                                        )} title={keyLastTestAt[key.id] ? `Dịch thử lúc ${new Date(keyLastTestAt[key.id]).toLocaleTimeString('vi-VN')}` : undefined}>
+                                          {keyTestResults[key.id].success ? 'Đã thử: hoạt động' : (keyTestResults[key.id] as any).errorKind === 'quota' ? 'Đã thử: tạm bận' : 'Đã thử: lỗi'}
+                                        </span>
+                                      ) : key.status ? (
+                                        <span className={cn(
+                                          "text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter",
+                                          key.status === 'active' ? "bg-emerald-100 text-emerald-600" : "bg-rose-100 text-rose-600"
+                                        )}>
+                                          {key.status === 'active' ? 'Hoạt động' : 'Lỗi'}
+                                        </span>
+                                      ) : null
+                                    )}
+                                    {isKeyShopAIKey(key) && !key.disabled && lastOkKey && (key.id === 'system_proxy' ? 'system_proxy' : (key.value || '').trim()) === lastOkKey && (
+                                      <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter bg-emerald-500 text-white flex items-center gap-1" title="Key vừa dịch thành công gần nhất">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>Đang dùng
                                       </span>
                                     )}
-                                    {key.ownerId !== user.uid && (
+                                    {selectedKeyId === key.id && isKeyShopAIKey(key) && !key.disabled && (
+                                      <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter bg-indigo-600 text-white">Ưu tiên</span>
+                                    )}
+                                    {key.ownerId !== user.uid && !key.isSystem && (
                                       <span className="text-[8px] px-1.5 py-0.5 rounded-full font-black uppercase tracking-tighter bg-indigo-100 text-indigo-600 flex items-center gap-1">
                                         <Users className="w-2 h-2" />
                                         Được chia sẻ
@@ -6338,7 +6377,7 @@ export default function App() {
                                     )}
                                   </div>
                                   <p className="text-[10px] text-slate-400 font-mono truncate max-w-[200px]">
-                                    {key.value.substring(0, 8)}••••••••{key.value.substring(key.value.length - 4)}
+                                    {key.isSystem ? 'Key do quản trị viên quản lý trên máy chủ' : <>{key.value.substring(0, 8)}••••••••{key.value.substring(key.value.length - 4)}</>}
                                   </p>
                                 </div>
 
@@ -6380,12 +6419,15 @@ export default function App() {
                                         </button>
                                       </>
                                     )}
-                                    <button 
-                                      onClick={() => setKeyToDelete(key)}
-                                      className="p-1.5 hover:bg-rose-50 text-rose-400 hover:text-rose-500 rounded-lg transition-colors"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
+                                    {!key.isSystem && (key.ownerId === user.uid || userRole === 'admin') && (
+                                      <button 
+                                        onClick={() => setKeyToDelete(key)}
+                                        className="p-1.5 hover:bg-rose-50 text-rose-400 hover:text-rose-500 rounded-lg transition-colors"
+                                        title="Xoá Key"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
                                     {selectedKeyId === key.id && (
                                       <div className="bg-emerald-500 p-1 rounded-full">
                                         <CheckCircle2 className="w-3 h-3 text-white" />
@@ -6587,6 +6629,26 @@ export default function App() {
                   </div>
                   <p className="text-[10px] text-slate-400 leading-tight">
                     Dành riêng cho nút &quot;Dịch Chuyên Sâu&quot;. Mặc định gemini-3.1-flash-lite.
+                  </p>
+                </div>
+
+                {/* 4. Số luồng đồng thời (ShopAIKey / key hệ thống) */}
+                <div className="space-y-2 pt-3 border-t border-slate-100">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-amber-500" />
+                      4. Số yêu cầu đồng thời tối đa:
+                    </label>
+                    <select
+                      defaultValue={String(getProxyMaxConcurrent())}
+                      onChange={(e) => { setProxyMaxConcurrent(parseInt(e.target.value, 10)); showToast(`Đã đặt tối đa ${e.target.value} yêu cầu đồng thời.`, 'success'); }}
+                      className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-bold outline-none cursor-pointer"
+                    >
+                      {[2, 3, 4, 6, 8, 10, 12].map(n => <option key={n} value={n}>{n}{n === 8 ? ' (mặc định)' : ''}</option>)}
+                    </select>
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-tight">
+                    Trần số yêu cầu gửi ShopAIKey cùng lúc (dịch nhiều đoạn/nhiều trang song song). Web tự tăng dần tới mức này và tự giảm khi ShopAIKey báo quá tải (429). Hay bị 429 → chọn thấp hơn.
                   </p>
                 </div>
               </div>

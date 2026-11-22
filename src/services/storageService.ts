@@ -117,24 +117,66 @@ export interface ActiveDocSession {
   timestamp?: number;
 }
 
-export async function saveActiveDocSession(sessionData: ActiveDocSession): Promise<void> {
+/** Buffer PDF đã lưu gần nhất → lật trang chỉ ghi thông tin nhỏ, không ghi lại cả file PDF (trước đây mỗi lần lật trang ghi lại vài chục MB). */
+let lastSavedBuffer: ArrayBuffer | null = null;
+let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingSession: ActiveDocSession | null = null;
+let warnedSessionSave = false;
+
+const isDetached = (b?: ArrayBuffer | null) => !b || (b as any).detached === true || b.byteLength === 0;
+
+async function writeActiveDocSession(sessionData: ActiveDocSession): Promise<void> {
   try {
+    const { fileBuffer, ...meta } = sessionData;
     const db = await openDB();
     const tx = db.transaction('sessions', 'readwrite');
-    tx.objectStore('sessions').put({ ...sessionData, timestamp: Date.now() }, 'activeSession');
+    const store = tx.objectStore('sessions');
+    if (fileBuffer && !isDetached(fileBuffer)) {
+      if (fileBuffer !== lastSavedBuffer) {
+        store.put(fileBuffer, 'activeSessionBuffer');
+        lastSavedBuffer = fileBuffer;
+      }
+      store.put({ ...meta, hasBuffer: true, timestamp: Date.now() }, 'activeSession');
+    } else {
+      // Không có buffer (file Drive/đám mây) hoặc buffer đã bị pdf.js chuyển đi → chỉ lưu thông tin phiên
+      if (!fileBuffer) { store.delete('activeSessionBuffer'); lastSavedBuffer = null; }
+      store.put({ ...meta, hasBuffer: !!fileBuffer && !!lastSavedBuffer, timestamp: Date.now() }, 'activeSession');
+    }
   } catch (e) {
-    console.warn('Failed to save active session to IndexedDB:', e);
+    if (!warnedSessionSave) { warnedSessionSave = true; console.warn('Failed to save active session to IndexedDB:', e); }
   }
+}
+
+/** Lưu phiên đang mở (gộp các lần gọi liên tiếp trong 800 ms → lật trang nhanh không ghi liên tục). */
+export async function saveActiveDocSession(sessionData: ActiveDocSession): Promise<void> {
+  pendingSession = sessionData;
+  if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = null;
+    const s = pendingSession;
+    pendingSession = null;
+    if (s) void writeActiveDocSession(s);
+  }, 800);
 }
 
 export async function getActiveDocSession(): Promise<ActiveDocSession | null> {
   try {
     const db = await openDB();
     const tx = db.transaction('sessions', 'readonly');
-    const req = tx.objectStore('sessions').get('activeSession');
+    const store = tx.objectStore('sessions');
+    const req = store.get('activeSession');
+    const breq = store.get('activeSessionBuffer');
     return new Promise((resolve) => {
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => resolve(null);
+      tx.oncomplete = () => {
+        const r = req.result || null;
+        if (!r) return resolve(null);
+        // Phiên cũ lưu buffer ngay trong bản ghi; phiên mới lưu buffer riêng
+        const buf: ArrayBuffer | undefined = r.fileBuffer || (r.hasBuffer ? breq.result : undefined) || undefined;
+        if (buf && !isDetached(buf)) lastSavedBuffer = buf;
+        resolve({ ...r, fileBuffer: buf && !isDetached(buf) ? buf : undefined });
+      };
+      tx.onerror = () => resolve(null);
+      tx.onabort = () => resolve(null);
     });
   } catch (e) {
     return null;
@@ -144,8 +186,11 @@ export async function getActiveDocSession(): Promise<ActiveDocSession | null> {
 export async function clearActiveDocSession(): Promise<void> {
   try {
     const db = await openDB();
+    if (sessionSaveTimer) { clearTimeout(sessionSaveTimer); sessionSaveTimer = null; pendingSession = null; }
+    lastSavedBuffer = null;
     const tx = db.transaction('sessions', 'readwrite');
     tx.objectStore('sessions').delete('activeSession');
+    tx.objectStore('sessions').delete('activeSessionBuffer');
   } catch (e) {
     console.warn('Failed to clear active session from IndexedDB:', e);
   }

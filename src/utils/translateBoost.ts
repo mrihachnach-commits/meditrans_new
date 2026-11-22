@@ -8,12 +8,12 @@
 /** Cắt Markdown thành các phần gần bằng nhau tại dòng trống (không cắt giữa đoạn / bảng / danh sách). */
 // Chỉ chia khi trang RẤT dài (> 5.000 ký tự), tối đa 2 phần: mỗi phần lặp lại hướng dẫn hệ thống và phần "suy nghĩ"
 // của model (Gemini 3 không tắt được) → chia nhỏ quá thì tốn token hơn nhiều so với lợi về tốc độ.
-export function splitMarkdownForParallel(md: string, minChars = 5000, maxParts = 2): string[] {
+export function splitMarkdownForParallel(md: string, minChars = 5000, maxParts = 2, targetChars = 3500): string[] {
   const text = md.trim();
   if (text.length < minChars) return [text];
   const blocks = text.split(/\n{2,}/);
   if (blocks.length < 2) return [text];
-  const parts = Math.min(maxParts, Math.max(2, Math.round(text.length / 3500)));
+  const parts = Math.min(maxParts, Math.max(2, Math.round(text.length / targetChars)));
   const target = text.length / parts;
   const out: string[] = [];
   let cur: string[] = [];

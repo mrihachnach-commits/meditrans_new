@@ -93,6 +93,7 @@ export const SystemShopAiKeyManager: React.FC<SystemShopAiKeyManagerProps> = ({ 
       });
       showToast("Đã thêm ShopAIkey hệ thống mới thành công!", "success");
       setNewKey({ name: '', value: '', engine: 'shopaikey', isActive: true });
+      window.dispatchEvent(new Event('meditrans:system-pool-changed'));
       setIsAdding(false);
     } catch (e: any) {
       console.error("Failed to add system key:", e);
@@ -107,6 +108,7 @@ export const SystemShopAiKeyManager: React.FC<SystemShopAiKeyManagerProps> = ({ 
         isActive: !key.isActive
       });
       showToast(`Đã ${!key.isActive ? 'Bật' : 'Tắt'} Key [${key.name}]`, "info");
+      window.dispatchEvent(new Event('meditrans:system-pool-changed'));
     } catch (e: any) {
       handleFirestoreError(e, OperationType.UPDATE, `systemShopAiKeys/${key.id}`);
       showToast("Lỗi khi đổi trạng thái key: " + e.message, "error");
@@ -127,6 +129,7 @@ export const SystemShopAiKeyManager: React.FC<SystemShopAiKeyManagerProps> = ({ 
         isActive: editData.isActive
       });
       showToast("Đã cập nhật thông tin ShopAIkey hệ thống", "success");
+      window.dispatchEvent(new Event('meditrans:system-pool-changed'));
       setEditingId(null);
     } catch (e: any) {
       handleFirestoreError(e, OperationType.UPDATE, `systemShopAiKeys/${id}`);
@@ -139,6 +142,7 @@ export const SystemShopAiKeyManager: React.FC<SystemShopAiKeyManagerProps> = ({ 
     try {
       await deleteDoc(doc(db, 'systemShopAiKeys', id));
       showToast("Đã xóa ShopAIkey hệ thống", "success");
+      window.dispatchEvent(new Event('meditrans:system-pool-changed'));
     } catch (e: any) {
       handleFirestoreError(e, OperationType.DELETE, `systemShopAiKeys/${id}`);
       showToast("Lỗi khi xóa key: " + e.message, "error");
@@ -153,7 +157,7 @@ export const SystemShopAiKeyManager: React.FC<SystemShopAiKeyManagerProps> = ({ 
       setTestResults(prev => ({ ...prev, [key.id]: res }));
 
       await updateDoc(doc(db, 'systemShopAiKeys', key.id), {
-        status: res.success ? 'active' : 'error',
+        status: res.success || (res as any).errorKind === 'quota' ? 'active' : 'error',
         lastTestedAt: serverTimestamp(),
         latencyMs: res.latencyMs || null
       });

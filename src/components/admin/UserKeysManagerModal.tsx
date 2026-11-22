@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { ApiKeyItem, UserProfile } from '../../types';
 import { 
   db, 
@@ -16,6 +16,7 @@ import {
 } from '../../firebase';
 import { X, Plus, Key, KeyRound, Trash2, Edit2, CheckCircle2, AlertCircle, Loader2, Play, Shield, RefreshCcw } from 'lucide-react';
 import { GeminiService } from '../../services/geminiService';
+import { deleteApiKeyReliably, getPendingKeyDeletes, PENDING_DELETES_EVENT } from '../../services/keyDeletion';
 
 interface UserKeysManagerModalProps {
   user: UserProfile;
@@ -24,7 +25,15 @@ interface UserKeysManagerModalProps {
 }
 
 export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user, onClose, showToast }) => {
-  const [keys, setKeys] = useState<ApiKeyItem[]>([]);
+  const [allKeys, setAllKeys] = useState<ApiKeyItem[]>([]);
+  // Ẩn key đã xoá nhưng máy chủ chưa xác nhận (Firestore hết hạn mức ghi)
+  const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(() => getPendingKeyDeletes());
+  useEffect(() => {
+    const sync = () => setPendingDeletes(getPendingKeyDeletes());
+    window.addEventListener(PENDING_DELETES_EVENT, sync);
+    return () => window.removeEventListener(PENDING_DELETES_EVENT, sync);
+  }, []);
+  const keys = useMemo(() => allKeys.filter(k => !pendingDeletes.has(k.id)), [allKeys, pendingDeletes]);
   const [loading, setLoading] = useState(true);
   const [isAdding, setIsAdding] = useState(false);
   const [editingKeyId, setEditingKeyId] = useState<string | null>(null);
@@ -32,13 +41,13 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
   const [newKey, setNewKey] = useState({
     name: '',
     value: '',
-    engine: 'gemini' as 'gemini' | 'shopaikey'
+    engine: 'shopaikey' as 'gemini' | 'shopaikey'
   });
 
   const [editKeyData, setEditKeyData] = useState({
     name: '',
     value: '',
-    engine: 'gemini' as 'gemini' | 'shopaikey'
+    engine: 'shopaikey' as 'gemini' | 'shopaikey'
   });
 
   const [testingKeyId, setTestingKeyId] = useState<string | null>(null);
@@ -51,7 +60,7 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
         id: docSnap.id,
         ...docSnap.data()
       })) as ApiKeyItem[];
-      setKeys(items);
+      setAllKeys(items);
       setLoading(false);
     }, (err) => {
       console.error("Error loading user keys:", err);
@@ -65,8 +74,12 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
       showToast("Vui lòng nhập giá trị API Key", "error");
       return;
     }
+    if (newKey.value.trim().startsWith('AIzaSy')) {
+      showToast("Web chỉ còn dùng key ShopAIKey — không thêm key Google Gemini (AIzaSy…).", "error");
+      return;
+    }
 
-    const name = newKey.name.trim() || `${newKey.engine === 'shopaikey' ? 'ShopAIKey' : 'Google Gemini Key'} (${user.displayName || user.email.split('@')[0]})`;
+    const name = newKey.name.trim() || `ShopAIKey (${user.displayName || user.email.split('@')[0]})`;
     
     try {
       await addDoc(collection(db, 'apiKeys'), {
@@ -74,14 +87,14 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
         ownerEmail: user.email || '',
         name,
         value: newKey.value.trim(),
-        engine: newKey.engine,
+        engine: 'shopaikey',
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
         status: 'active',
         sharedWith: []
       });
       showToast(`Đã thêm Key mới cho tài khoản ${user.email}`, "success");
-      setNewKey({ name: '', value: '', engine: 'gemini' });
+      setNewKey({ name: '', value: '', engine: 'shopaikey' });
       setIsAdding(false);
     } catch (e: any) {
       console.error("Failed to add key for user:", e);
@@ -95,12 +108,16 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
       showToast("Giá trị API Key không được để trống", "error");
       return;
     }
+    if (editKeyData.value.trim().startsWith('AIzaSy')) {
+      showToast("Web chỉ còn dùng key ShopAIKey — không lưu key Google Gemini (AIzaSy…).", "error");
+      return;
+    }
 
     try {
       await updateDoc(doc(db, 'apiKeys', keyId), {
         name: editKeyData.name.trim() || 'API Key',
         value: editKeyData.value.trim(),
-        engine: editKeyData.engine,
+        engine: 'shopaikey',
         status: 'active',
         updatedAt: serverTimestamp()
       });
@@ -115,8 +132,13 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
 
   const handleDeleteKey = async (keyId: string) => {
     try {
-      await deleteDoc(doc(db, 'apiKeys', keyId));
-      showToast("Đã xóa Key thành công", "success");
+      const r = await deleteApiKeyReliably(keyId);
+      if (r.outcome === 'error') throw r.error;
+      if (r.outcome === 'pending') {
+        showToast("Firebase đang hết hạn mức ghi hôm nay nên chưa xoá được Key trên máy chủ. Key đã được ẩn trên máy này và sẽ tự xoá lại khi hạn mức được đặt lại (khoảng 15:00).", "info");
+        return;
+      }
+      showToast("Đã xóa Key thành công (máy chủ đã xác nhận)", "success");
     } catch (e: any) {
       console.error("Failed to delete key:", e);
       handleFirestoreError(e, OperationType.DELETE, `apiKeys/${keyId}`);
@@ -128,7 +150,7 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
     setTestingKeyId(keyId);
     try {
       const service = new GeminiService(keyValue, engine);
-      const isProxy = !keyValue.trim().startsWith('AIzaSy') && (engine === 'shopaikey' || keyValue.trim().startsWith('sk-'));
+      const isProxy = true;
       const res = await service.testSingleKeyTranslation(keyValue, "Hello! Medical AI Test.", isProxy ? 'proxy' : 'google');
       setTestResult(prev => ({ ...prev, [keyId]: res }));
       
@@ -144,8 +166,8 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
     }
   };
 
-  const freeKeysCount = keys.filter(k => k.engine === 'gemini' || !k.value.startsWith('sk-')).length;
-  const shopAiKeysCount = keys.filter(k => k.engine === 'shopaikey' || k.value.startsWith('sk-')).length;
+  const freeKeysCount = keys.filter(k => (k.value || '').trim().startsWith('AIzaSy')).length;
+  const shopAiKeysCount = keys.filter(k => !(k.value || '').trim().startsWith('AIzaSy')).length;
 
   return (
     <div className="fixed inset-0 z-[170] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
@@ -174,7 +196,7 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
           <div className="grid grid-cols-2 gap-3">
             <div className="p-4 bg-emerald-50/80 rounded-2xl border border-emerald-100/80 flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-bold uppercase text-emerald-600 tracking-wider">Key Free AI Studio</p>
+                <p className="text-[10px] font-bold uppercase text-emerald-600 tracking-wider">Key Gemini cũ (không dùng)</p>
                 <p className="text-xl font-black text-emerald-900">{freeKeysCount} Key</p>
               </div>
               <Key className="w-6 h-6 text-emerald-500 opacity-60" />
@@ -207,21 +229,10 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Loại Key</label>
-                  <select
-                    value={newKey.engine}
-                    onChange={(e) => setNewKey({ ...newKey, engine: e.target.value as any })}
-                    className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500 mt-1"
-                  >
-                    <option value="gemini">Google AI Studio Free Key</option>
-                    <option value="shopaikey">ShopAIkey / Proxy Key (sk-...)</option>
-                  </select>
-                </div>
-                <div>
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Tên gợi nhớ (Tùy chọn)</label>
                   <input
                     type="text"
-                    placeholder="VD: Key Gemini Cá Nhân"
+                    placeholder="VD: Key ShopAIKey cá nhân"
                     value={newKey.name}
                     onChange={(e) => setNewKey({ ...newKey, name: e.target.value })}
                     className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500 mt-1"
@@ -232,7 +243,7 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
                 <label className="text-[10px] font-bold text-slate-400 uppercase">Giá trị Key (API Key String)</label>
                 <input
                   type="text"
-                  placeholder={newKey.engine === 'shopaikey' ? "sk-..." : "AIzaSy..."}
+                  placeholder="sk-..."
                   value={newKey.value}
                   onChange={(e) => setNewKey({ ...newKey, value: e.target.value })}
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500 mt-1 font-mono"
@@ -267,7 +278,7 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
           ) : (
             <div className="space-y-3">
               {keys.map((k) => {
-                const isShop = k.engine === 'shopaikey' || k.value.startsWith('sk-');
+                const isShop = !(k.value || '').trim().startsWith('AIzaSy');
                 const isEditing = editingKeyId === k.id;
                 const result = testResult[k.id];
 
@@ -283,14 +294,6 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
                             className="px-3 py-1.5 bg-white border rounded-xl text-xs"
                             placeholder="Tên Key"
                           />
-                          <select
-                            value={editKeyData.engine}
-                            onChange={(e) => setEditKeyData({ ...editKeyData, engine: e.target.value as any })}
-                            className="px-3 py-1.5 bg-white border rounded-xl text-xs"
-                          >
-                            <option value="gemini">Google AI Studio Free Key</option>
-                            <option value="shopaikey">ShopAIkey / Proxy Key</option>
-                          </select>
                         </div>
                         <input
                           type="text"
@@ -314,7 +317,7 @@ export const UserKeysManagerModal: React.FC<UserKeysManagerModalProps> = ({ user
                             <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ${
                               isShop ? 'bg-purple-100 text-purple-700' : 'bg-emerald-100 text-emerald-700'
                             }`}>
-                              {isShop ? 'ShopAIkey' : 'Free AI Studio'}
+                              {isShop ? 'ShopAIKey' : 'Gemini cũ · không dùng'}
                             </span>
                             <span className="font-bold text-slate-800 text-xs">{k.name}</span>
                           </div>

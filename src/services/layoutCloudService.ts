@@ -9,6 +9,7 @@
  * Vẫn đọc bản lưu cũ ở users/{ownerId}/documents/{fileId}/layoutPages/{page} (nếu có).
  */
 import { db, collection, doc, getDocs, setDoc, serverTimestamp } from '../firebase';
+import { guardedWrite } from './firestoreQuota';
 import type { LayoutPair } from './layoutTranslationService';
 
 export interface LayoutCloudTarget {
@@ -59,11 +60,12 @@ export async function saveCloudLayoutPage(target: LayoutCloudTarget, page: numbe
     list = list.slice(0, Math.floor(list.length * 0.8));
     content = JSON.stringify(list);
   }
-  await setDoc(doc(db, 'users', target.ownerId, 'documents', target.fileId, 'pages', `${LAYOUT_DOC_PREFIX}${page}`), {
+  // Bỏ qua khi nội dung y hệt lần đã lưu; hết hạn mức thì im lặng bỏ qua (trang vẫn lưu trên máy)
+  await guardedWrite(() => setDoc(doc(db, 'users', target.ownerId, 'documents', target.fileId, 'pages', `${LAYOUT_DOC_PREFIX}${page}`), {
     content,
     status: 'success',
     kind: 'layout',
     version: 2,
     updatedAt: serverTimestamp(),
-  });
+  }), `layout/${target.ownerId}/${target.fileId}/${page}`, content);
 }

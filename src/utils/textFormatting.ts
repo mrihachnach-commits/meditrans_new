@@ -203,13 +203,8 @@ export function normalizeMarkdownLists(input: string): string {
   const lines = input.split('\n');
   const resultLines: string[] = [];
 
-  // Hierarchy tracking for flattening cases
-  let hasActiveCategory = false;
-  let hasActiveCondition = false;
-
-  const modalityRegex = /^(?:[-*•◦▪▫–—]\s*)?(?:\*\*)?(Siêu âm|CT|MRI|X-quang|CLVT|CHT|PET|PET-CT|Bệnh học|Giải phẫu bệnh|Ultrasound)(?:\*\*)?[:\s]+(.*)$/i;
-  const conditionRegex = /^(?:[-*•◦▪▫–—]\s*)?(.*(?::\s*(?:dưới|trên|từ|<|>|≤|≥|\d+|ít hơn|nhiều hơn)|Nang giả tụy|Ổ dịch quanh tụy|Hoại tử tụy|Viêm tụy|Áp xe|Tụ dịch).*)$/i;
-  const subFeatureRegex = /^(?:[-*•◦▪▫–—]\s*)?(?:Ổ dịch (?:không có|có) vỏ bao|(?:Không có|Có) vỏ bao|Thành mỏng|Thành dày|Bờ (?:rõ|không rõ|đều|không đều)|Dạng đơn thùy|Dạng đa thùy)(.*)$/i;
+  /** Cấp của mục danh sách gần nhất (−1 = không ở trong danh sách). */
+  let listLevel = -1;
 
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i];
@@ -256,71 +251,33 @@ export function normalizeMarkdownLists(input: string): string {
     // Convert tabs to 2 spaces
     const spaceCount = rawIndent.replace(/\t/g, '  ').length;
 
-    // Check if line starts with a list bullet/dash symbol:
-    const bulletMatch = content.match(/^([•◦▪▫–—\-*+])\s*(.*)$/);
+    // Mục danh sách: ký hiệu đầu dòng (cần khoảng trắng sau "-", "*", "+" để KHÔNG nhầm "**in đậm**", "-5%") hoặc số thứ tự.
+    // v8.1: bỏ các quy tắc "ngữ nghĩa" cũ (dòng bắt đầu bằng "Siêu âm/CT/MRI…" bị tự thụt 6 dấu cách, dòng có "biến chứng",
+    // "dấu hiệu"… bị tự in đậm). Các quy tắc này viết riêng cho một tài liệu tuỵ, làm mục lục/danh sách khác hiện thành
+    // KHỐI CODE nền đen với chữ "- **Siêu âm**: …" và làm hỏng dấu in đậm.
+    const bulletMatch = /^\*\*/.test(content) ? null : content.match(/^(?:([•◦▪▫‣])\s*|([–—\-*+])\s+)(.*)$/);
+    const orderedMatch = content.match(/^(\d{1,3}[.)])\s+(.*)$/);
 
-    if (bulletMatch) {
-      const symbol = bulletMatch[1];
-      const itemText = bulletMatch[2];
+    if (bulletMatch || orderedMatch) {
+      // Cấp thụt lề theo dấu cách (2 dấu cách / cấp), nhưng không bao giờ sâu hơn mục trước 1 cấp
+      // (thụt quá sâu mà không có mục cha → Markdown hiểu là khối code)
+      let level = Math.floor(spaceCount / 2);
+      level = Math.min(level, listLevel + 1);
+      if (listLevel < 0) level = 0;
+      listLevel = level;
+      const indent = '  '.repeat(level);
+      if (orderedMatch && !bulletMatch) resultLines.push(`${indent}${orderedMatch[1]} ${orderedMatch[2]}`);
+      else resultLines.push(`${indent}- ${bulletMatch![3]}`);
+      continue;
+    }
 
-      // If the line already has explicit indentation (2, 4, 6, 8+ spaces):
-      if (spaceCount >= 2) {
-        const level = Math.floor(spaceCount / 2);
-        const normalizedIndent = '  '.repeat(level);
-        resultLines.push(`${normalizedIndent}- ${itemText}`);
-        continue;
-      }
-
-      // If spaceCount is 0, check semantic hierarchy to prevent flat bullet lists:
-      // Case 1: Imaging Modality (Siêu âm, CT, MRI, Ultrasound...)
-      const modMatch = itemText.match(modalityRegex);
-      if (modMatch) {
-        const modName = modMatch[1];
-        const rest = modMatch[2];
-        resultLines.push(`      - **${modName}**: ${rest}`);
-        continue;
-      }
-
-      // Case 2: Sub-feature of lesion (e.g. Ổ dịch không có vỏ bao, Thành mỏng...)
-      const subFeatureMatch = itemText.match(subFeatureRegex);
-      if (subFeatureMatch && (hasActiveCondition || hasActiveCategory)) {
-        resultLines.push(`      - ${itemText}`);
-        continue;
-      }
-
-      // Case 3: Condition / Lesion subtype (e.g. Ổ dịch quanh tụy cấp tính: dưới 4 tuần, Nang giả tụy: trên 4 tuần)
-      const condMatch = itemText.match(conditionRegex);
-      if (condMatch && hasActiveCategory) {
-        hasActiveCondition = true;
-        resultLines.push(`    - **${itemText.replace(/^\*\*/, '').replace(/\*\*$/, '')}**`);
-        continue;
-      }
-
-      // Case 4: Category / Parent section (e.g. Các thể và biến chứng...)
-      if (
-        itemText.toLowerCase().includes('thể và biến chứng') ||
-        itemText.toLowerCase().includes('biến chứng') ||
-        itemText.toLowerCase().includes('phân loại') ||
-        itemText.toLowerCase().includes('dấu hiệu') ||
-        itemText.toLowerCase().includes('types and complications')
-      ) {
-        hasActiveCategory = true;
-        hasActiveCondition = false;
-        resultLines.push(`- **${itemText.replace(/^\*\*/, '').replace(/\*\*$/, '')}**`);
-        continue;
-      }
-
-      // Default top-level item
-      resultLines.push(`- ${itemText}`);
+    if (spaceCount >= 2 && listLevel >= 0) {
+      // Dòng tiếp nối của mục danh sách: giữ thụt lề vừa đủ dưới mục đang mở
+      resultLines.push(`${'  '.repeat(Math.min(Math.floor(spaceCount / 2), listLevel + 1))}${content}`);
     } else {
-      // Non-bullet line: If it was indented under a previous item, preserve proportional indentation
-      if (spaceCount >= 2) {
-        const level = Math.floor(spaceCount / 2);
-        const normalizedIndent = '  '.repeat(level);
-        resultLines.push(`${normalizedIndent}${content}`);
-      } else {
-        resultLines.push(rawLine);
-      }
+      // Ngoài danh sách: bỏ thụt lề (≥ 4 dấu cách sẽ thành khối code)
+      if (!/^\s*$/.test(content)) listLevel = -1;
+      resultLines.push(content);
     }
   }
 
@@ -335,6 +292,9 @@ export function prepareMedicalContent(content: string): string {
 
   // Step 1: Clean raw LaTeX math expressions ($> 50%$, $\le 2%$, $\pm 5\%$, etc.)
   let text = cleanLatex(content);
+
+  // Bỏ hàng rào khối code ``` AI đôi khi bọc quanh bản dịch (cả trang hiện thành khối code nền đen)
+  text = text.replace(/^[ \t]*```[\w-]*[ \t]*$/gm, '');
 
   // Step 2: Repair mangled Markdown tables before list processing
   text = repairMangledMarkdownTables(text);

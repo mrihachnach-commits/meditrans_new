@@ -12,6 +12,8 @@ import {
 import type { User } from 'firebase/auth';
 import { 
   getFirestore, 
+  arrayUnion,
+  arrayRemove,
   collection, 
   addDoc, 
   doc, 
@@ -118,6 +120,8 @@ export {
   Timestamp,
   getDocFromServer,
   or,
-  collectionGroup
+  collectionGroup,
+  arrayUnion,
+  arrayRemove
 };
 export type { User };

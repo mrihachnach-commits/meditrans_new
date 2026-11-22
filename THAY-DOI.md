@@ -382,3 +382,200 @@ Kiểm thử mô phỏng: dồn 12 yêu cầu cùng lúc vào proxy chỉ chịu
 - `/api/ai/chat`: thêm `gpt-4.1-mini`, `gpt-4.1` vào danh sách cho phép; mặc định `gpt-4.1-mini`.
 
 **Lỗi nhận diện model (log `Using key … for gemini-flash-lite-latest`):** "Chế độ dịch" lưu trong máy còn tên engine cũ (vd. `gemini-flash-lite-latest`) và dòng log in tên engine này chứ không phải model thật được gửi. Nay tên engine cũ được chuẩn hoá về Cơ bản / Chuyên sâu khi mở web, và log in đúng model thật: `engine "…" → model gpt-4.1-mini`.
+
+### Cập nhật v8.1 — sửa lỗi trình bày dịch thường (mục lục hiện thành khối code nền đen)
+
+- **Nguyên nhân chính** nằm ở bước hiển thị (`normalizeMarkdownLists`), không phải ở model: các quy tắc "ngữ nghĩa" cũ viết riêng cho một tài liệu tuỵ tự thụt 6 dấu cách mọi gạch đầu dòng bắt đầu bằng "Siêu âm / CT / MRI / X-quang…" và đổi thành `- **Siêu âm**: …` → Markdown hiểu là KHỐI CODE (nền đen, chữ đơn cách, hiện nguyên dấu `- **`). Đã bỏ các quy tắc này.
+- Dòng **in đậm** (`**…**`) trước đây bị nhận nhầm là gạch đầu dòng "*" → hỏng dấu in đậm. Nay "-", "*", "+" phải có khoảng trắng phía sau mới là gạch đầu dòng.
+- Thụt lề danh sách được giới hạn: mục con không sâu quá mục cha 1 cấp; dòng ngoài danh sách bị thụt ≥ 4 dấu cách được bỏ thụt (không còn thành khối code). Hàng rào ``` AI tự thêm bị bỏ.
+- Áp dụng ở bước hiển thị → **các trang đã dịch trước đây cũng hiển thị đúng ngay**, không cần dịch lại.
+- **Mục lục giữ số chương/mục** ("1", "1.1", "2.2.1") khi dựng Markdown từ lớp chữ (trước đây bị đổi thành "-" → mất số). Trang dịch mới mới có số.
+
+### Cập nhật v8.2 — hết sót tiêu đề tiếng Anh ở Giữ định dạng ("References"…)
+
+- **Nguyên nhân:** prompt có quy tắc "giữ nguyên tài liệu tham khảo" → AI áp dụng nhầm cho cả TIÊU ĐỀ "References" và trả nguyên văn; bước dịch bù (v7.8) chỉ bắt khối ≥ 4 từ nên tiêu đề 1 từ lọt qua.
+- **Tiêu đề mục thông dụng dịch ngay trên máy**, không gửi AI (không tốn token, không bao giờ sót): References → Tài liệu tham khảo, Further Reading → Tài liệu đọc thêm, Conclusions → Kết luận, Introduction, Summary, Abstract, Discussion, Contents, Key Points, Acknowledgments… (giữ VIẾT HOA nếu bản gốc viết hoa).
+- Prompt nói rõ: mục tài liệu tham khảo giữ nguyên nhưng tiêu đề mục luôn dịch.
+- Bước dịch bù nay bắt cả **khối ngắn 1–3 từ** còn nguyên tiếng Anh thông dụng (tên riêng, tên thuốc, chữ viết tắt như BI-RADS, Doppler không bị coi là sót).
+- **Trang đã dịch trước đây**: tiêu đề "References" trong bản lưu được tự thay khi dựng lại trang (không tốn token) — đệm ảnh nâng phiên bản để các trang tự vẽ lại.
+
+### Cập nhật v8.3 — sửa "khối chữ quá chật" ở đoạn thụt treo + cỡ chữ to hơn
+
+- **Đoạn thụt treo** (dòng đầu sát lề, các dòng sau thụt vào — kiểu "ACR: …" / "FBU: …" / "Examples: …" của BI-RADS): trước đây mỗi dòng thụt vào bị coi là MỞ ĐOẠN MỚI → một đoạn bị chặt thành nhiều khối; AI dồn cả câu vào khối 1 dòng (chữ tí hon, cảnh báo "khối chữ quá chật"), các khối sau nhận mẩu câu lặp / lệch chỗ, có khi dòng đầu của đoạn kế bị nhập nhầm vào đoạn trước. Nay nhận diện thụt treo (dòng trước chưa hết câu, hai dòng cùng chạy tới mép phải, các dòng sau thẳng hàng) → cả đoạn là MỘT khối, vẽ lại đúng kiểu thụt treo. Đã kiểm thử tái hiện trước/sau.
+- Prompt dịch khối: câu có thể kéo sang khối sau — mỗi khối chỉ dịch chữ của chính nó, không dồn/lặp chữ giữa các khối.
+- **Cỡ chữ**: cỡ chung cho thân bài trước đây lấy theo đoạn CHẬT NHẤT → một đoạn chật kéo cả trang xuống 72%. Nay lấy theo đa số (không dưới 85%); chỉ đoạn thật sự chật mới tự thu nhỏ riêng. Áp dụng tương tự cho ô bảng.
+- Đệm ảnh v18: trang đã dịch tự vẽ lại. Trang có đoạn thụt treo (như tr. 98) có khối mới khác bản lưu → chỉ các khối đó được dịch bù (tốn ít token); muốn chắc chắn thì bấm "Dịch lại".
+
+### Cập nhật v8.4 — chạy nhiều luồng hơn cho model nhanh (gpt-4.1-mini)
+
+**Bộ điều tiết ShopAIKey / key hệ thống:** trần mặc định 8 yêu cầu đồng thời (trước 6), bắt đầu 3 (trước 2), tăng 1 sau mỗi 3 lần thành công (trước 4), giãn nhịp 0,15 giây (trước 0,25). Vẫn tự hạ ngay khi ShopAIKey báo 429 / quá tải và ghi nhớ ngưỡng an toàn 10 phút. **Cài đặt → mục 4 "Số yêu cầu đồng thời tối đa"** (2–12) để chỉnh khi cần.
+
+**Khi model không "suy nghĩ" (gpt-4.1-mini)** — chia nhỏ gần như không tốn thêm token (chỉ lặp hướng dẫn hệ thống ngắn):
+- Dịch thường: trang > 2.200 ký tự chia tới 4 phần ~1.600 ký tự dịch song song (Gemini vẫn > 5.000 ký tự, 2 phần). Phần đầu vẫn hiện dần, thứ tự giữ đúng.
+- Giữ định dạng: mỗi trang chia phần ~2.000 ký tự, 4 phần song song (trước 3.500 ký tự, 3 phần); 4 trang cùng lúc (trước 3).
+- Dịch toàn bộ: số trang song song theo trần đồng thời (mặc định 6 trang, trước 4). Tự dịch trước: 3 trang (trước 2).
+- Không gửi trùng: trang đang dịch/đã dịch không bị gửi lại; mọi yêu cầu vẫn qua một bộ điều tiết chung.
+
+### Cập nhật v8.4.1 — sửa lỗi trang trắng / "OCR không trả về khối chữ hợp lệ"
+- **Trang trắng (trang lót, trang trống) khi dịch giữ định dạng**: trước đây trang không có lớp chữ được gửi đi OCR, AI trả `{"blocks":[]}` và trang bị báo lỗi "OCR không trả về khối chữ hợp lệ". Nay trang gần như trắng được nhận diện ngay trên máy (không gọi AI, không tốn token) và giữ nguyên trang gốc; nếu AI xác nhận trang không có chữ thì cũng giữ nguyên trang gốc thay vì báo lỗi.
+- **Đọc kết quả OCR chịu lỗi tốt hơn**: bỏ ```json, chấp nhận tên trường khác (`bbox`/`box`, `original`, `vi`/`translation`), toạ độ 0–1, JSON bị cắt cụt (giữ các khối còn nguyên). OCR qua ShopAIKey bật chế độ JSON. JSON hỏng → tự thử lại 2 lần.
+- **Không còn màn hình trắng tinh khi giao diện gặp lỗi**: thêm lớp bắt lỗi ngoài cùng (`src/main.tsx`) hiện thông báo lỗi kèm nút "Tải lại" và "Đặt lại cài đặt trình duyệt".
+- **Dịch thử key ShopAIKey báo đúng lý do**: 401/403 → key sai/bị khoá (đánh dấu Lỗi), 402/hết số dư, 429/5xx → bận tạm thời, 404 → model không có. Key hệ thống báo đúng lý do máy chủ trả về (chưa đủ Level / bị khoá / kho key hệ thống trống) thay vì luôn báo "chưa đủ Level 2".
+
+### Cập nhật v8.5 — chỉ dùng key ShopAIKey; rà soát chia sẻ key, key hệ thống, dịch thử key; sửa bảng chữ viết tắt
+**Chỉ dùng ShopAIKey**
+- Bỏ toàn bộ phần key Google Gemini: bỏ chọn nhóm key "Tất cả / Gemini / ShopAIKey" (luôn dùng ShopAIKey, cài đặt cũ tự chuyển), bỏ ô chọn loại key và gợi ý AIzaSy khi thêm key (cả trong trang quản trị key người dùng), bỏ nút "Chọn Key từ AI Studio", bỏ đường dự phòng dùng key Gemini nhập tay.
+- Mọi key không phải AIzaSy… đều được gọi qua ShopAIKey (không còn phụ thuộc tiền tố `sk-`). Thêm key AIzaSy… bị từ chối kèm thông báo; key trùng hoặc quá ngắn cũng bị chặn.
+- Key Gemini cũ đã lưu KHÔNG bị xoá (giữ dữ liệu), chỉ hiện nhãn "Gemini cũ · không dùng", không được dùng để dịch; có thể tự xoá.
+- Level 1 vẫn giữ quy định cũ: không tự thêm key ShopAIKey (vẫn dùng được key người khác chia sẻ).
+
+**Chia sẻ key giữa tài khoản**
+- Chia sẻ / thu hồi dùng `arrayUnion` / `arrayRemove` (ghi nguyên tử) → hai thao tác cùng lúc không còn ghi đè mất email của nhau; thu hồi xoá cả các cách viết hoa/thường của email.
+- Người được chia sẻ không còn thấy nút xoá (trước đây bấm xoá sẽ báo lỗi quyền); key hệ thống không hiện nút xoá, không hiện mã key.
+
+**Key hệ thống ([Hệ thống] ShopAIKey)**
+- "Dịch thử" key hệ thống nay gửi yêu cầu thật qua máy chủ (trước đây chỉ hiện "đã bảo mật", không thử gì).
+- Máy chủ `/api/ai/chat`: key hệ thống bị ShopAIKey từ chối (401/403) hoặc hết số dư (402) → tự chuyển sang key hệ thống kế tiếp; tất cả key chỉ hết lượt → trả 429 + Retry-After (trình duyệt tự giãn nhịp, trước đây trả 502); lỗi 403 của ShopAIKey không còn bị trình duyệt báo nhầm thành "chưa đủ Level 2".
+- Trình duyệt báo đúng lý do máy chủ trả về (chưa đủ Level / tài khoản bị khoá / kho key hệ thống trống / phiên đăng nhập hết hạn).
+
+**Dịch thử key & hiển thị key đang hoạt động**
+- Phân loại kết quả dịch thử: 401/403 → key sai/bị khoá (đánh dấu Lỗi); 402 → hết số dư; 429/5xx → bận tạm thời (vẫn "Hoạt động"); 404 → model không có (không đánh dấu key lỗi); lỗi mạng → báo sai Base URL / mất mạng.
+- Kho key hiện nhãn "Đã thử: hoạt động / tạm bận / lỗi" (kèm giờ thử), "Ưu tiên" (key đang chọn) và "Đang dùng" (key vừa dịch thành công gần nhất).
+- Cài đặt → mục "Key ShopAIKey dùng để dịch" hiện key ưu tiên, key vừa dịch thành công, số key khả dụng/đang lỗi và cảnh báo key Gemini cũ.
+
+**Dịch giữ định dạng — bảng chữ viết tắt 2 cột**
+- Ô bên trái dài ("BRCA1 and BRCA2") làm khe cột hẹp → trước đây 2 ô bị nối thành 1 dòng rồi nhập vào hàng trên (chữ chồng nhau, mất hàng). Nay khe trùng vị trí khe cột của các dòng lân cận được tách thành 2 ô.
+- Ô viết tắt có số ("E2") được coi là ô bảng → không bị nối vào hàng trên (trước đây ra "Chụp X-quang kỹ / thuật số Estradiol").
+- Ô bảng/mục trong cột thẳng hàng trái tình cờ nằm giữa trang không còn bị căn giữa → bản dịch thẳng cột (DE, ER, FLR, FOV, ROI, SE…).
+- Đổi phiên bản bộ dựng trang (v19) → trang đã lưu được dựng lại theo cách mới.
+
+### Cập nhật v8.6 — giữ màu chữ / kiểu chữ của bản gốc khi dịch giữ định dạng
+- Số hình và trích dẫn màu xanh (Figs. 3.2, 3.3 … [3]) trước đây thành chữ đen vì AI bỏ mất thẻ đánh dấu kiểu chữ. Nay sau khi dịch, đoạn nào trong bản gốc có màu/nghiêng/đậm riêng mà bản dịch thiếu thẻ thì web tự tìm đúng đoạn chữ giữ nguyên (số, mã, tên) trong bản dịch và gắn lại màu/kiểu chữ gốc (`restoreTags` trong `layoutEngine.ts`, áp dụng cả khi dựng lại trang từ bản dịch đã lưu trên đám mây — không cần dịch lại).
+- Hướng dẫn cho AI nhấn mạnh phải giữ đủ thẻ quanh số hình / trích dẫn.
+- Đổi phiên bản bộ dựng trang (v20) → trang đã lưu được vẽ lại với màu đúng.
+- Level 1: giữ quy định như v8.5 (không tự thêm key ShopAIKey, dùng được key được chia sẻ).
+
+### Cập nhật v8.7 — trang trắng ra ảnh trang trắng, không cảnh báo
+- Trang trắng (không có chữ) ở chế độ giữ định dạng nay cho ra đúng ảnh trang trắng, KHÔNG còn hiện cảnh báo "Trang scan (không có lớp chữ) và bộ dịch hiện tại không đọc được ảnh…". Trước đây trang trắng được giữ ảnh gốc nhưng vẫn bị đánh dấu "trang scan" nên hiện cảnh báo và bị bỏ khỏi file PDF xuất ra.
+- Trang trắng được lưu dấu `__blank__` lên đám mây → mở lại / máy khác không gọi AI, không cảnh báo. Trang trắng có mặt trong PDF xuất ra (đúng thứ tự trang).
+- Trang scan có chữ vẫn đi OCR qua model OCR (Gemini 3.1 Flash-Lite) như cũ; cảnh báo chỉ còn hiện khi trang scan thật sự không đọc được.
+- Đổi phiên bản bộ dựng trang (v21) → trang trắng đã lưu kèm cảnh báo được dựng lại.
+
+### Cập nhật v8.8 — số trích dẫn / số hình màu xanh giữ đúng màu (sửa tận gốc)
+Tái hiện trên trình duyệt thật với dòng "Halliwell, was published [6, 7]. The new technique…" (chữ số xanh giữa dòng chữ đen) và tìm ra 3 nguyên nhân:
+1. **Bỏ sót màu khi chỉ vài ký tự có màu**: dòng chữ chỉ được tách theo màu khi phần mực có màu chiếm ≥ 4% — vài chữ số trích dẫn chỉ chiếm 1–3% → cả dòng bị coi là một màu đen. Nay chỉ cần vài điểm ảnh có màu (chữ đen khử răng cưa gần như không có điểm màu nên không bị nhận nhầm).
+2. **Số bị "kế thừa" màu chữ đứng trước**: mảnh chữ không có chữ cái (số, dấu câu) bị gán kiểu chữ của mảnh trước → "6, 7" màu xanh thành đen. Nay chỉ dấu câu thuần mới kế thừa; số giữ màu riêng.
+3. **Số không được đánh dấu khi gửi dịch**: đoạn không có chữ cái (chỉ có số) không được bọc thẻ màu. Nay số cũng được bọc thẻ.
+- Gắn lại thẻ màu sau dịch chịu được khác biệt khoảng trắng ("6, 7" ↔ "6,7") và "and" ↔ "và".
+- Đã kiểm tra: trước sửa → cả dòng màu đen, không có thẻ; sau sửa → "[<1>6, 7</1>]" màu xanh (43,43,184); bản dịch "[6,7] … [10, 11] … [8], [9], [12]" được gắn lại màu đủ cả 5 chỗ.
+- Bản dịch đã lưu không cần dịch lại: mở lại trang là màu xanh được tô lại (đổi phiên bản bộ dựng trang v22).
+
+### Cập nhật v8.9 — hết lỗi "ArrayBuffer is detached" và chống cạn hạn mức ghi Firestore
+**Lỗi "Failed to save active session… ArrayBuffer is detached" (lặp liên tục)**
+- Nguyên nhân: file PDF (ArrayBuffer) được đưa thẳng cho pdf.js; pdf.js chuyển (detach) vùng nhớ đó sang luồng xử lý riêng → mỗi lần lật trang web lưu phiên làm việc với buffer rỗng → lỗi. Đồng thời mỗi lần lật trang web lưu lại CẢ file PDF (vài chục MB) vào IndexedDB.
+- Sửa: đưa cho pdf.js bản sao (`slice(0)`), giữ bản gốc để lưu phiên; buffer PDF lưu riêng một lần, lật trang chỉ lưu số trang (vài byte); gộp các lần lưu trong 800 ms; buffer đã detach thì bỏ qua thay vì báo lỗi. Phiên cũ đã lưu vẫn mở lại được.
+
+**Firestore hết hạn mức ghi miễn phí trong ngày (resource-exhausted)**
+- Nguyên nhân chính: khung "Giữ định dạng" nhận object `cloud` mới mỗi lần giao diện vẽ lại (hàng chục lần/giây khi đang dịch) → hiệu ứng đồng bộ chạy lại và GHI LẠI lên Firestore mọi trang chưa được xác nhận (trang đang gửi, trang lỗi) — một trang có thể bị ghi hàng trăm lần.
+- Sửa: giữ `cloud` cố định theo tài liệu; mỗi trang chỉ gửi một lần (không gửi trùng khi đang gửi, lỗi thì không tự thử lại trong phiên); bỏ qua lượt ghi khi nội dung y hệt lần trước (cả bản dịch thường lẫn giữ định dạng).
+- Khi Firestore báo hết hạn mức: tạm ngừng mọi lượt ghi lên đám mây 1 giờ, báo MỘT lần; bản dịch vẫn lưu trên máy và trang chưa lưu được sẽ tự đồng bộ ở lần mở sau khi hạn mức được đặt lại (Google đặt lại lúc 0h giờ Thái Bình Dương ≈ 15:00 giờ Việt Nam).
+- Không cần làm gì thêm phía Firebase. Database này là loại miễn phí ("free tier database") nên bật thanh toán cũng không tăng được hạn mức; nếu sau này cần nhiều hơn 20.000 lượt ghi/ngày thì phải tạo database Firestore trả phí mới.
+
+### Cập nhật v9.0 — xuất bản dịch giữ định dạng ra MỘT file PDF duy nhất
+- Nút xuất PDF ở tab "Giữ định dạng" nay luôn ghép toàn bộ các trang đã dịch (hoặc khoảng trang đã nhập) thành **một file PDF** `…_ban-dich-giu-dinh-dang.pdf`, không còn chia 150 trang/file.
+- Ghép nhanh hơn và không đứng giao diện với tài liệu hàng trăm trang: ảnh trang đọc lần lượt từ ổ đĩa, không nén lại ảnh JPEG đã nén sẵn, nhường giao diện sau mỗi 20 trang; tài liệu > 60 trang có thông báo "Đang ghép…".
+
+### Cập nhật v9.1 — tên file bản dịch có tiền tố "MediTrans_"
+- File PDF bản dịch giữ định dạng: `MediTrans_<tên tài liệu>_ban-dich-giu-dinh-dang.pdf`; ảnh 1 trang: `MediTrans_<tên tài liệu>_trang-<n>_ban-dich.jpg`.
+
+### Cập nhật v9.2 — key hệ thống bị tắt trong ShopAIKey Pool thì hiện "Đã tắt" và không dùng để dịch
+- Trước đây "[Hệ thống] ShopAIKey" là key ảo luôn hiện "Hoạt động" cho mọi tài khoản Level 2 (người dùng thường không đọc được kho key hệ thống), kể cả khi quản trị viên đã tắt hết key trong ShopAIKey Pool.
+- Thêm `GET /api/ai/status` (Vercel + server.ts): máy chủ kiểm tra token đăng nhập rồi chỉ trả về SỐ key hệ thống đang bật (không bao giờ trả mã key).
+- Giao diện hỏi trạng thái khi đăng nhập, mỗi 5 phút, khi quay lại tab, ngay khi quản trị viên bật/tắt/thêm/sửa/xoá key trong ShopAIKey Pool, và khi máy chủ báo "chưa có API Key khả dụng".
+- Kho key tắt hết → "[Hệ thống] ShopAIKey (đã tắt)" với nhãn "Đã tắt", không còn nhãn "Ưu tiên"/"Đang dùng", KHÔNG được đưa vào danh sách key dịch; key ưu tiên tự chuyển sang key ShopAIKey khác (nếu có). Bật lại key → tự hiện lại "Hoạt động".
+- Không hỏi được máy chủ (lỗi mạng / chưa cấu hình Firebase Admin) → giữ cách cũ, không chặn nhầm.
+
+### Cập nhật v9.3 — xoá key chắc chắn (không còn "xoá thành công" rồi tải lại vẫn còn)
+- Nguyên nhân: Firestore đang hết hạn mức ghi miễn phí trong ngày (lệnh xoá cũng tính là một lượt ghi). Thư viện Firebase xoá key ngay trên máy (key biến mất khỏi danh sách) rồi chờ máy chủ; máy chủ từ chối vì hết hạn mức → lệnh xoá chỉ nằm trong bộ nhớ tạm, tải lại trang là mất → key hiện lại.
+- Sửa (`src/services/keyDeletion.ts`, dùng cho cả Kho API Key và Trang Quản Trị):
+  - Chỉ báo "Đã xoá" khi máy chủ xác nhận (chờ tối đa 10 giây).
+  - Máy chủ chưa nhận (hết hạn mức / mạng chậm): key được ghi vào danh sách chờ xoá trên máy (localStorage) → ẩn khỏi mọi danh sách, không dùng để dịch kể cả sau khi tải lại trang; thông báo rõ là chưa xoá được trên máy chủ.
+  - Web tự xoá lại các key trong danh sách chờ khi đăng nhập và mỗi 10 phút, đến khi máy chủ xác nhận.
+  - Lỗi thật (không có quyền…) → báo lỗi, không ẩn key.
+
+## v9.4 — Sửa theo bản rà soát PDF dịch
+- Xuất PDF: ảnh trang 2100px (≈250 dpi khổ A4), JPEG 0.86, thêm lớp chữ ẩn (font Tinos, nhúng tập con) để tìm kiếm/copy được trong bản dịch.
+- Bố cục: chữ không tràn quá lề dưới vùng nội dung; từ/đường link dài được ngắt dòng thay vì tràn ra ngoài.
+- Bảng thuật ngữ y khoa Anh–Việt bắt buộc (~90 mục mặc định, sửa được trong Cài đặt). Chỉ gửi những thuật ngữ có trong trang cho AI.
+- Bộ nhớ dịch: tiêu đề đầu trang, tên sách, tên mục đã dịch được dùng lại y hệt ở các trang sau. Có nút "Xoá bộ nhớ dịch".
+- Tài liệu tham khảo: chỉ dịch tiêu đề mục, giữ nguyên các mục trích dẫn.
+- ENGINE_VERSION v23: trang đã dịch bằng bản cũ sẽ được dựng lại.
+- Thêm thư viện @pdf-lib/fontkit (package-lock.json thay đổi).
+
+## v9.5 — Trang scan có ảnh lớn bị giữ nguyên tiếng Anh (BI-RADS tr.28)
+- Nguyên nhân: trang scan chỉ có 2 ảnh nhũ ảnh + chú thích + tab dọc; AI OCR trả {"blocks":[]} → web coi là "trang trắng", lưu lại vĩnh viễn (cả trên đám mây) → bản dịch giống hệt bản gốc, nút "Dịch tr." bị khoá.
+- Nay chỉ trang thật sự trắng (mực < 0,3%) mới được coi là trang trắng. Trang có hình mà AI trả rỗng → hỏi lại AI lần 2, nhắc rõ phải đọc chú thích "Figure…", tab chữ dọc, chân trang.
+- Nếu vẫn rỗng → giữ trang gốc nhưng hiện ghi chú và cho "Dịch lại".
+- Bản lưu cũ bị đánh dấu nhầm "trang trắng" sẽ tự được dịch lại bằng OCR khi mở trang (tốn token 1 lần cho mỗi trang đó).
+- Đọc JSON OCR chịu lỗi hơn: mảng khối đặt tên khác ("text_blocks", "data", lồng trong "page"), trường chữ "content"/"caption"/"label", toạ độ theo pixel thay vì thang 0–1000.
+- ENGINE_VERSION v24.
+
+## v9.6 — Trang scan nhiều ảnh (BI-RADS tr.32, 34, 36) và chữ dọc
+- Toạ độ OCR được đối chiếu với vùng chữ thật trên ảnh: khối chú thích AI đặt đè lên ảnh → dời về đúng chỗ chú thích gốc (không tìm được thì bỏ, giữ chữ gốc); khối chỉ khoanh một phần chú thích → nới ra cả đoạn. Nhãn ngắn trong ảnh giữ nguyên.
+- AI trả rỗng cho trang toàn ảnh y khoa (tr.32) hoặc bị bộ lọc nội dung chặn → đọc lại với ảnh đã che các hình lớn (chỉ còn chữ in).
+- Màu chữ trên trang scan: mực xám do nhoè ảnh → đen như bản gốc; chữ màu được đậm lại.
+- Nhãn "Figure n"/"Table n" in đậm ở bản gốc → "Hình n"/"Bảng n" in đậm ở bản dịch (đo độ dày nét trên ảnh, hoặc AI báo bold_lead).
+- Chữ dọc: tab "MAMMOGRAPHY" dịch theo bảng thuật ngữ (NHŨ ẢNH), dùng cả chiều dài tab nên không còn bé tí; trang có lớp chữ PDF cũng dịch chữ xoay 90° mà không cần bật "Chữ trong hình". Khung cao-hẹp AI quên báo hướng → coi là chữ dọc.
+- Khối chỉ là một thuật ngữ trong bảng → dịch ngay trên máy; OCR gửi kèm bảng thuật ngữ.
+- Đọc JSON OCR chịu lỗi hơn (khung dạng chuỗi, tên trường khác).
+- ENGINE_VERSION v25.
+
+## v9.7 — Sửa tiếp trang scan BI-RADS (tr.22, 28–31)
+- Chú thích hình sát ngay dưới nhũ ảnh: trước đây cột ảnh tối bị coi là "đường kẻ dọc" → gần hết chiều ngang chú thích bị loại → bản dịch bị nhét vào cột hẹp tí hon, chữ gốc hai bên không được xoá. Nay điểm ảnh thuộc ẢNH LỚN không được tính là mực của khối chữ trên giấy; vùng dò dòng chữ không lấn vào ảnh.
+- Khung OCR chỉ phủ một phần chú thích / thòng xuống khoảng trắng → thay bằng đúng vùng chữ gốc (đo trên ảnh).
+- "Hình n" in đậm như "Figure n": đo độ dày nét và độ phủ mực của nhãn so với phần còn lại (đã thử: 6/6 chú thích tr.29–30 nhận đúng).
+- Chú thích trên cùng trang dùng chung một cỡ chữ, giãn dòng ≤ 1,35 (hết "Hình 3" to bất thường).
+- Tab dọc: cỡ chữ đo theo dải mực thật trên tab (chữ IN HOA ≈ 0,72 cỡ), in đậm theo độ dày nét, canh giữa; không còn bé tí.
+- Đường link trong chữ scan giữ màu xanh/tím như gốc.
+- Kiểu chữ có chân/không chân thống nhất theo đa số trên trang; AI không báo → mặc định không chân.
+- Chữ in đậm cỡ lớn không còn bị nhận nhầm là ảnh.
+- ENGINE_VERSION v26.
+
+## v9.8 — Màu chữ đúng bản gốc, chữ trong hình, trang 36–38 BI-RADS
+
+**Lỗi nặng nhất: tô xanh nhầm thuật ngữ (sách giải phẫu tr.17–18).**
+- Nguyên nhân: câu lệnh dịch có ví dụ `<1>Right Ventricle</1>` → `<1>Tâm thất phải</1>`. AI bắt chước và tự bọc thẻ màu quanh "Tâm thất phải", "Vách liên thất", "Van hai lá", "Cơ nhú"…, kể cả ở tiêu đề "(5) Giải phẫu Van hai lá".
+- Sửa câu lệnh: chỉ bọc thẻ quanh đúng phần dịch của chữ có thẻ trong câu gốc, không thêm thẻ, khối không có thẻ thì không có thẻ.
+- Thêm bộ kiểm tra `sanitizeTags` (layoutEngine.ts), chạy trước khi vẽ, áp dụng cả cho bản dịch đã lưu. Mỗi thẻ trong bản dịch phải ứng với một đoạn có thẻ đó trong câu gốc, theo thứ tự:
+  - đoạn gốc có số (1.25, [3]) thì bản dịch phải có đúng các số đó;
+  - đoạn gốc là chữ thì độ dài phải tương xứng;
+  - thừa số lần thì bỏ thẻ, giữ chữ màu thường.
+- Kết quả: chỉ những đoạn có màu ở bản gốc (số hình 1.23, 1.25, 1.26, 1.2, 1.3…) mới có màu.
+
+**Chữ trong hình (nút "Chữ trong hình").**
+- Nhãn đặt theo khung AI khi việc dò mực trên ảnh/hình vẽ cho khung sai (trước đây phình to cả hình hoặc co còn 5px).
+- Cỡ chữ nhãn không lớn hơn chữ gốc. Cỡ ước theo cả chiều rộng khung và số ký tự, không quá 1,15 lần cỡ chữ thân bài, không quá 1,35 lần trung vị các nhãn. Hết lỗi "ĐƯỜNG NHANH" khổng lồ.
+- Chữ viết chéo hoặc khung cao bất thường: giữ nguyên bản gốc, không xoá-vẽ.
+- Nhãn chồng lên nhãn đã nhận thì bị bỏ.
+- Xoá nhãn trong ảnh bằng `eraseLabel`:
+  - màu nền lấy từ viền khung;
+  - xoá cả chữ trắng viền màu;
+  - lấp dần từ ngoài vào bằng màu nền lân cận, nên không còn vệt xám hay bóng chữ;
+  - không nới vùng xoá theo nét vẽ, giữ mũi tên và đường tròn.
+- Câu lệnh OCR yêu cầu trả MỌI nhãn của hình vẽ (kể cả chữ viết tay), mỗi nhãn một khung riêng sát chữ.
+- Khối chưa có bản dịch thì không bao giờ bị xoá.
+
+**Trang 36–38 BI-RADS.**
+- Chú thích hình 2–3 dòng bị dư một dòng thì thu nhỏ nhẹ (≤ 10%) để giữ đúng số dòng như bản gốc. Chú thích Hình 1 tr.38 nay còn 2 dòng, không chạm ảnh.
+- Cỡ chữ thân bài tính bằng trung vị theo độ dài, không lẫn cỡ chú thích, nên chữ không còn nhỏ hay dồn.
+- "1. HÌNH DẠNG" không còn in đậm nhầm.
+- Xoá chữ trên giấy trắng nới viền 2 điểm, ngưỡng thấp hơn, nên hết vệt xám mờ.
+- Bảng thuật ngữ thêm:
+  - equal density = đậm độ tương đương; high density = đậm độ cao;
+  - circumscribed = bờ rõ; obscured = bờ bị che khuất; lobulated = dạng thùy;
+  - oval = bầu dục; simple cyst = nang đơn thuần;
+  - thêm vài mô tả bờ khác.
+- Bảng thuật ngữ người dùng đã tự sửa vẫn nhận các thuật ngữ mặc định mới.
+- Quy tắc viết hoa: chỉ viết hoa phần dịch của từ viết hoa trong bản gốc ("OVAL mass" → "Khối BẦU DỤC", "LOBULATED" → "Khối DẠNG THÙY").
+- OCR nối từ bị ngắt gạch cuối dòng ("Guid-ance" → "Guidance").
+- ENGINE_VERSION = v27, nên các trang đã dịch tự vẽ lại theo cách mới mà không tốn token.

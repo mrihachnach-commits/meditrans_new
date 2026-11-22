@@ -24,6 +24,7 @@ import {
   setLayoutOcrFigures,
 } from '../services/layoutTranslationService';
 import { LayoutCloudTarget, loadCloudLayoutPages, saveCloudLayoutPage } from '../services/layoutCloudService';
+import { isFirestoreQuotaBlocked } from '../services/firestoreQuota';
 
 interface LayoutTranslatePanelProps {
   pdfDoc: PDFDocumentProxy;
@@ -96,6 +97,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   const urlCache = useRef<Map<number, { blob: Blob; url: string }>>(new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const cloudKey = cloud ? `${cloud.ownerId}/${cloud.fileId}/${cloud.canWrite}` : '';
+  // App tạo object `cloud` mới mỗi lần vẽ lại → giữ cố định theo cloudKey. Trước đây mỗi lần App vẽ lại (rất thường
+  // xuyên khi đang dịch) hiệu ứng đồng bộ chạy lại và GHI LẠI mọi trang chưa được xác nhận lên Firestore → cạn hạn
+  // mức ghi miễn phí trong ngày.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stableCloud = useMemo(() => cloud, [cloudKey]);
   /** Trang đã có bản dịch giữ định dạng trên đám mây (để biết trang nào cần đẩy lên). */
   const remotePagesRef = useRef<Set<number>>(new Set());
 
@@ -153,19 +159,30 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cloudKey]);
 
-  const pushToCloud = useCallback(async (page: number, pairs?: LayoutPair[]) => {
-    if (!cloud?.canWrite || !pairs?.length) return;
+  const pushingRef = useRef<Set<number>>(new Set());
+  const pushFailedRef = useRef<Set<number>>(new Set());
+  const pushToCloud = useCallback(async (page: number, pairs?: LayoutPair[], force = false) => {
+    if (!stableCloud?.canWrite || !pairs?.length) return;
+    if (pushingRef.current.has(page)) return; // đang gửi trang này → không gửi trùng
+    if (!force && pushFailedRef.current.has(page)) return; // lỗi rồi → không thử lại liên tục trong phiên
+    if (isFirestoreQuotaBlocked()) return; // hết hạn mức ghi hôm nay → chỉ lưu trên máy
+    pushingRef.current.add(page);
     try {
-      await saveCloudLayoutPage(cloud, page, pairs);
+      await saveCloudLayoutPage(stableCloud, page, pairs);
+      if (isFirestoreQuotaBlocked()) return; // vừa hết hạn mức → chưa lưu được, lần sau mở lại sẽ đồng bộ
       remotePagesRef.current.add(page);
+      pushFailedRef.current.delete(page);
       setCloudPairs(prev => ({ ...prev, [page]: pairs }));
     } catch (e) {
+      pushFailedRef.current.add(page);
       console.warn(`[Layout] Không lưu được trang ${page} lên đám mây:`, e);
+    } finally {
+      pushingRef.current.delete(page);
     }
-  }, [cloud]);
+  }, [stableCloud]);
 
   useEffect(() => {
-    if (loadingCache || cloudLoading || !cloud?.canWrite) return;
+    if (loadingCache || cloudLoading || !stableCloud?.canWrite || isFirestoreQuotaBlocked()) return;
     // Đẩy lên đám mây mọi trang đã dịch trên máy mà đám mây chưa có (giống bản dịch chữ được đồng bộ)
     const pushed = new Set<number>();
     Object.values(resultsRef.current).forEach(r => {
@@ -175,14 +192,14 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       const p = Number(k);
       if (!pushed.has(p) && pairs?.length && !remotePagesRef.current.has(p)) pushToCloud(p, pairs);
     });
-  }, [loadingCache, cloudLoading, cloud, pushToCloud]);
+  }, [loadingCache, cloudLoading, stableCloud, pushToCloud]);
 
   const rebuildFromCloud = useCallback(async (page: number, signal?: AbortSignal): Promise<LayoutPageResult | null> => {
     const pairs = cloudPairsRef.current[page];
     if (!pairs?.length) return null;
     const res = await renderPageFromPairs(pdfDoc, page, pairs, translator || undefined, signal);
     if (signal?.aborted) return null;
-    if (res.retranslated && res.pairs?.length) pushToCloud(page, res.pairs); // cập nhật bản lưu theo cách tách khối mới
+    if (res.retranslated && res.pairs?.length) pushToCloud(page, res.pairs, true); // cập nhật bản lưu theo cách tách khối mới
     await saveLayoutPage(docKey, res);
     const stored = (await loadLayoutPage(docKey, page)) || res; // bản trên ổ đĩa → giải phóng RAM
     setResults(prev => ({ ...prev, [page]: stored }));
@@ -236,7 +253,8 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     // Key Google riêng: 3 trang khi có ≥3 key, còn lại 2.
     const keys: string[] = (translator as any).apiKeys || [];
     const viaProxy = !!(translator as any).usesProxy?.();
-    const concurrency = todo.length <= 1 ? 1 : viaProxy ? 3 : (keys.length >= 3 ? 3 : 2);
+    const fast = !!(translator as any).isFastProxyModel?.('__layout_fixed__');
+    const concurrency = todo.length <= 1 ? 1 : viaProxy ? (fast ? 4 : 3) : (keys.length >= 3 ? 3 : 2);
     const queue = [...todo];
     let ok = 0;
     let finished = 0;
@@ -259,7 +277,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
             await saveLayoutPage(docKey, res);
             const stored = (await loadLayoutPage(docKey, p)) || res; // bản trên ổ đĩa → giải phóng RAM
             setResults(prev => ({ ...prev, [p]: stored }));
-            pushToCloud(p, res.pairs);
+            pushToCloud(p, res.pairs, true);
           }
           ok++;
         } catch (err: any) {
@@ -344,7 +362,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       const stored = (await loadLayoutPage(docKey, editor.page)) || res;
       setResults(prev => ({ ...prev, [editor.page]: stored }));
       setCloudPairs(prev => ({ ...prev, [editor.page]: res.pairs || pairs }));
-      if (cloud?.canWrite) await pushToCloud(editor.page, res.pairs || pairs);
+      if (cloud?.canWrite) await pushToCloud(editor.page, res.pairs || pairs, true);
       showToast(cloud?.canWrite ? `Đã lưu bản sửa trang ${editor.page} (đã đồng bộ lên tài khoản).` : `Đã lưu bản sửa trang ${editor.page} trên máy này.`, 'success');
       setEditor(null);
     } catch (e: any) {
@@ -372,17 +390,12 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
         if (r && !r.scanned) pages.push(r);
       }
       if (pages.length === 0) throw new Error('Không có trang hợp lệ để xuất.');
-      // Tài liệu lớn: chia thành nhiều file (150 trang/file) để không tràn bộ nhớ trình duyệt
-      const PART = 150;
-      const parts = Math.ceil(pages.length / PART);
-      for (let i = 0; i < parts; i++) {
-        const slice = pages.slice(i * PART, (i + 1) * PART);
-        const blob = await exportLayoutPdf(slice);
-        const range = `${slice[0].pageNumber}-${slice[slice.length - 1].pageNumber}`;
-        saveAs(blob, parts > 1 ? `${baseName}_ban-dich-giu-dinh-dang_tr${range}.pdf` : `${baseName}_ban-dich-giu-dinh-dang.pdf`);
-        if (parts > 1) await new Promise(r => setTimeout(r, 800));
-      }
-      showToast(parts > 1 ? `Đã xuất ${pages.length} trang thành ${parts} file PDF.` : `Đã xuất PDF ${pages.length} trang.`, 'success');
+      // v9.0: luôn xuất MỘT file PDF duy nhất cho toàn bộ các trang (trước đây chia 150 trang/file).
+      // Ảnh trang được đọc lần lượt từ ổ đĩa và nhúng thẳng vào PDF nên vẫn nhẹ bộ nhớ.
+      if (pages.length > 60) showToast(`Đang ghép ${pages.length} trang thành 1 file PDF, vui lòng chờ…`, 'info');
+      const blob = await exportLayoutPdf(pages);
+      saveAs(blob, `MediTrans_${baseName}_ban-dich-giu-dinh-dang.pdf`);
+      showToast(`Đã xuất 1 file PDF gồm ${pages.length} trang.`, 'success');
     } catch (e: any) {
       showToast(`Lỗi xuất PDF: ${e?.message || e}`, 'error');
     } finally {
@@ -435,8 +448,10 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
 
   const notice = errors[currentPage]
     ? { tone: 'error', text: errors[currentPage] }
-    : current?.scanned
+    : current?.scanned && !current?.blank
       ? { tone: 'warn', text: 'Trang scan (không có lớp chữ) và bộ dịch hiện tại không đọc được ảnh: hãy bấm "Dịch lại" sau khi kiểm tra Key, hoặc dùng tab "Dịch".' }
+      : current?.noText
+        ? { tone: 'warn', text: 'AI không tìm thấy chữ cần dịch trên trang này nên đã giữ nguyên trang gốc. Nếu trang có chú thích/chữ, bấm "Dịch lại" để đọc lại.' }
       : current && current.overflowCount > 0
         ? { tone: 'warn', text: `${current.overflowCount} khối chữ quá chật, có thể lấn khung. Nên xem lại.` }
         : null;
@@ -489,7 +504,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       </span>
       <div className="w-px h-4 bg-slate-200 mx-0.5" />
       {current && (
-        <button onClick={() => saveAs(current.blob, `${baseName}_trang-${currentPage}_ban-dich.jpg`)}
+        <button onClick={() => saveAs(current.blob, `MediTrans_${baseName}_trang-${currentPage}_ban-dich.jpg`)}
           className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Tải ảnh trang này">
           <ImageDown className="w-3.5 h-3.5" />
         </button>

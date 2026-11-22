@@ -2,6 +2,7 @@ import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import { TranslationService, TranslationOptions } from "./translationService";
 import { cleanLatex } from "../utils/textFormatting";
 import { auth } from "../firebase";
+import { glossaryPrompt, glossaryCompact } from "./medicalGlossary";
 
 /** Chờ có thể huỷ: bấm Dừng là thoát ngay, không phải đợi hết thời gian chờ thử lại (tới 8 giây). */
 function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
@@ -23,7 +24,7 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 class ProxyGate {
   private active = 0;
   private waiters: (() => void)[] = [];
-  private limit = 2;              // bắt đầu 2 yêu cầu cùng lúc (an toàn), tăng dần khi proxy trả lời tốt
+  private limit = 3;              // v8.4: bắt đầu 3 yêu cầu cùng lúc, tăng dần khi proxy trả lời tốt
   private pauseUntil = 0;
   private lastStart = 0;
   private okStreak = 0;
@@ -31,14 +32,14 @@ class ProxyGate {
   /** Ngưỡng an toàn học được: số yêu cầu cùng lúc vừa gây quá tải − 1 (giữ 10 phút, không thử vượt lại). */
   private learnedCap = Infinity;
   private learnedUntil = 0;
-  constructor(private readonly spacingMs = 250) {}
+  constructor(private readonly spacingMs = 150) {}
   /** Trần số yêu cầu cùng lúc (mặc định 6; chỉnh bằng localStorage "mediTrans_proxyMaxConcurrent", 1–10). */
   get max(): number {
     try {
       const v = parseInt((typeof window !== 'undefined' && localStorage.getItem('mediTrans_proxyMaxConcurrent')) || '', 10);
-      if (v >= 1 && v <= 10) return v;
+      if (v >= 1 && v <= 12) return v;
     } catch { /* ignore */ }
-    return 6;
+    return 8; // v8.4: mặc định 8 (gpt-4.1-mini trả lời nhanh, proxy chịu tốt); tự hạ khi bị 429
   }
   private get cap(): number {
     if (Date.now() > this.learnedUntil) this.learnedCap = Infinity;
@@ -77,7 +78,7 @@ class ProxyGate {
   /** Thành công liên tục → tăng dần số yêu cầu cùng lúc (tới trần). */
   onSuccess() {
     this.overloads = 0;
-    if (++this.okStreak >= 4 && this.limit < this.cap) { this.limit++; this.okStreak = 0; this.wakeAll(); }
+    if (++this.okStreak >= 3 && this.limit < this.cap) { this.limit++; this.okStreak = 0; this.wakeAll(); }
   }
   /** Quá tải → giảm một nửa số yêu cầu cùng lúc và tạm dừng theo Retry-After / lùi dần 3 → 6 → 12 → 24 giây. */
   /** Proxy lỗi tạm thời (5xx, rớt mạng) — không phải do gửi quá nhiều → chỉ dừng ngắn, không hạ ngưỡng. */
@@ -104,6 +105,10 @@ const proxyGate = new ProxyGate();
 export function getProxyMaxConcurrent(): number { return proxyGate.max; }
 /** Số yêu cầu proxy đang được phép chạy cùng lúc (tự điều chỉnh theo tình trạng proxy). */
 export function getProxyCurrentConcurrent(): number { return proxyGate.current; }
+/** Đặt trần số yêu cầu đồng thời qua proxy (Cài đặt). */
+export function setProxyMaxConcurrent(n: number) {
+  try { localStorage.setItem('mediTrans_proxyMaxConcurrent', String(Math.max(1, Math.min(12, Math.round(n))))); } catch { /* ignore */ }
+}
 
 /** Phản hồi proxy có phải do quá tải / giới hạn tốc độ không. */
 function isOverloadStatus(status: number, text = ''): boolean {
@@ -308,13 +313,61 @@ export class GeminiService implements TranslationService {
     if (clean === 'system_proxy') return true;
     // Key Google (AIzaSy…) LUÔN gọi thẳng Google, kể cả khi lỡ gắn nhãn ShopAIKey
     if (clean.startsWith('AIzaSy')) return false;
-    const known = GeminiService.keyTypes.get(clean);
-    if (known) return known === 'proxy';
-    const eng = (engineOrModel || '').toLowerCase();
-    if (clean.startsWith('sk-') || clean.startsWith('sh-') || clean.startsWith('sai-')) return true;
-    if (eng === 'shopaikey' || eng.includes('openai') || eng.includes('proxy')) return true;
-    if (!clean.startsWith('AIzaSy') && clean.length >= 16 && (eng === 'shopaikey' || eng.includes('proxy'))) return true;
-    return false;
+    // v8.5: web chỉ dùng ShopAIKey → mọi key không phải AIzaSy… đều gọi qua ShopAIKey (không phụ thuộc tiền tố sk-)
+    return true;
+  }
+
+  /** Câu báo lỗi 403 từ máy chủ key hệ thống (đọc lý do trong JSON trả về). */
+  private static systemProxyError(errText: string): string {
+    let msg = '';
+    try { msg = String(JSON.parse(errText)?.error || ''); } catch { msg = errText || ''; }
+    msg = msg.trim();
+    if (!msg) return "Tài khoản của bạn chưa đủ Level 2 hoặc đã hết hạn.";
+    return msg.slice(0, 200);
+  }
+
+  /** Phân loại lỗi ShopAIKey: key sai/bị khoá, hết lượt/bận, model không có, hay lỗi khác. */
+  public static classifyProxyError(msg: string): { kind: 'key' | 'quota' | 'model' | 'level' | 'other'; text: string } {
+    const m = String(msg || '');
+    const code = Number((m.match(/\((\d{3})\)/) || [])[1] || 0);
+    if (/Level 2|bị khóa|đăng nhập/i.test(m)) return { kind: 'level', text: m.slice(0, 200) };
+    if (/Token xác thực|Thiếu token/i.test(m)) return { kind: 'level', text: 'Phiên đăng nhập đã hết hạn — hãy đăng xuất rồi đăng nhập lại.' };
+    if (/chưa có API Key khả dụng/i.test(m)) { try { window.dispatchEvent(new Event('meditrans:system-pool-changed')); } catch { /* */ } }
+    if (/chưa có API Key khả dụng/i.test(m)) return { kind: 'other', text: 'Kho key hệ thống chưa có key ShopAIKey nào đang bật (Quản trị viên cần thêm/bật key).' };
+    if (/bị ShopAIKey từ chối/i.test(m)) return { kind: 'other', text: 'Tất cả key trong kho key hệ thống bị ShopAIKey từ chối (sai key / hết số dư) — Quản trị viên cần kiểm tra.' };
+    if (/Firebase Admin|Service Account/i.test(m)) return { kind: 'other', text: 'Máy chủ chưa cấu hình Firebase Admin — key hệ thống chưa chạy được.' };
+    if (code === 401 || code === 403 || /invalid.{0,20}(api.?key|token)|incorrect api key|unauthori[sz]ed|api key.{0,20}(invalid|disabled|expired)/i.test(m))
+      return { kind: 'key', text: `Key sai, đã bị khoá hoặc hết hạn trên ShopAIKey (${code || 'từ chối'}).` };
+    if (code === 402 || /insufficient|quota|balance|credit|số dư/i.test(m))
+      return { kind: 'quota', text: 'Key hợp lệ nhưng đã hết số dư / hạn mức trên ShopAIKey.' };
+    if (code === 429 || code >= 500 || /bận|quá tải|overload|rate.?limit/i.test(m))
+      return { kind: 'quota', text: 'Key hợp lệ nhưng ShopAIKey đang bận / hết lượt tạm thời. Thử lại sau ít phút.' };
+    if (code === 404 || /model.{0,40}(not.?found|not exist|unavailable|không có)|PROXY_MODEL_UNAVAILABLE/i.test(m))
+      return { kind: 'model', text: `Key hợp lệ nhưng model dịch không dùng được với key này (${m.slice(0, 120)}).` };
+    if (/Failed to fetch|NetworkError|network/i.test(m)) return { kind: 'other', text: 'Không kết nối được ShopAIKey (lỗi mạng hoặc sai Base URL).' };
+    return { kind: 'other', text: m.slice(0, 200) || 'Lỗi không xác định' };
+  }
+
+  /**
+   * Model qua proxy trả lời nhanh và KHÔNG có phần "suy nghĩ" (vd. gpt-4.1-mini) → chia nhỏ & chạy nhiều luồng hơn
+   * gần như không tốn thêm token (chỉ lặp lại hướng dẫn hệ thống ngắn), thời gian chờ giảm rõ.
+   */
+  public isFastProxyModel(engine?: string): boolean {
+    if (!this.usesProxy()) return false;
+    const m = this.mapModelForOpenAI(engine || this.modelName);
+    return !GeminiService.reasoningFor(m);
+  }
+  /** Cách chia trang dịch thường thành các phần chạy song song. */
+  public parallelPlan(engine?: string): { minChars: number; maxParts: number; targetChars: number } {
+    return this.isFastProxyModel(engine)
+      ? { minChars: 2200, maxParts: 4, targetChars: 1600 }
+      : { minChars: 5000, maxParts: 2, targetChars: 3500 };
+  }
+  /** Cách chia khối chữ (giữ định dạng) thành các phần gửi song song trong một trang. */
+  public layoutChunkPlan(): { chars: number; blocks: number; parallel: number } {
+    return this.isFastProxyModel(GeminiService.LAYOUT_MODEL)
+      ? { chars: 2000, blocks: 25, parallel: 4 }
+      : { chars: 3500, blocks: 40, parallel: 3 };
   }
 
   /** Có key nào đi qua proxy (ShopAIKey / key hệ thống) không → dịch hàng loạt phải giới hạn số luồng. */
@@ -659,10 +712,12 @@ export class GeminiService implements TranslationService {
     }
 
     if (!response.ok) {
-      if (response.status === 403 && key.trim() === 'system_proxy') {
-        throw new Error("Tài khoản của bạn chưa đủ Level 2 hoặc đã hết hạn.");
-      }
       const errText = await response.text();
+      // Kho key hệ thống trống / đã bị tắt → báo giao diện cập nhật trạng thái "[Hệ thống] ShopAIKey"
+      if (response.status === 503 && key.trim() === 'system_proxy') { try { window.dispatchEvent(new Event('meditrans:system-pool-changed')); } catch { /* */ } }
+      if (response.status === 403 && key.trim() === 'system_proxy') {
+        throw new Error(GeminiService.systemProxyError(errText));
+      }
       if (response.status === 400 && GeminiService.negotiateReasoning(mappedModel, body.reasoning_effort, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (400): đổi mức suy nghĩ`);
         if (GeminiService.noteProxyModelError(mappedModel, response.status, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (${response.status}): ${errText.slice(0, 200)}`);
       if (isRateLimit(response.status, errText)) proxyGate.onOverload(retryAfterMs(response));
@@ -805,10 +860,13 @@ export class GeminiService implements TranslationService {
       }
 
       if (!response.ok) {
-        if (response.status === 403 && key.trim() === 'system_proxy') {
-          throw new Error("Tài khoản của bạn chưa đủ Level 2 hoặc đã hết hạn.");
-        }
         const errText = await response.text();
+        // Kho key hệ thống trống / đã bị tắt → báo giao diện cập nhật trạng thái "[Hệ thống] ShopAIKey"
+        if (response.status === 503 && key.trim() === 'system_proxy') { try { window.dispatchEvent(new Event('meditrans:system-pool-changed')); } catch { /* */ } }
+        if (response.status === 403 && key.trim() === 'system_proxy') {
+          // Báo đúng lý do máy chủ trả về (chưa đủ Level / bị khoá / key ShopAIKey bị từ chối) thay vì luôn báo "chưa đủ Level"
+          throw new Error(GeminiService.systemProxyError(errText));
+        }
         if (response.status === 400 && GeminiService.negotiateReasoning(mappedModel, body.reasoning_effort, errText)) throw new Error(`PROXY_MODEL_UNAVAILABLE (400): đổi mức suy nghĩ`);
         // Proxy không nhận response_format → ghi nhớ, gửi lại ngay không kèm tham số này (chỉ mất 1 yêu cầu mỗi phiên)
         if (response.status === 400 && body.response_format && !/api.?key|unauthor|invalid.*key/i.test(errText)) {
@@ -890,78 +948,64 @@ export class GeminiService implements TranslationService {
    * Dịch thử bằng một key. type: loại key theo kho key ('proxy' = ShopAIKey/OpenAI, 'google' = Gemini API);
    * bỏ trống thì đoán theo tiền tố key.
    */
-  public async testSingleKeyTranslation(key: string, sampleText: string = "Hello world! Testing translation AI.", type?: 'proxy' | 'google'): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number; model?: string; errorKind?: string }> {
+  public async testSingleKeyTranslation(key: string, sampleText: string = "Hello world! Testing translation AI.", _type?: 'proxy' | 'google'): Promise<{ success: boolean; resultText?: string; error?: string; latencyMs?: number; model?: string; errorKind?: string }> {
     if (!key || !key.trim()) return { success: false, error: "API Key trống" };
     const cleanKey = key.trim();
-    if (cleanKey === 'system_proxy' || cleanKey.startsWith('system_')) {
-      return { success: true, resultText: "Key hệ thống sẵn sàng", latencyMs: 0 };
+    if (cleanKey.startsWith('AIzaSy')) {
+      return { success: false, error: 'Đây là key Google Gemini — web chỉ còn dùng key ShopAIKey. Hãy xoá key này và thêm key ShopAIKey.', errorKind: 'key' };
     }
-    if (type) GeminiService.registerKeyTypes([{ value: cleanKey, isProxy: type === 'proxy' }]);
+    const isSystem = cleanKey === 'system_proxy' || cleanKey.startsWith('system_');
     const startTime = Date.now();
     const prompt = `Dịch câu sau sang tiếng Việt ngắn gọn: "${sampleText}"`;
     const systemInstruction = "Bạn là dịch giả y khoa. Dịch chính xác và ngắn gọn.";
-
-    try {
-      if (this.isCurrentKeyProxy(cleanKey)) {
-        const model = this.mapModelForOpenAI(this.modelName);
-        const text = await this.callOpenAINonStream(cleanKey, this.modelName, systemInstruction, prompt, "", undefined, 256);
-        return { success: true, resultText: text || "Thành công", latencyMs: Date.now() - startTime, model };
+    // v8.5: dịch thử THẬT qua ShopAIKey (kể cả key hệ thống — trước đây key hệ thống luôn báo "sẵn sàng" mà không thử)
+    const k = isSystem ? 'system_proxy' : cleanKey;
+    const model = this.mapModelForOpenAI(this.modelName);
+    let lastMsg = '';
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const text = await this.callOpenAINonStream(k, this.modelName, systemInstruction, prompt, "", undefined, 256);
+        if (!text || !text.trim()) { lastMsg = 'ShopAIKey trả về nội dung trống'; continue; }
+        GeminiService.lastSuccessfulKey = k;
+        return { success: true, resultText: text.trim(), latencyMs: Date.now() - startTime, model: this.mapModelForOpenAI(this.modelName) };
+      } catch (err: any) {
+        lastMsg = String(err?.message || '');
+        // Lần đầu có thể chỉ là dò mức "suy nghĩ"/tham số của model → gửi lại ngay
+        if (/PROXY_MODEL_UNAVAILABLE \(400\)/.test(lastMsg) && attempt < 2) continue;
+        break;
       }
-      const r = await this.probeGoogleKey(cleanKey, `${systemInstruction}\n${prompt}`);
-      const latencyMs = Date.now() - startTime;
-      if (r.ok) {
-        const base = this.mapModelForGoogle(this.modelName);
-        const note = r.model !== base ? ` (key không dùng được ${base} → tự dùng ${r.model})` : '';
-        return { success: true, resultText: (r.text || "Thành công") + note, latencyMs, model: r.model };
-      }
-      return { success: false, error: GeminiService.friendlyKeyError(r.kind, r.error || ''), latencyMs, errorKind: r.kind };
-    } catch (err: any) {
-      const msg = String(err?.message || '');
-      // ShopAIKey: 429 / 5xx = proxy bận, key vẫn hợp lệ
-      const busy = /\((429|5\d\d)\)/.test(msg);
-      return { success: false, error: busy ? 'Key hợp lệ nhưng proxy đang bận / hết lượt. Thử lại sau ít phút.' : (msg || "Lỗi không xác định"), errorKind: busy ? 'quota' : 'other' };
     }
+    const c = GeminiService.classifyProxyError(lastMsg);
+    return { success: false, error: c.text, errorKind: c.kind, latencyMs: Date.now() - startTime, model };
   }
 
   /**
    * Kiểm tra key còn dùng được không (để đánh dấu "error" trong kho key).
-   * Key chỉ tạm hết lượt (429) vẫn là key TỐT → trả về true (trước đây bị đánh dấu hỏng).
+   * Chỉ key bị ShopAIKey từ chối (401/403) mới là hỏng; hết lượt (429) / máy chủ bận (5xx) / lỗi mạng vẫn coi là tốt.
    */
   public async testSingleKey(key: string): Promise<boolean> {
     if (!key || !key.trim()) return false;
     const cleanKey = key.trim();
-    if (cleanKey === 'system_proxy' || cleanKey.startsWith('system_')) {
-      return true;
-    }
-    if (this.isCurrentKeyProxy(cleanKey)) {
-      try {
-        const cleanBaseUrl = this.getProxyBaseUrl();
-        const response = await fetch(cleanBaseUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${cleanKey}`
-          },
-          body: JSON.stringify({
-            model: this.mapModelForOpenAI(this.modelName),
-            messages: [{ role: 'user', content: 'hi' }],
-            max_tokens: 5
-          })
-        });
-        // 429 / 5xx = proxy bận, key vẫn hợp lệ; chỉ 401/403 mới là key hỏng
-        return response.ok || response.status === 429 || response.status >= 500;
-      } catch (e) {
-        return true; // lỗi mạng: không kết luận key hỏng
-      }
-    }
+    if (cleanKey.startsWith('AIzaSy')) return false; // key Google không còn dùng
+    if (cleanKey === 'system_proxy' || cleanKey.startsWith('system_')) return true;
     try {
-      const r = await this.probeGoogleKey(cleanKey, 'Hi');
-      return r.ok || r.kind === 'quota' || r.kind === 'other';
-    } catch (e: any) {
-      console.warn(`[GeminiService] testSingleKey error for ...${cleanKey.slice(-4)}:`, e?.message || e);
-      return true;
+      const response = await fetch(this.getProxyBaseUrl(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cleanKey}` },
+        body: JSON.stringify({
+          model: this.mapModelForOpenAI(this.modelName),
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 5
+        })
+      });
+      return !(response.status === 401 || response.status === 403);
+    } catch (e) {
+      return true; // lỗi mạng: không kết luận key hỏng
     }
   }
+
+  /** Key vừa dịch thành công gần nhất (để giao diện hiển thị "key đang hoạt động"). */
+  public static getLastSuccessfulKey(): string | null { return GeminiService.lastSuccessfulKey; }
 
   public getStatusInfo() {
     const total = this.apiKeys.length;
@@ -1392,12 +1436,13 @@ Example of the expected shape:
    */
   async *translateMarkdownPageStream(markdown: string, pageNumber: number, signal?: AbortSignal, model?: string): AsyncGenerator<string> {
     const requestModel = model || this.modelName;
-    const systemInstruction = `You are an expert English→Vietnamese medical translator. The user sends one page of a medical document as Markdown extracted from the PDF text layer; its structure is already correct.
+    let systemInstruction = `You are an expert English→Vietnamese medical translator. The user sends one page of a medical document as Markdown extracted from the PDF text layer; its structure is already correct.
 Rules:
 1. Translate ALL text into accurate, natural Vietnamese medical language. Keep only abbreviations, drug/gene names, numbers and units as written. "Figure n" → "Hình n", "Table n" → "Bảng n".
 2. Keep the Markdown EXACTLY: same headings (#), list markers and indentation, **bold**/*italic* markers, line breaks, blank lines and order. Do not merge, split, add or drop lines. ALL-CAPS headings stay ALL-CAPS.
 3. Output only the translated Markdown — no preamble, notes or code fences. Symbols as plain Unicode, never LaTeX.`;
     const prompt = markdown;
+    systemInstruction += glossaryPrompt(markdown); // v9.4: thuật ngữ bắt buộc (chỉ những từ có trong trang)
     const MAX_RETRIES = 5;
     let retryCount = 0;
     while (retryCount <= MAX_RETRIES) {
@@ -1464,51 +1509,108 @@ Rules:
    * OCR + dịch giữ định dạng cho trang scan (MỘT lần gọi): trả về từng khối chữ với vị trí trên ảnh,
    * chữ gốc và bản dịch tiếng Việt. Dùng chung hệ thống key / xoay key / key hệ thống của web.
    */
-  async ocrLayoutBlocks(imageDataUrl: string, signal?: AbortSignal, opts: { mode?: 'full' | 'extra'; regions?: number[][] } = {}): Promise<any[]> {
+  async ocrLayoutBlocks(imageDataUrl: string, signal?: AbortSignal, opts: { mode?: 'full' | 'extra'; regions?: number[][]; retryEmpty?: boolean } = {}): Promise<any[]> {
     const extra = opts.mode === 'extra';
     const scope = extra
-      ? `This page already has a normal text layer. Return ONLY: (1) text that is part of the IMAGES/photos/scans/diagrams inside these regions (box_2d [ymin,xmin,ymax,xmax] 0-1000): ${JSON.stringify(opts.regions || [])} — e.g. labels, annotations, measurements, words burned into ultrasound/X-ray/CT images, legends inside figures; and (2) any text rotated 90° (vertical text) anywhere on the page. Do NOT return the normal horizontal page text (paragraphs, headings, captions outside the images). If there is no such text, return {"blocks":[]}.`
-      : `Detect EVERY text block on the page image: titles, headings, paragraphs, each list item (separately), figure/table captions, each table cell (separately), labels and text inside images/figures, vertical (rotated) text, running headers, footers, page numbers. Treat each text column separately. Do NOT merge blocks from different columns.`;
+      ? `This page already has a normal text layer. Return ONLY: (1) text that is part of the IMAGES/photos/scans/diagrams inside these regions (box_2d [ymin,xmin,ymax,xmax] 0-1000): ${JSON.stringify(opts.regions || [])} — e.g. labels, annotations, measurements, words burned into ultrasound/X-ray/CT images, legends inside figures. Return EVERY label of a diagram/drawing (hand-written labels included), each label as its own block with a tight box around only that label's letters (never merge neighbouring labels, never a box covering arrows or the drawing); text written diagonally/slanted: give \"dir\":\"diag\". And (2) any text rotated 90° (vertical text) anywhere on the page. Do NOT return the normal horizontal page text (paragraphs, headings, captions outside the images). If there is no such text, return {"blocks":[]}.`
+      : `Detect EVERY text block on the page image: titles, headings, paragraphs, each list item (separately), figure/table captions, each table cell (separately), labels and text inside images/figures, vertical (rotated) text, running headers, footers, page numbers. Treat each text column separately. Do NOT merge blocks from different columns. Pages that are mostly images (X-ray, mammogram, ultrasound, photos) STILL have text: figure captions ("Figure 1 – …"), side tabs with vertical words, running headers/footers, page numbers — return all of them.${opts.retryEmpty ? ' IMPORTANT: a previous attempt wrongly returned no blocks for this page. Look carefully at the whole image, especially the small caption lines below each picture, the vertical tab on the left/right edge and the footer; return every readable text block.' : ''}`;
     const systemInstruction = `You are an OCR engine and an English→Vietnamese medical translator for book/journal pages (often scanned).
 ${scope}
 For each block return:
 - "box_2d": [ymin, xmin, ymax, xmax] integers 0-1000 (relative to image height/width) tightly enclosing the block's text
 - "text": the exact original text (join lines with single spaces, remove end-of-line hyphenation). Table-of-contents entries: one block per entry, keep the leader dots as " ....... " followed by the page number (e.g. "V. GUIDANCE ....... 788")
-- "v": natural, accurate Vietnamese medical translation of "text" (for table-of-contents entries end with " ....... " and the same page number) (keep numbers, units, symbols, drug/gene names, abbreviations, person names, journal names, URLs, DOIs unchanged; Figure n → Hình n, Table n → Bảng n; ALL-CAPS stays ALL-CAPS; reference-list entries and page numbers: return unchanged; no Markdown, no line breaks)
+- "v": natural, accurate Vietnamese medical translation of "text" (for table-of-contents entries end with " ....... " and the same page number) (keep numbers, units, symbols, drug/gene names, abbreviations, person names, journal names, URLs, DOIs unchanged; Figure n → Hình n, Table n → Bảng n; ALL-CAPS stays ALL-CAPS, but when only SOME words are capitalized for emphasis uppercase only their Vietnamese translation ("OVAL mass" → "Khối BẦU DỤC"); join words hyphenated at line ends ("Guid-ance" → "Guidance"); reference-list entries and page numbers: return unchanged; no Markdown, no line breaks)
 - "lines": number of text lines of the block on the image
 - "bold", "italic": true if most of the block is bold / italic
-- "serif": true if the font is serif (Times-like), false if sans-serif
+- "bold_lead": true if ONLY the leading label of the block is bold (e.g. "Figure 1" / "Table 2" at the start of a caption)
+- "serif": true ONLY if the letters clearly have serifs (Times New Roman-like); modern sans fonts (Arial, Helvetica, Inter, Roboto, Calibri) → false. Use the same value for all blocks that share the same font
 - "align": "left" | "center" | "right" | "justify"
 - "dir": "up" if the text is rotated and reads bottom-to-top, "down" if it reads top-to-bottom; omit for normal horizontal text. For rotated text, "lines" counts the lines across the block.
-Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bottom).`;
+Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bottom).
+Boxes must enclose the text itself: a caption below a picture gets the box of the caption lines, never a box on the picture. Grey/blank rectangles are hidden pictures: ignore them.${extra ? '' : glossaryCompact()}`;
     const prompt = extra
       ? 'Return only text inside the given image regions and rotated text, with boxes and Vietnamese translations. JSON only.'
       : 'OCR this page into text blocks with boxes and Vietnamese translations. JSON only.';
+    // v8.5: đọc JSON OCR chịu lỗi — bỏ ```json, chấp nhận tên trường khác (bbox/box, t/original, vi/translation),
+    // toạ độ 0–1, JSON bị cắt cụt giữa chừng (lấy các khối còn nguyên). Trang không có chữ → [] (không còn là lỗi).
+    const pickObjects = (txt: string): any[] => {
+      const objs: any[] = [];
+      let depth = 0, start = -1, inStr = false, esc = false;
+      for (let k = 0; k < txt.length; k++) {
+        const ch = txt[k];
+        if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+        if (ch === '"') { inStr = true; continue; }
+        if (ch === '{') { depth++; if (depth === 2) start = k; }
+        else if (ch === '}') {
+          if (depth === 2 && start >= 0) { try { objs.push(JSON.parse(txt.slice(start, k + 1))); } catch { /* bỏ khối hỏng */ } start = -1; }
+          depth = Math.max(0, depth - 1);
+        }
+      }
+      return objs;
+    };
     const parse = (raw: string): any[] => {
-      let txt = (raw || '').replace(/```json|```/gi, '').trim();
+      let txt = (raw || '').replace(/```(?:json)?/gi, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').trim();
+      let arr: any[] | null = null;
       const a = txt.indexOf('{'), b = txt.lastIndexOf('}');
       const a2 = txt.indexOf('[');
-      if (a2 >= 0 && (a < 0 || a2 < a)) txt = txt.slice(a2, txt.lastIndexOf(']') + 1);
-      else if (a >= 0 && b > a) txt = txt.slice(a, b + 1);
-      const d = JSON.parse(txt);
-      const arr: any[] = Array.isArray(d) ? d : (d.blocks || d.t || []);
-      const out = arr
-        .filter(o => o && Array.isArray(o.box_2d || o.box) && typeof o.text === 'string' && o.text.trim())
-        .map(o => ({
-          box_2d: (o.box_2d || o.box).map(Number),
-          text: String(o.text),
-          v: typeof o.v === 'string' ? cleanLatex(o.v).replace(/\*\*/g, '').replace(/\s*\n\s*/g, ' ').trim() : undefined,
-          lines: Number(o.lines) || undefined,
-          bold: !!o.bold, italic: !!o.italic, serif: o.serif !== false,
-          align: typeof o.align === 'string' ? o.align : undefined,
-          dir: o.dir === 'up' || o.dir === 'down' ? o.dir : undefined,
-        }));
-      if (!out.length && !extra) throw new Error('OCR không trả về khối chữ hợp lệ.');
-      return out;
+      try {
+        let body = txt;
+        if (a2 >= 0 && (a < 0 || a2 < a)) body = txt.slice(a2, txt.lastIndexOf(']') + 1);
+        else if (a >= 0 && b > a) body = txt.slice(a, b + 1);
+        const d = JSON.parse(body);
+        arr = Array.isArray(d) ? d : (d.blocks || d.t || d.items || d.result || null);
+        // v9.5: AI đặt tên mảng khác ("text_blocks", "data", "page": {"blocks": …}) → trước đây thành [] = "trang không có chữ"
+        if (!Array.isArray(arr) && d && typeof d === 'object') {
+          const findArr = (o: any, depth: number): any[] | null => {
+            for (const v of Object.values(o)) {
+              if (Array.isArray(v) && v.some(x => x && typeof x === 'object')) return v;
+            }
+            if (depth > 0) for (const v of Object.values(o)) if (v && typeof v === 'object' && !Array.isArray(v)) { const r = findArr(v, depth - 1); if (r) return r; }
+            return null;
+          };
+          arr = findArr(d, 2) || (d.text && (d.box_2d || d.bbox || d.box) ? [d] : []);
+        }
+      } catch {
+        // JSON hỏng / bị cắt cụt → nhặt từng khối {...} còn nguyên
+        const wrapped = a2 >= 0 && (a < 0 || a2 < a) ? '{"x":' + txt.slice(a2) : txt.slice(Math.max(0, a));
+        arr = pickObjects(wrapped);
+        if (!arr.length && !/"blocks"\s*:\s*\[\s*\]/.test(txt)) throw new Error('OCR trả về dữ liệu không đọc được (JSON lỗi).');
+      }
+      const num4 = (o: any): number[] | null => {
+        let bx = o.box_2d ?? o.box ?? o.bbox ?? o.box2d ?? o.bounding_box ?? o.bbox_2d ?? o.coordinates ?? o.position;
+        if (typeof bx === 'string') bx = (bx.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+        if (bx && !Array.isArray(bx) && typeof bx === 'object') bx = [bx.ymin ?? bx.y0 ?? bx.top, bx.xmin ?? bx.x0 ?? bx.left, bx.ymax ?? bx.y1 ?? bx.bottom, bx.xmax ?? bx.x1 ?? bx.right];
+        if (!Array.isArray(bx) || bx.length < 4) return null;
+        let n = bx.slice(0, 4).map(Number);
+        if (n.some(x => !Number.isFinite(x))) return null;
+        if (n.every(x => x >= 0 && x <= 1.0001)) n = n.map(x => Math.round(x * 1000)); // toạ độ 0–1
+        return n;
+      };
+      const strOf = (...vals: any[]) => { for (const v of vals) if (typeof v === 'string' && v.trim()) return v; return ''; };
+      return (arr || [])
+        .map(o => {
+          if (!o || typeof o !== 'object') return null;
+          const box = num4(o);
+          const text = strOf(o.text, o.original, o.source, o.src, o.en, o.content, o.caption, o.label);
+          if (!box || !text.trim()) return null;
+          if (o.dir === 'diag') return null; // v9.8: chữ viết chéo → giữ bản gốc (vẽ ngang sẽ đè lên hình)
+          const vRaw = strOf(o.v, o.vi, o.translation, o.translated, o.vietnamese, o.vietnamese_translation, o.text_vi, o.vi_text);
+          return {
+            box_2d: box,
+            text: String(text),
+            v: vRaw ? cleanLatex(vRaw).replace(/\*\*/g, '').replace(/\s*\n\s*/g, ' ').trim() : undefined,
+            lines: Number(o.lines) || undefined,
+            bold: !!o.bold, italic: !!o.italic, serif: o.serif === true || o.serif === 'true', bold_lead: !!o.bold_lead,
+            align: typeof o.align === 'string' ? o.align : undefined,
+            dir: o.dir === 'up' || o.dir === 'down' ? o.dir : undefined,
+          };
+        })
+        .filter(Boolean) as any[];
     };
 
     const MAX_RETRIES = 4;
-    for (let retry = 0; retry <= MAX_RETRIES; retry++) {
+    let parseFails = 0;
+    for (let retry = 0; retry <= MAX_RETRIES + 2; retry++) {
       if (signal?.aborted) throw new Error('Translation aborted');
       let ai: any, key: string;
       try {
@@ -1519,7 +1621,7 @@ Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bo
       try {
         let raw = '';
         if (this.isCurrentKeyProxy(key)) {
-          raw = await this.callOpenAINonStream(key, GeminiService.OCR_MODEL, systemInstruction, prompt, imageDataUrl, signal, 16384);
+          raw = await this.callOpenAINonStream(key, GeminiService.OCR_MODEL, systemInstruction, prompt, imageDataUrl, signal, 16384, !GeminiService.jsonModeUnsupported);
         } else {
           const gm = this.googleModel(key, this.modelName);
           const genModel = ai.getGenerativeModel({
@@ -1533,11 +1635,19 @@ Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bo
           ], signal ? ({ signal } as any) : undefined);
           raw = (await result.response).text() || '';
         }
-        const parsed = parse(raw);
+        let parsed: any[];
+        try {
+          parsed = parse(raw);
+        } catch (pe) {
+          // AI trả JSON hỏng (thường do bị cắt cụt) → thử lại cùng key tối đa 2 lần trước khi bỏ cuộc
+          if (parseFails++ < 2) { console.warn('[MediTrans] OCR trả JSON lỗi, thử lại…', String(raw).slice(0, 200)); continue; }
+          throw pe;
+        }
         GeminiService.lastSuccessfulKey = key;
         return parsed;
       } catch (error: any) {
         if (signal?.aborted) throw new Error('Translation aborted');
+        if (/JSON lỗi/.test(String(error?.message))) throw error;
         if (!this.isCurrentKeyProxy(key)) {
           if (GeminiService.handleThinkingError(this.googleModel(key, this.modelName), error)) continue;
           const ge = this.onGoogleError(key, this.modelName, error);
@@ -1625,13 +1735,14 @@ Return ONLY JSON: {"columns":N,"splits":[...]} where N is 1, 2 or 3 and splits a
   ): Promise<Record<string, string>> {
     if (!blocks.length) return {};
 
-    const systemInstruction = `English→Vietnamese medical translator. Input: JSON text blocks extracted from one PDF page (reading order). Translate each block into natural, accurate Vietnamese medical language, consistent across blocks; it will be redrawn in the same box, so keep it concise and add nothing.
-Keep unchanged: numbers, units, symbols (± ≤ ≥ × µ °), drug/gene names, abbreviations, superscripts (¹²³), person names, journal names, URLs, DOIs, emails. Reference-list entries: return unchanged.
-Some blocks mark differently-styled words (bold/colored) with tags like <1>Right Ventricle</1>: put the same tag pair around the corresponding Vietnamese words (e.g. <1>Tâm thất phải</1>); keep every tag, add no new ones. Translate EVERY English word, including words outside the tags and in titles (e.g. "Atlas of <1>Full Breast Ultrasonography</1>" → "<1>Atlas Siêu âm Toàn bộ Vú</1>" or "Atlas <1>Siêu âm Toàn bộ Vú</1>"); only person names, journal names and the items listed above stay unchanged.
-Figure n → Hình n, Table n → Bảng n. ALL-CAPS headings stay ALL-CAPS. No Markdown, no LaTeX, no line breaks; inside "v" use “ ” instead of straight double quotes.
+    let systemInstruction = `English→Vietnamese medical translator. Input: JSON text blocks extracted from one PDF page (reading order). A sentence may continue from one block into the next: translate each block's own words in its own "v" — never move, merge or repeat text across blocks. Translate each block into natural, accurate Vietnamese medical language, consistent across blocks; it will be redrawn in the same box, so keep it concise and add nothing.
+Keep unchanged: numbers, units, symbols (± ≤ ≥ × µ °), drug/gene names, abbreviations, superscripts (¹²³), person names, journal names, URLs, DOIs, emails. Reference-list entries: return unchanged, but ALWAYS translate section headings (References → Tài liệu tham khảo, Conclusions → Kết luận).
+Some blocks mark differently-styled words (bold/colored) with numbered tags <n>…</n>: put the same tag pair ONLY around the Vietnamese words that translate exactly the words inside that tag in the source — never around any other word, even if it is the same term elsewhere in the block (e.g. "the <1>bicuspid</1> valve" → "van <1>hai lá</1>"; colored figure numbers / citations: "(Figs. <1>3.2</1>, <1>3.3</1>) [<1>3</1>]" → "(Hình <1>3.2</1>, <1>3.3</1>) [<1>3</1>]"); keep EVERY tag exactly as many times as in the source, add no new ones; a block without tags gets no tags. Translate EVERY English word, including words outside the tags and in titles (e.g. "Atlas of <1>Full Breast Ultrasonography</1>" → "<1>Atlas Siêu âm Toàn bộ Vú</1>" or "Atlas <1>Siêu âm Toàn bộ Vú</1>"); only person names, journal names and the items listed above stay unchanged.
+Figure n → Hình n, Table n → Bảng n. ALL-CAPS headings stay ALL-CAPS. When only SOME words are capitalized for emphasis, uppercase only the Vietnamese words that translate them ("OVAL mass" → "Khối BẦU DỤC", "LOBULATED mass" → "Khối DẠNG THÙY"), never the whole phrase. No Markdown, no LaTeX, no line breaks; inside "v" use “ ” instead of straight double quotes.
 Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
 
     const prompt = `${JSON.stringify(blocks.map(b => ({ id: b.id, text: b.text })))}`;
+    systemInstruction += glossaryPrompt(blocks.map(b => b.text).join('\n')); // v9.4: thuật ngữ bắt buộc
 
     const parse = (raw: string): Record<string, string> => {
       const arr = parseLayoutJson(raw);
