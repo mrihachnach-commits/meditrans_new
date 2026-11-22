@@ -254,6 +254,19 @@ const KNOWN_SANS_RE = /sans|arial|helvet|avenir|myriad|frutiger|univers|futura|g
 
 function styleResolver(page: any, styles: Record<string, any>) {
   const cache = new Map<string, FontStyleInfo>();
+  // v10.1: bộ font có nhiều độ đậm (Light / Regular / Medium / Bold): chữ thân bài dùng bản Light thì bản Medium
+  // (tên bài mục lục, nhãn hình, tiêu đề phụ) trông đậm rõ rệt → vẽ đậm. Trước đây Medium bị coi là chữ thường.
+  let pageHasLight = false;
+  const lighterFamilies = new Set<string>();
+  try {
+    for (const fn of Object.keys(styles || {})) {
+      const f = page.commonObjs?.has?.(fn) ? page.commonObjs.get(fn) : null;
+      const nm = String(f?.name || '').replace(/^[A-Z]{6}\+/, '');
+      if (/light|thin|book/i.test(nm)) { pageHasLight = true; break; }
+      // cùng họ font có bản thường (không Medium/Bold) → Medium là bản đậm hơn rõ rệt
+      if (nm && !/medium|bold|black|heavy|semi|demi/i.test(nm)) lighterFamilies.add(nm.split(/[-,]/)[0].toLowerCase());
+    }
+  } catch { /* */ }
   return (fontName: string): FontStyleInfo => {
     const hit = cache.get(fontName);
     if (hit) return hit;
@@ -276,7 +289,7 @@ function styleResolver(page: any, styles: Record<string, any>) {
       /times|serif|georgia|minion|garamond|cambria|palatino|charter|baskerville|mincho|stix|cmr\d/i.test(name) &&
       !/sans/i.test(name);
     const info: FontStyleInfo = {
-      bold: boldFlag || /bold|black|heavy|semibold|demi/i.test(all),
+      bold: boldFlag || /bold|black|heavy|semibold|demi/i.test(all) || (/medium/i.test(name) && (pageHasLight || lighterFamilies.has(name.replace(/^[A-Z]{6}\+/, '').split(/[-,]/)[0].toLowerCase()))),
       italic: italicFlag || /italic|oblique/i.test(all),
       // pdf.js đoán "serif" theo cờ font, nhiều font không chân (Avenir, Myriad, Frutiger…) bị gắn nhầm → loại trừ theo tên
       serif: nameLooksSerif || (family === 'serif' && !KNOWN_SANS_RE.test(name)),
@@ -1289,7 +1302,7 @@ function openLayoutDBOnce(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v27'; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
+const ENGINE_VERSION = 'v29'; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch

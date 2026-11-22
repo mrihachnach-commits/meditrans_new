@@ -1,4 +1,4 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, onLog } from 'firebase/app';
 import { 
   getAuth, 
   signOut, 
@@ -30,8 +30,10 @@ import {
   Timestamp, 
   getDocFromServer,
   or,
-  collectionGroup
+  collectionGroup,
+  setLogLevel as setFirestoreLogLevel
 } from 'firebase/firestore';
+import { noteFirestoreError, onFirestoreQuota } from './services/firestoreQuota';
 
 // Import the Firebase configuration
 import firebaseConfig from '../firebase-applet-config.json';
@@ -42,6 +44,17 @@ const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId || 'ai-studio-
 export const db = firestoreDbId && firestoreDbId !== '(default)'
   ? getFirestore(app, firestoreDbId)
   : getFirestore(app);
+
+// v9.9: khi Firestore hết hạn mức ghi miễn phí, SDK tự thử ghi lại mãi (lỗi resource-exhausted không làm promise
+// thất bại) và in lỗi đỏ liên tục "Quota limit exceeded… Using maximum backoff delay". Bắt lỗi này từ log của SDK →
+// đánh dấu hết hạn mức (ngừng mọi lượt ghi mới tới khi hạn mức đặt lại), báo MỘT lần, rồi tắt log lỗi lặp của SDK.
+try {
+  onLog(({ message, type }) => {
+    if (type && !/firestore/i.test(type)) return;
+    if (/resource-exhausted|quota (limit )?exceeded/i.test(message || '')) noteFirestoreError({ code: 'resource-exhausted', message });
+  }, { level: 'error' });
+  onFirestoreQuota(() => { try { setFirestoreLogLevel('silent'); } catch { /* */ } });
+} catch { /* môi trường không hỗ trợ */ }
 export const auth = getAuth();
 
 export enum OperationType {

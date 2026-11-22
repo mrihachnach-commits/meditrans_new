@@ -579,3 +579,66 @@ Tái hiện trên trình duyệt thật với dòng "Halliwell, was published [6
 - Quy tắc viết hoa: chỉ viết hoa phần dịch của từ viết hoa trong bản gốc ("OVAL mass" → "Khối BẦU DỤC", "LOBULATED" → "Khối DẠNG THÙY").
 - OCR nối từ bị ngắt gạch cuối dòng ("Guid-ance" → "Guidance").
 - ENGINE_VERSION = v27, nên các trang đã dịch tự vẽ lại theo cách mới mà không tốn token.
+
+## v9.9 — Hết hạn mức ghi Firestore: ngừng thử ghi, không báo lỗi đỏ lặp lại
+
+- Nguyên nhân lỗi đỏ liên tục: khi hết hạn mức ghi miễn phí, Firestore SDK coi `resource-exhausted` là lỗi tạm thời. SDK tự thử ghi lại mãi (backoff tối đa) và in lỗi mỗi lần thử. Promise của lệnh ghi không thất bại nên web không biết để dừng.
+- firebase.ts bắt lỗi này ngay từ log của SDK (`onLog`). Khi bắt được:
+  - đánh dấu hết hạn mức;
+  - báo một lần (thông báo + một dòng cảnh báo);
+  - tắt log lỗi lặp của Firestore SDK.
+- Trạng thái hết hạn mức được nhớ qua các lần tải lại trang tới lúc hạn mức đặt lại (0:00 giờ Thái Bình Dương, khoảng 14:00–15:00 giờ Việt Nam). Trước đây chỉ nhớ 1 giờ trong bộ nhớ, nên mỗi lần F5 web lại thử ghi.
+- Trong thời gian đó web không ghi gì mới lên đám mây. Bản dịch, bản giữ định dạng và thuật ngữ vẫn lưu trên máy, rồi tự đồng bộ khi mở lại sau giờ đặt lại.
+- Giảm lượt ghi: trạng thái API key (chạy thử key, kiểm tra key, khôi phục key) chỉ ghi khi trạng thái thật sự đổi, không ghi `lastUsed` mỗi lần. Các chỗ ghi khác đã được rà:
+  - bản dịch từng trang: có chống ghi trùng;
+  - trang giữ định dạng: có chống ghi trùng;
+  - bộ nhớ dịch và bảng thuật ngữ: chỉ lưu trên máy;
+  - máy chủ: không ghi Firestore theo từng lượt dịch.
+- Lỗi "[vite] failed to connect to websocket" là của môi trường xem thử (dev) trong AI Studio, dùng để tự tải lại khi sửa code. Lỗi này không ảnh hưởng web và không có trên bản build/Vercel.
+
+## v10.0 — Sách "Chẩn đoán hình ảnh vú" (tr.18, 19, 36, 37, 40) + tự xin quyền Google Drive
+
+**Cỡ chữ không đều trong cùng danh sách.**
+- Nguyên nhân 1: trang 2 cột có dòng thẳng hàng giữa hai cột. Khối ở cột bên kia bị coi là "ô bảng cùng hàng", nên danh sách không được đẩy dòng xuống và từng mục tự thu nhỏ riêng. Khối nay mang số cột trang (`col`, theo khe cột đã dò). Khối ở cột khác không còn tính là bạn cùng hàng.
+- Nguyên nhân 2: mục ngắn ("Breast", "Weeks 4-6") hoặc thụt cấp khác làm đứt nhóm chảy. Nay cùng cột thì cùng nhóm.
+- Trong nhóm chảy, mục 1 dòng được xuống dòng và đẩy các mục sau, cả nhóm thu nhỏ đều nếu thiếu chỗ. Danh sách ≥ 3 mục chảy liền nhau nên khoảng cách giữa các mục đều.
+- Các nhóm thân bài chênh nhau ≤ 0,16 dùng chung một cỡ trên cả trang.
+- Ký hiệu đầu dòng (•, ○, –) canh theo giữa dòng đầu của mục, không lệch xuống.
+- Mục giữ nguyên chữ (TDLUs, ASL…) nằm giữa danh sách cũng được vẽ lại để chảy theo, hết hở/đè.
+- Mục cuối cột sát lề dưới không còn bị nhận nhầm là tiêu đề chạy (căn phải lệch).
+
+**Tiêu đề bị gộp dòng.**
+- "TERMINOLOGY" + "Abbreviations", "BREAST DEVELOPMENT" + "Neonatal"… nay là hai khối. Tiêu đề phụ xuống dòng riêng và giữ đậm.
+- Quy tắc tách:
+  - dòng IN HOA ↔ dòng thường;
+  - tiêu đề đậm chênh cỡ > 6%;
+  - màu chữ khác hẳn (chữ trắng trên thanh màu "SECTION 2: IMAGING" ↔ tiêu đề tối bên dưới), nên hết lỗi đè lên thanh màu.
+
+**Mục lục.**
+- Khối có mọi chỗ đổi kiểu chữ trùng chỗ xuống dòng (tên bài thường / tác giả nghiêng) thì bản dịch cũng xuống dòng tại chỗ đổi kiểu (`breakOnStyle`). Tên bài và tác giả ở hai dòng như bản gốc.
+- Thuật ngữ: SECTION = PHẦN, MASSES = KHỐI (phân biệt hoa/thường), mass/masses = khối, table of contents = mục lục.
+
+**Màu chữ.**
+- Đã đo bản gốc tr.40: chữ thân bài là đen/xám đậm (≈ RGB 32,24,32), không phải xanh navy. Bản dịch giữ đúng màu đo được từ PDF.
+
+**Google Drive.**
+- Mở tài liệu Drive khi chưa cấp quyền thì web tự mở cửa sổ cấp quyền Google ngay. Cấp xong tự tải lại đúng tài liệu đó.
+- Nếu trình duyệt chặn cửa sổ bật lên, hộp lỗi có nút "Cấp quyền Google Drive" (bấm là mở cửa sổ, cấp xong tự tải lại).
+- Khi tự mở lại tài liệu phiên trước mà chưa có quyền: hiện hộp lỗi có nút, không tự về trang chủ.
+
+- ENGINE_VERSION = v28, nên các trang đã dịch tự vẽ lại theo cách mới mà không tốn token.
+
+## v10.1 — In đậm đúng bản gốc, bảng viết tắt theo hàng, nhãn hình không gộp
+
+- **Chữ đậm:** sách dùng bộ font nhiều độ đậm (Amirsys/Ubuntu Light – Regular – Medium – Bold). Bản Medium trước đây bị coi là chữ thường. Nay Medium được vẽ đậm khi trang có bản Light/Regular cùng họ font. Áp dụng cho tên bài mục lục, nhãn hình, viết tắt, tiêu đề thanh màu.
+- **Bảng định nghĩa "viết tắt | nghĩa" (tr.25):**
+  - Mỗi hàng là một cặp riêng, kể cả khi bộ dò cột đặt nhầm khe cột giữa hai ô. Trước đây cả cột nghĩa bên phải bị gộp thành một đoạn, bản dịch dồn liên tục và lệch hàng.
+  - Ô viết tắt giữ nguyên chữ gốc và đi theo hàng của nó. Nghĩa dài xuống dòng trong ô, đẩy các hàng sau xuống, cột viết tắt dời theo.
+  - Cả cột dùng chung một cỡ chữ.
+- **Nhãn hình xếp chồng** ("Pectoralis major muscle" / "Pectoralis minor muscle") không còn bị gộp thành một đoạn. Nhãn 2 dòng căn phải ("Anterior suspensory ligaments (of" / "Cooper)") giữ là một nhãn. Nhãn căn phải cạnh ảnh không bị đẩy khỏi đường chỉ.
+- **Mục lục:**
+  - tên bài (đậm) và tác giả (nghiêng) tách đúng dòng;
+  - cỡ chữ đều, không thu nhỏ từng dòng;
+  - không mượn chỗ bên trái làm lệch so với số trang.
+- **Câu lệnh dịch:** giữ nguyên tên tổ chức / khoa phòng / thử nghiệm / nhóm nghiên cứu.
+- ENGINE_VERSION = v29.

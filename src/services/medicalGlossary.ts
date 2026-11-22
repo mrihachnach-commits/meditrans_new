@@ -99,7 +99,13 @@ indistinct = bờ không rõ
 spiculated = bờ tua gai
 lobulated = dạng thùy
 oval = bầu dục
-simple cyst = nang đơn thuần`;
+simple cyst = nang đơn thuần
+# v10.0: tiêu đề sách / mục lục
+SECTION = PHẦN
+MASSES = KHỐI
+mass = khối
+masses = khối
+table of contents = mục lục`;
 
 const LS_KEY = 'mediTrans_glossary';
 

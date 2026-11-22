@@ -12,7 +12,7 @@ import { Logo, LogoWithText } from './components/Logo';
 import { FileExplorer, FileData } from './components/FileExplorer';
 import { UploadStatus, UploadTask } from './components/UploadStatus';
 import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
-import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, getOrCreateMediTransFolder, clearCachedMediTransFolderId, DriveFileMetadata } from './services/googleDriveService';
+import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, connectGoogleDrive, getOrCreateMediTransFolder, clearCachedMediTransFolderId, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 import { guardedWrite, FIRESTORE_QUOTA_EVENT } from './services/firestoreQuota';
 import { getGlossaryText, setGlossaryText, DEFAULT_GLOSSARY_TEXT } from './services/medicalGlossary';
@@ -80,6 +80,7 @@ import {
   Copy,
   Folder,
   Home,
+  Cloud,
   ExternalLink,
   Mail,
   Eye,
@@ -544,10 +545,9 @@ export default function App() {
         const targetKey = userKeys.find(k => k.id === keyId);
         if (targetKey && !targetKey.isSystem && targetKey.id !== 'system_proxy' && !keyId.startsWith('system_') && (targetKey.ownerId === user.uid || userRole === 'admin')) {
           try {
-            await updateDoc(doc(db, 'apiKeys', keyId), {
-              status: keyBroken ? 'error' : 'active',
-              lastUsed: serverTimestamp()
-            });
+            // v9.9: chỉ ghi khi trạng thái key đổi (mỗi lần chạy thử trước đây đều tốn 1 lượt ghi Firestore)
+            const st = keyBroken ? 'error' : 'active';
+            if (targetKey.status !== st) await guardedWrite(() => updateDoc(doc(db, 'apiKeys', keyId), { status: st, lastUsed: serverTimestamp() }), `key/${keyId}`, st);
           } catch (e) {
             console.warn("[handleTestKey] Could not update key status in Firestore", e);
           }
@@ -581,10 +581,7 @@ export default function App() {
       let count = 0;
       await Promise.all(keysToReset.map(async (k) => {
         try {
-          await updateDoc(doc(db, 'apiKeys', k.id), {
-            status: 'active',
-            lastUsed: serverTimestamp()
-          });
+          if (k.status !== 'active') await guardedWrite(() => updateDoc(doc(db, 'apiKeys', k.id), { status: 'active', lastUsed: serverTimestamp() }), `key/${k.id}`, 'active');
           count++;
         } catch (err) {
           console.warn(`Error resetting key ${k.id}`, err);
@@ -971,6 +968,21 @@ export default function App() {
   const isRenderingRef = useRef(false);
   const renderRequestIdRef = useRef(0);
   const [pdfError, setPdfError] = useState<string | null>(null);
+  // v10.0: mở tài liệu Google Drive khi chưa cấp quyền → tự mở cửa sổ xin quyền; trình duyệt chặn cửa sổ bật lên thì
+  // hiện nút "Cấp quyền Google Drive" ngay trong hộp lỗi. Cấp xong tự tải lại đúng tài liệu đó.
+  const [driveReauth, setDriveReauth] = useState<{ retry: () => void; busy: boolean } | null>(null);
+  const requestDriveAccess = async (retry: () => void, auto: boolean) => {
+    setDriveReauth({ retry, busy: true });
+    try {
+      await connectGoogleDrive();
+      setDriveReauth(null);
+      setPdfError(null);
+      retry();
+    } catch (e: any) {
+      setDriveReauth({ retry, busy: false });
+      if (!auto) showToast(e?.message || 'Chưa cấp được quyền Google Drive.', 'error');
+    }
+  };
   
   const [fontSize, setFontSize] = useState<number>(() => {
     return Number(localStorage.getItem('mediTrans_fontSize')) || 15;
@@ -1214,10 +1226,8 @@ export default function App() {
           // Update Firestore for each key if user has permission
           if (canUpdateFirestore) {
             try {
-              await updateDoc(doc(db, 'apiKeys', vKey.id), {
-                lastUsed: serverTimestamp(),
-                status: isActive ? 'active' : 'error'
-              });
+              const st = isActive ? 'active' : 'error';
+              if ((vKey as any).status !== st) await guardedWrite(() => updateDoc(doc(db, 'apiKeys', vKey.id), { lastUsed: serverTimestamp(), status: st }), `key/${vKey.id}`, st);
             } catch (e: any) {
               console.warn(`[performKeyCheck] Could not update key status for ${vKey.id}:`, e);
             }
@@ -2588,7 +2598,7 @@ export default function App() {
     } catch (error: any) {
       console.error("Error loading PDF from Google Drive:", error);
       clearActiveDocSession();
-      if (isAutoRestore) {
+      if (isAutoRestore && error?.message !== 'CHUA_KET_NOI_DRIVE') {
         setPdfDoc(null);
         setFile(null);
         setShowExplorer(true);
@@ -2596,7 +2606,8 @@ export default function App() {
         showToast("Tài liệu phiên trước không thể tải từ Google Drive (Mã lỗi 404). Đã về trang chủ.", "info");
       } else {
         if (error.message === 'CHUA_KET_NOI_DRIVE') {
-          setPdfError('Chưa kết nối tài khoản Google Drive. Vui lòng bấm "Google Drive" trên thanh công cụ để kết nối và cấp quyền.');
+          setPdfError('Chưa kết nối tài khoản Google Drive. Đang mở cửa sổ cấp quyền… Nếu cửa sổ không hiện (trình duyệt chặn), bấm "Cấp quyền Google Drive" bên dưới.');
+          requestDriveAccess(() => handleFileSelectFromExplorer(fileData, false), true);
         } else if (error.message?.includes('404')) {
           setPdfError('Tệp PDF này không còn tồn tại trên Google Drive (Mã lỗi 404). Vui lòng chọn tài liệu khác.');
         } else {
@@ -2672,7 +2683,7 @@ export default function App() {
     } catch (error: any) {
       console.error("Error opening PDF from Google Drive:", error);
       clearActiveDocSession();
-      if (isAutoRestore) {
+      if (isAutoRestore && error?.message !== 'CHUA_KET_NOI_DRIVE') {
         setPdfDoc(null);
         setFile(null);
         setShowExplorer(true);
@@ -2680,7 +2691,8 @@ export default function App() {
         showToast("Tài liệu phiên trước không thể tải từ Google Drive (Mã lỗi 404). Đã về trang chủ.", "info");
       } else {
         if (error.message === 'CHUA_KET_NOI_DRIVE') {
-          setPdfError('Chưa kết nối tài khoản Google Drive. Vui lòng bấm "Google Drive" trên thanh công cụ để kết nối và cấp quyền.');
+          setPdfError('Chưa kết nối tài khoản Google Drive. Đang mở cửa sổ cấp quyền… Nếu cửa sổ không hiện (trình duyệt chặn), bấm "Cấp quyền Google Drive" bên dưới.');
+          requestDriveAccess(() => handleOpenDriveFile(driveFile, false), true);
         } else if (error.message?.includes('404')) {
           setPdfError('Tệp PDF này không còn tồn tại trên Google Drive (Mã lỗi 404). Vui lòng chọn tài liệu khác.');
         } else {
@@ -4667,8 +4679,18 @@ export default function App() {
                           <div className="max-w-md bg-white p-6 rounded-2xl border border-rose-100 shadow-2xl flex flex-col items-center">
                             <AlertCircle className="w-12 h-12 text-rose-500 mb-3" />
                             <p className="text-sm font-bold text-slate-800 mb-5 leading-relaxed">{pdfError}</p>
+                            {driveReauth && (
+                              <button
+                                onClick={() => requestDriveAccess(driveReauth.retry, false)}
+                                disabled={driveReauth.busy}
+                                className="mb-3 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white rounded-xl text-xs font-bold transition-all shadow-md active:scale-95 flex items-center gap-2 cursor-pointer"
+                              >
+                                {driveReauth.busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Cloud className="w-4 h-4" />}
+                                <span>{driveReauth.busy ? 'Đang chờ cấp quyền…' : 'Cấp quyền Google Drive'}</span>
+                              </button>
+                            )}
                             <button 
-                              onClick={handleGoHome}
+                              onClick={() => { setDriveReauth(null); handleGoHome(); }}
                               className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-md active:scale-95 flex items-center gap-2 cursor-pointer"
                             >
                               <Home className="w-4 h-4" />

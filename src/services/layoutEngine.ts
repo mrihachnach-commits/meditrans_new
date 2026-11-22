@@ -106,6 +106,11 @@ export interface LayoutBlock {
   guided?: boolean;
   /** v9.8: nhãn chữ trong hình (trang có lớp chữ): vị trí theo khung AI, xoá gọn trong khung, không nới theo mực. */
   figLabel?: boolean;
+  /** v10.0: cột trang (theo khe cột thật đã dò được); -1 = vắt ngang khe cột; không có = trang 1 cột / không rõ. */
+  col?: number;
+  /** v10.0: mỗi lần đổi kiểu chữ trong bản gốc đều trùng chỗ xuống dòng (mục lục: tên bài / tác giả in nghiêng)
+   *  → bản dịch cũng xuống dòng tại chỗ đổi kiểu chữ. */
+  breakOnStyle?: boolean;
   /** Chữ hoa cỡ lớn đầu đoạn: vẽ lại chữ cái đầu của bản dịch ở cùng vị trí/cỡ, các dòng bên cạnh thụt vào. */
   dropCap?: DropCap;
   /** v9.6: nhãn đầu khối in đậm trên ảnh scan ("Figure 1", "Table 2") → in đậm nhãn tương ứng của bản dịch ("Hình 1"). */
@@ -1043,6 +1048,14 @@ export function buildBlocks(
   // không được coi là hàng bảng và bị nối vào hàng trên: "Digital radiography Estradiol")
   const isCellLike = (o: Segment) => !o.isLabel && !o.leader && !/^[\d\s.,–\-()%]+$/.test(o.text.trim()) &&
     (letterCount(o.text) >= 2 || (letterCount(o.text) >= 1 && o.text.trim().length >= 2));
+  // v10.1: bảng định nghĩa "viết tắt | nghĩa" (CNS | central nervous system): ô trái ngắn, ô phải cách ít (< 6 cỡ chữ)
+  // → luôn là một hàng bảng, kể cả khi bộ dò cột đặt nhầm một "khe cột" giữa hai ô (trước đây cả cột nghĩa bị gộp
+  // thành một đoạn, bản dịch dồn liên tục, lệch hàng với cột viết tắt)
+  const shortCell = (o: Segment) => o.text.trim().length <= 14 && o.x1 - o.x0 < 0.12 * pageWidth;
+  const defPair = (a: Segment, b2: Segment) => {
+    const [l, r] = a.x0 < b2.x0 ? [a, b2] : [b2, a];
+    return shortCell(l) && r.x0 - l.x0 < 9 * Math.max(l.size, r.size) && r.x0 > l.x1;
+  };
   const hasRowMate = (sg: Segment) => segments.some(o => o !== sg && isCellLike(o) &&
     Math.abs(o.size - sg.size) < 0.1 * Math.max(o.size, sg.size) && // khác cỡ chữ = cột khác (chú thích hình), không phải ô bảng
     // Hai dòng cùng hàng đều thuộc đoạn văn (dòng rộng > 30% trang, hoặc dòng cuối ngắn nằm ngay dưới dòng rộng cùng
@@ -1050,8 +1063,14 @@ export function buildBlocks(
     !(paraLine(o) && paraLine(sg)) &&
     Math.abs(o.y - sg.y) < 0.4 * Math.min(o.size, sg.size) &&
     (o.x1 <= sg.x0 + 1 || o.x0 >= sg.x1 - 1) &&
-    !gutters.some(g => (g > Math.min(o.x1, sg.x1) - 1 && g < Math.max(o.x0, sg.x0) + 1)));
+    (defPair(o, sg) || !gutters.some(g => (g > Math.min(o.x1, sg.x1) - 1 && g < Math.max(o.x0, sg.x0) + 1))));
   const mate = new Map(segments.map(sg => [sg, isCellLike(sg) && hasRowMate(sg)]));
+  // v10.1: hàng của bảng định nghĩa (có ô "viết tắt" ngắn cùng hàng, sát bên trái/phải) → luôn mở khối mới
+  const defRowSeg = new Set(segments.filter(sg => !sg.isLabel && segments.some(o => o !== sg && !o.isLabel &&
+    Math.abs(o.y - sg.y) < 0.4 * Math.min(o.size, sg.size) && letterCount(o.text) >= 1 && letterCount(sg.text) >= 1 && defPair(o, sg) &&
+    // ô viết tắt phải là "cột": có ≥ 2 ô ngắn khác thẳng mép trái với nó
+    (() => { const l = o.x0 < sg.x0 ? o : sg; return segments.filter(u => u !== l && shortCell(u) && Math.abs(u.x0 - l.x0) < 0.5 * l.size).length >= 2; })())));
+  for (const sg of defRowSeg) mate.set(sg, true);
 
   const work: WorkBlock[] = [];
   for (const seg of segments) {
@@ -1065,6 +1084,26 @@ export function buildBlocks(
       if (segIsCell) continue; // ô bảng: mỗi hàng là một khối riêng, không nối dọc với hàng dưới
       if (Math.abs(seg.size - b.size) > 0.12 * b.size) continue;
       if (seg.bold !== b.bold) continue;
+      // v10.0: tiêu đề mục IN HOA (thanh màu) + tiêu đề phụ thường ngay dưới ("TERMINOLOGY" / "Abbreviations",
+      // "BREAST DEVELOPMENT" / "Neonatal") là HAI khối, không phải một đoạn: khác kiểu chữ hoa, hoặc khác cỡ
+      // (tiêu đề đậm chênh > 6%), hoặc khác hẳn màu chữ (chữ trắng trên thanh màu ↔ chữ tối bên dưới)
+      {
+        const capsLine = (t: string) => { const L = t.match(/\p{L}/gu) || []; return L.length >= 3 && L.every(ch => ch === ch.toUpperCase()); };
+        const lt = last.text.trim(), st = seg.text.trim();
+        if (capsLine(lt) !== capsLine(st) && (b.bold || (capsLine(lt) && (lt.match(/\p{L}/gu) || []).length >= 6 && !seg.italic)) && b.lines.length <= 2 && lt.length < 60) continue;
+        if (b.bold && Math.abs(seg.size - b.size) > 0.06 * b.size) continue;
+        // v10.1: nhãn hình xếp chồng ("Pectoralis major muscle" / "Pectoralis minor muscle"): hai dòng ngắn, dòng sau viết
+        // hoa đầu, dòng trước đã trọn nghĩa (không kết thúc bằng giới từ / dấu phẩy / ngoặc mở) → hai nhãn riêng
+        if (b.lines.length === 1 && lt.length <= 40 && st.length <= 40 && /^\p{Lu}\p{Ll}/u.test(st) && /^\p{Lu}/u.test(lt) &&
+          !/[,(\-–&/]$|\b(of|and|or|the|with|to|in|for|a|an|by|from|at|on|vs\.?)$/i.test(lt) &&
+          seg.italic === b.lines[0].italic && (last.runs[0]?.italic ?? false) === (seg.runs[0]?.italic ?? false)) {
+          const wordsL = lt.split(/\s+/).length, wordsS = st.split(/\s+/).length;
+          if (wordsL >= 2 && wordsS >= 2 && wordsL <= 5 && wordsS <= 5 && Math.abs(lt.length - st.length) < 0.5 * Math.max(lt.length, st.length) + 6 &&
+            (Math.abs(seg.x1 - last.x1) < 0.6 * b.size || Math.abs(seg.x0 - last.x0) < 0.6 * b.size)) continue;
+        }
+        const colOf = (sg: Segment) => { const r = sg.runs.find(x => /\p{L}/u.test(x.text)) || sg.runs[0]; return r?.color ? 0.299 * r.color.r + 0.587 * r.color.g + 0.114 * r.color.b : 30; };
+        if (Math.abs(colOf(last) - colOf(seg)) > 120) continue;
+      }
       const gap = seg.y - last.y;
       if (gap < 0.5 * b.size || gap > 1.75 * b.size) continue;
       if (b.lines.length >= 2) {
@@ -1076,7 +1115,11 @@ export function buildBlocks(
       if (overlap < 0.5 * minW) continue;
       const leftAligned = Math.abs(seg.x0 - b.x0) < 2.5 * b.size;
       const centered = Math.abs((seg.x0 + seg.x1) / 2 - (b.x0 + b.x1) / 2) < b.size;
-      if (!leftAligned && !centered) continue;
+      // v10.1: nhãn hình căn phải 2 dòng ("Anterior suspensory ligament (of" / "Cooper)") — chỉ nối khi dòng trước chưa
+      // trọn nghĩa (kết thúc bằng giới từ / ngoặc mở / dấu phẩy) hoặc dòng sau viết thường
+      const rightCont = Math.abs(seg.x1 - last.x1) < 0.6 * b.size &&
+        (/[,(\-–&/]$|\b(of|and|or|the|with|to|in|for|a|an|by|from|at|on)$/i.test(last.text.trim()) || /^\p{Ll}/u.test(seg.text.trim()));
+      if (!leftAligned && !centered && !rightCont) continue;
       const blockWidth = b.x1 - b.x0;
       const lastText = last.text.trim();
       const segText = seg.text.trim();
@@ -1102,7 +1145,7 @@ export function buildBlocks(
       if (hangingSoFar && seg.x0 < last.x0 - 0.5 * b.size) continue;
       // Dòng sau thụt vào sâu hơn dòng đầu (mở đoạn mới):
       const indentStart = !hangingNext && seg.x0 > b.x0 + 0.7 * b.size && seg.x1 > b.x1 - 1.5 * b.size;
-      if ((prevShort && !centered) || indentStart) continue;
+      if (((prevShort && !centered) || indentStart) && !(rightCont && !leftAligned)) continue;
       if (gap < bestGap) { bestGap = gap; bestBlock = b; }
     }
     if (bestBlock) {
@@ -1121,7 +1164,9 @@ export function buildBlocks(
   const inHeaderFooter = (b: LayoutBlock) => b.bottom < pageHeight * 0.1 || b.top > pageHeight * 0.9;
   for (const b of blocks) {
     if (b.lineCount === 1 && b.align === 'left' && !b.leader && inHeaderFooter(b) &&
-        b.x0 > pageWidth * 0.4 && Math.abs(b.x1 - rightEdge) < 0.8 * b.size) b.align = 'right';
+        b.x0 > pageWidth * 0.4 && Math.abs(b.x1 - rightEdge) < 0.8 * b.size &&
+        // mục danh sách cuối cột (có ký hiệu đầu dòng bên trái) không phải tiêu đề chạy / số trang
+        !blocks.some(o => o !== b && o.lineCount === 1 && LABEL_RE.test(o.plain) && o.x1 <= b.x0 + 1 && b.x0 - o.x1 < 3 * b.size && Math.abs(o.top - b.top) < 0.5 * b.size)) b.align = 'right';
   }
   // Khối 1 dòng nằm giữa trang (tiêu đề chạy, tên chương) → căn giữa
   for (const b of blocks) {
@@ -1243,6 +1288,20 @@ function finalizeBlock(b: WorkBlock, pageWidth: number): LayoutBlock {
   text = tidy(text);
   plain = tidy(plain);
 
+  let breakOnStyle = false;
+  if (lines.length >= 2 && lines.length <= 4) {
+    const key = (r: RunStyle) => `${r.bold}|${r.italic}`;
+    const lettered = (l: Segment) => l.runs.filter(r => /[\p{L}\p{N}]/u.test(r.text));
+    let B = 0, T = 0, prevKey: string | null = null;
+    lines.forEach((l, li) => {
+      lettered(l).forEach((r, ri) => {
+        const k = key(r);
+        if (prevKey !== null && k !== prevKey) { T++; if (ri === 0 && li > 0) B++; }
+        prevKey = k;
+      });
+    });
+    breakOnStyle = B >= 1 && B === T;
+  }
   const width = b.x1 - b.x0;
   let align: BlockAlign = 'left';
   if (lines.length >= 3) {
@@ -1289,6 +1348,7 @@ function finalizeBlock(b: WorkBlock, pageWidth: number): LayoutBlock {
     firstOffset: firstOffset > 0.4 * b.size ? firstOffset : 0,
     restOffset: restOffset > 0.4 * b.size ? restOffset : 0,
     bold: baseStyle.bold,
+    breakOnStyle: breakOnStyle || undefined,
     italic: baseStyle.italic || count(s => s.italic) > 0.5,
     serif: count(s => s.serif) >= 0.5,
     align,
@@ -1338,7 +1398,7 @@ function orderForReading(blocks: LayoutBlock[], pageWidth: number, gutters: numb
     if (crosses(b)) { flushBand(); result.push(b); } else band.push(b);
   }
   flushBand();
-  return result.map((b, i) => ({ ...b, id: `b${i + 1}` }));
+  return result.map((b, i) => ({ ...b, id: `b${i + 1}`, col: gutters.length ? (crosses(b) ? -1 : colOf(b)) : undefined }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1577,10 +1637,12 @@ function layoutWordsInner(
     if (w.length === 1 && wordWidth(m, w, serif, size, hs) > maxW) expanded.push(...splitLong(w, maxW));
     else expanded.push(w);
   }
+  const styleKey = (w: Word | undefined) => { const p = w?.find(q => /[\p{L}\p{N}]/u.test(q.text)) || w?.[0]; return p ? `${!!p.style.bold}|${!!p.style.italic}` : ''; };
   for (const w of expanded) {
     const ww = wordWidth(m, w, serif, size, hs);
     const limit = lineWidth(lines.length);
-    if (line.length && lw + space + ww > limit) {
+    const styleBreak = !!b.breakOnStyle && line.length > 0 && styleKey(line[line.length - 1]) !== styleKey(w) && /[\p{L}\p{N}]/u.test(w.map(p => p.text).join(''));
+    if (line.length && (styleBreak || lw + space + ww > limit)) {
       lines.push(line);
       line = [w];
       lw = ww;
@@ -2022,10 +2084,19 @@ export function paintTranslatedPage(
     return b.rotate && b.translatable && t && norm(t) && norm(t) !== b.plain;
   });
 
-  const targets = blocks.filter(b => {
-    const t = translations[b.id];
-    return b.translatable && t && norm(t) && norm(t) !== b.plain;
-  });
+  const changed = (b: LayoutBlock) => { const t = translations[b.id]; return b.translatable && !!t && !!norm(t) && norm(t) !== b.plain; };
+  // v10.0: mục danh sách giữ nguyên chữ ("TDLUs", "ASL", "US", tên riêng) nằm GIỮA các mục được dịch cùng cột → cũng
+  // vẽ lại (cùng chữ) để chảy theo danh sách; trước đây đứng yên tại chỗ cũ → danh sách bị hở / đè lên nhau
+  const sameKept = new Set<string>();
+  for (const b of blocks) {
+    if (changed(b) || b.rotate || b.leader || b.lineCount > 2 || LABEL_RE.test(b.plain.trim()) || !/\p{L}/u.test(b.plain)) continue;
+    const near = (o: LayoutBlock, below: boolean) => o !== b && changed(o) && Math.abs(o.size - b.size) < 0.15 * b.size &&
+      Math.min(o.x1, b.x1) - Math.max(o.x0, b.x0) > 0 && Math.abs(o.x0 - b.x0) < 3.2 * b.size &&
+      (below ? o.top - b.bottom : b.top - o.bottom) > -0.3 * b.size && (below ? o.top - b.bottom : b.top - o.bottom) < 1.2 * b.size;
+    if (blocks.some(o => near(o, false)) && blocks.some(o => near(o, true))) sameKept.add(b.id);
+  }
+  for (const id of sameKept) { const b = blocks.find(x => x.id === id)!; if (!translations[id] || !norm(translations[id])) translations = { ...translations, [id]: b.text }; }
+  let targets = blocks.filter(b => changed(b) || sameKept.has(b.id));
 
   /* --- Phân tích trước khi xoá --- */
   const info = new Map<string, BlockInfo>();
@@ -2108,8 +2179,12 @@ export function paintTranslatedPage(
   for (const b of targets) {
     let best: LayoutBlock | null = null;
     for (const L of blocks) {
-      if (L === b || L.lineCount !== 1 || !LABEL_RE.test(L.plain)) continue;
-      if (L.x1 > b.x0 + 1 || b.x0 - L.x1 > 3 * b.size || Math.abs(L.top - b.top) > 0.5 * b.size) continue;
+      if (L === b || L.lineCount !== 1) continue;
+      // v10.1: ô "viết tắt" của bảng định nghĩa (không dịch, ngắn, cùng hàng, cách ≤ 9 cỡ chữ) cũng đi theo hàng của nó
+      const abbrCell = !LABEL_RE.test(L.plain) && L.plain.trim().length <= 14 && L.plain.trim().split(/\s+/).filter(w => /\p{L}{2,}/u.test(w)).length <= 1 && /\p{L}/u.test(L.plain) &&
+        L.x1 <= b.x0 + 1 && b.x0 - L.x0 < 9 * b.size && Math.abs(L.size - b.size) < 0.2 * b.size;
+      if (!LABEL_RE.test(L.plain) && !abbrCell) continue;
+      if (L.x1 > b.x0 + 1 || (!abbrCell && b.x0 - L.x1 > 3 * b.size) || Math.abs(L.top - b.top) > 0.5 * b.size) continue;
       if (!best || L.x1 > best.x1) best = L;
     }
     if (!best) continue;
@@ -2121,6 +2196,8 @@ export function paintTranslatedPage(
     companion.set(b.id, { L: best, patch: ctx.getImageData(x, y, w, h), x, y, bg: regionStats(img, x, y, x + w, y + h).bg });
     companionIds.add(best.id);
   }
+  // ô viết tắt đã nhận làm "bạn đi kèm" thì giữ nguyên chữ gốc (không dịch chữ viết tắt), di chuyển theo hàng
+  if (targets.some(t => companionIds.has(t.id))) targets = targets.filter(t => !companionIds.has(t.id));
 
   /* --- Nhóm chảy: các khối liền nhau trong cùng cột --- */
   const groups: LayoutBlock[][] = [];
@@ -2132,7 +2209,10 @@ export function paintTranslatedPage(
       const L = g[g.length - 1];
       const li = info.get(L.id)!, bi = info.get(b.id)!;
       const overlap = Math.min(L.x1, b.x1) - Math.max(L.x0, b.x0);
-      if (overlap < 0.6 * Math.min(L.x1 - L.x0, b.x1 - b.x0)) continue;
+      // v10.0: mục danh sách nhiều cấp thụt khác nhau / mục ngắn ("Breast", "Weeks 4-6") vẫn cùng một cột chảy →
+      // trước đây bị tách thành nhóm riêng, mỗi mục tự thu nhỏ → cỡ chữ to nhỏ xen kẽ trong cùng danh sách
+      const sameCol = overlap > 0 && Math.abs(b.x0 - L.x0) < 3.2 * Math.max(L.size, b.size) && Math.abs(L.size - b.size) < 0.15 * Math.max(L.size, b.size);
+      if (overlap < 0.6 * Math.min(L.x1 - L.x0, b.x1 - b.x0) && !sameCol) continue;
       const gap = b.top - L.bottom;
       if (gap < -0.3 * Math.min(L.size, b.size) || gap > 2.6 * Math.max(L.size, b.size)) continue;
       if (colorDist(li.stats.bg, bi.stats.bg) > 30) continue;
@@ -2154,18 +2234,29 @@ export function paintTranslatedPage(
 
   /* --- Dàn từng nhóm --- */
   // "Bạn cùng hàng": khối khác nằm ngang hàng (số mục, số trang, ô bảng bên cạnh) → không được đẩy dòng xuống
+  // (khối ở CỘT TRANG khác — bên kia khe cột — chỉ tình cờ cùng hàng, không phải ô bảng: trước đây làm cả danh sách
+  // trang 2 cột không được đẩy dòng, từng mục tự thu nhỏ)
+  const otherCol = (a: LayoutBlock, o: LayoutBlock) => {
+    if (a.col === undefined || o.col === undefined || a.col < 0 || o.col < 0 || a.col === o.col) return false;
+    // cặp "viết tắt | nghĩa" sát nhau vẫn là cùng hàng bảng
+    const [l, r] = a.x0 < o.x0 ? [a, o] : [o, a];
+    const defRow = l.plain.trim().length <= 14 && l.lineCount === 1 && r.x0 > l.x1 && r.x0 - l.x0 < 9 * Math.max(l.size, r.size);
+    return !defRow;
+  };
   const hasRowMate = (b: LayoutBlock, g: LayoutBlock[]) => blocks.some(o =>
-    o !== b && !g.includes(o) && !companionIds.has(o.id) &&
+    o !== b && !g.includes(o) && !companionIds.has(o.id) && !otherCol(b, o) &&
     (o.x1 <= b.x0 + 1 || o.x0 >= b.x1 - 1) &&
     Math.abs(o.top - b.top) < 0.6 * Math.min(o.size, b.size));
 
   const plans: { b: LayoutBlock; lo: LaidOut; top: number; x0: number; width: number; orig: LayoutBlock }[] = [];
   const rowMate = new Set(targets.filter(b => hasRowMate(b, [b])).map(b => b.id)); // ô bảng, mục có bạn cùng hàng
+  const pageMedSize = median(targets.map(t => t.size));
   const fitGroup = (g: LayoutBlock[], sMax: number) => {
     const lastI = info.get(g[g.length - 1].id)!;
     const availBottom = g[g.length - 1].bottom + lastI.free;
     const gaps = g.slice(1).map((b, i) => Math.max(0, b.top - g[i].bottom));
-    const cascade = g.length > 1 && !g.some(b => hasRowMate(b, g));
+    // (nhãn hình căn phải xếp chồng cạnh ảnh: giữ đúng vị trí đường chỉ, không đẩy nhau)
+    const cascade = g.length > 1 && !g.some(b => hasRowMate(b, g)) && g.filter(b => b.align === 'right').length < Math.max(2, 0.5 * g.length);
     const widthOf = (b: LayoutBlock) => { const inf = info.get(b.id)!; return Math.max(b.x1 - b.x0 + inf.extLeft + inf.extRight, b.size * 2); };
 
     let overrides: ({ x0: number; width: number } | null)[] = [];
@@ -2181,7 +2272,7 @@ export function paintTranslatedPage(
         const ratio = Math.min(2.2, Math.max(1.12, (b.leading / b.size) * tight));
         let lo = layoutWords(m, inf.words, b, inf.base, widthOf(b), b.size * s, ratio);
         overrides[i] = null;
-        if (b.lineCount === 1 && b.align === 'left' && lo.lines.length > 1 && inf.extLeftAvail > b.size && !rowMate.has(b.id)) {
+        if (b.lineCount === 1 && b.align === 'left' && lo.lines.length > 1 && inf.extLeftAvail > b.size && !rowMate.has(b.id) && !companion.has(b.id) && !(cascade && g.length >= 3)) {
           // Bên phải hết chỗ → mượn chỗ bên trái, giữ mép phải (giống tiêu đề/nhãn căn phải)
           const wide = layoutWords(m, inf.words, { ...b, align: 'right' }, inf.base, widthOf(b) + inf.extLeftAvail, b.size * s, ratio);
           if (wide.lines.length < lo.lines.length) {
@@ -2189,7 +2280,9 @@ export function paintTranslatedPage(
             overrides[i] = { x0: b.x0 - inf.extLeft - inf.extLeftAvail, width: widthOf(b) + inf.extLeftAvail };
           }
         }
-        if (b.lineCount === 1 && lo.lines.length > 1 && inf.free < 0.6 * b.size) {
+        // (trong nhóm chảy, mục 1 dòng được xuống dòng và đẩy các mục sau xuống; cả nhóm thu nhỏ ĐỀU nếu thiếu chỗ —
+        // trước đây từng mục tự thu nhỏ riêng → chữ to nhỏ xen kẽ trong cùng danh sách)
+        if (b.lineCount === 1 && lo.lines.length > 1 && inf.free < 0.6 * b.size && (!cascade || (b.bold && b.size > 1.08 * pageMedSize))) {
           // Không còn chỗ bên dưới (tiêu đề trên thanh màu, nhãn sát hình) → thu nhỏ riêng khối này để giữ 1 dòng
           for (let s2 = s - 0.03; s2 >= 0.6 - 1e-6; s2 -= 0.03) {
             const ov = overrides[i];
@@ -2209,7 +2302,9 @@ export function paintTranslatedPage(
         los.push(lo);
         if (cascade) {
           // Giữ đúng vị trí gốc để dễ đối chiếu; chỉ đẩy xuống khi khối phía trên dài hơn chỗ của nó
-          const top = Math.max(b.top, y);
+          // v10.0: danh sách (≥ 3 mục) chảy liền nhau theo khoảng cách gốc → khoảng cách giữa các mục đều nhau (trước đây
+          // mục giữ vị trí gốc sau khi nhóm thu nhỏ → chỗ dồn sát, chỗ hở to)
+          const top = g.length >= 3 && i > 0 ? y : Math.max(b.top, y);
           tops.push(top);
           y = top + lo.height + (i < gaps.length ? gaps[i] * Math.max(0.6, s) : 0);
         } else {
@@ -2261,7 +2356,9 @@ export function paintTranslatedPage(
     // chật (thường là đoạn bị tách sai) là kéo CẢ TRANG xuống 72% → chữ nhỏ khắp trang. Nay lấy mức chung của đa số
     // (phân vị 30%, không dưới 0.85); đoạn nào thật sự cần nhỏ hơn thì tự thu nhỏ riêng.
     const sorted = [...ss].sort((x, y) => x - y);
-    const shared = Math.max(0.85, sorted[Math.floor(0.3 * (sorted.length - 1))]);
+    // v10.0: các nhóm chênh nhau ít (≤ 0,16) → cùng MỘT cỡ (nhỏ nhất), như bản in; chênh nhiều mới dùng mức chung
+    const spread = sorted[sorted.length - 1] - sorted[0];
+    const shared = spread <= 0.16 ? sorted[0] : Math.max(0.85, sorted[Math.floor(0.3 * (sorted.length - 1))]);
     for (const i of bodyIdx) {
       if (fitted[i].s > shared + 0.005) fitted[i] = fitGroup(groups[i], shared);
     }
@@ -2411,7 +2508,8 @@ export function paintTranslatedPage(
 
   /* --- Dời ký hiệu đầu dòng theo mục (sao chép nguyên điểm ảnh gốc) --- */
   const moves = plans
-    .map(p => ({ c: companion.get(p.b.id), shift: Math.round(p.top - p.b.top) }))
+    // v10.0: canh theo GIỮA dòng đầu của mục (chữ dịch nhỏ hơn gốc → ký hiệu trước đây bị lệch xuống dưới dòng chữ)
+    .map(p => ({ c: companion.get(p.b.id), shift: Math.round(p.top + 0.55 * p.lo.size - (p.b.top + 0.55 * p.b.size)) }))
     .filter((m): m is { c: NonNullable<typeof m.c>; shift: number } => !!m.c && Math.abs(m.shift) >= 1);
   for (const m of moves) { // lượt 1: xoá hết vị trí cũ
     erase(m.c.x, m.c.y, m.c.patch.width, m.c.patch.height, m.c.bg);
