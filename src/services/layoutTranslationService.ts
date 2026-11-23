@@ -3,7 +3,7 @@
  * Kết nối pdf.js ↔ layoutEngine ↔ GeminiService, lưu đệm IndexedDB và xuất PDF dạng ảnh.
  */
 import { pageScopedSignal } from './aiTelemetry';
-import { isReferenceLine } from '../utils/translateBoost';
+import { isReferenceLine, looksLikeProse } from '../utils/translateBoost';
 import { glossaryExact, getGlossaryText } from './medicalGlossary';
 import { findColumnChains, joinChainText, splitChainTranslation } from './columnChain';
 import { checkNumeric, describeNumericIssue } from './numericQa';
@@ -297,7 +297,9 @@ function styleResolver(page: any, styles: Record<string, any>) {
     const family = String(styles?.[fontName]?.fontFamily || '');
     const all = `${name} ${family}`;
     const nameLooksSerif =
-      /times|serif|georgia|minion|garamond|cambria|palatino|charter|baskerville|mincho|stix|cmr\d/i.test(name) &&
+      // v11: thêm các font có chân hay gặp trong sách y khoa (Thieme "Gulliver", Clark's "Berling", Springer "Minion"…) —
+      // trước đây pdf.js báo "sans-serif" cho Gulliver nên thân bài có chân bị vẽ bằng Arimo (Atlas Giảng dạy X-quang)
+      /times|serif|georgia|minion|garamond|cambria|palatino|charter|baskerville|mincho|stix|cmr\d|gulliver|berling|utopia|sabon|bembo|caslon|janson|plantin|melior|meridien|joanna|dante|lexicon|swift|charis|cheltenham|century|bookman|goudy|warnock|arno|tiempos|didot|bodoni|electra|aldus|trump|perpetua|calisto|lucida ?bright|stempel|excelsior|ionic|nimbus ?rom|tinos|liberation ?serif|dejavu ?serif|source ?serif|noto ?serif|pt ?serif|droid ?serif|crimson|merriweather|lora|scala(?! ?sans)/i.test(name) &&
       !/sans/i.test(name);
     const info: FontStyleInfo = {
       bold: boldFlag || /bold|black|heavy|semibold|demi/i.test(all) || (/medium/i.test(name) && (pageHasLight || lighterFamilies.has(name.replace(/^[A-Z]{6}\+/, '').split(/[-,]/)[0].toLowerCase()))),
@@ -581,8 +583,36 @@ const normKey = (t: string) => t.replace(/\s+/g, ' ').trim();
 type Analyzed = Awaited<ReturnType<typeof analyzePage>>;
 
 /** Thay khối chữ của trang bằng khối OCR (trang scan / lớp chữ hỏng). */
+/**
+ * v11: AI tách cụm chữ in đậm/nghiêng GIỮA đoạn thành một khối riêng NGOÀI việc đã có nó trong khối đoạn văn
+ * ("there is no test or group of tests that ensure…" — BI-RADS tr.8) → cụm đó bị vẽ hai lần, đoạn văn bị ép nhỏ.
+ * Bỏ khối mà chữ nằm trọn trong chữ của khối khác có khung chồng lên nó.
+ */
+export function dropNestedOcr(ocr: OcrBlock[]): OcrBlock[] {
+  const norm = (t: string) => (t.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).join(' ');
+  const keys = ocr.map(o => norm(o.text || ''));
+  // (giữ nguyên số phần tử / thứ tự: khối bị bỏ chỉ để trống chữ — b.srcIndex trỏ theo chỉ số trong danh sách OCR)
+  return ocr.map((o, i) => {
+    const k = keys[i];
+    if (k.length < 12 || !o.box_2d) return o;
+    const [y0, x0, y1, x1] = o.box_2d;
+    const cy = (y0 + y1) / 2, cx = (x0 + x1) / 2;
+    return ocr.some((p, j) => {
+      if (j === i || !p.box_2d || keys[j].length < k.length + 10 || !keys[j].includes(k)) return false;
+      const [py0, px0, py1, px1] = p.box_2d;
+      const pad = 0.5 * Math.max(4, (py1 - py0) / Math.max(1, p.lines || 1));
+      return cy >= py0 - pad && cy <= py1 + pad && cx >= px0 - pad && cx <= px1 + pad;
+    }) ? { ...o, text: '' } : o;
+  });
+}
+
+/** v11: danh sách OCR SAU khi tinh chỉnh (khung dời chỗ, khối gộp) — b.srcIndex của khối OCR trỏ vào danh sách này. */
+const refinedOcr = new WeakMap<LayoutBlock[], OcrBlock[]>();
+
 function applyOcr(analyzed: Analyzed, ocr: OcrBlock[]): Analyzed {
-  const blocks = blocksFromOcr(analyzed.ctx, refineOcrBoxes(analyzed.ctx, ocr), 'b', analyzed.items);
+  const refined = refineOcrBoxes(analyzed.ctx, dropNestedOcr(ocr));
+  const blocks = blocksFromOcr(analyzed.ctx, refined, 'b', analyzed.items);
+  refinedOcr.set(blocks, refined);
   return { ...analyzed, blocks, scanned: false };
 }
 
@@ -699,9 +729,12 @@ const slimOcr = (ocr: OcrBlock[]) => ocr.map(o => ({
  */
 export function polishTranslations(blocks: LayoutBlock[], translations: Record<string, string>) {
   dropMisplaced(blocks.filter(b => b.translatable), translations);
+  dropSpilledTail(blocks, translations);
   for (const b of blocks) {
     let v = translations[b.id];
     if (!v || !b.translatable) continue;
+    v = stripStrayTags(b.text, v); // v11: thẻ <n> model tự thêm (câu gốc không có)
+    v = fixMovedTags(b.text, v);
     const src = b.plain.replace(/\s+/g, ' ').trim();
     // 1) cụm lặp liền nhau (≥ 3 từ), bản gốc không lặp
     for (let guard = 0; guard < 4; guard++) {
@@ -724,11 +757,12 @@ export function polishTranslations(blocks: LayoutBlock[], translations: Record<s
     // 1b) v10.10: bản gốc VIẾT HOA toàn bộ (tiêu đề "PREFACE", "1. SHAPE", tab dọc "MAMMOGRAPHY", bìa sách) mà bản dịch
     //     viết thường → viết hoa như bản gốc ("1. hình dáng" → "1. HÌNH DÁNG", BI-RADS; "hướng dẫn cần thiết của CLARK", bìa Clark)
     {
-      const srcPlain = src.replace(/<\/?\d+>/g, '');
+      // v11: bỏ qua từ có chữ số ("v2025 MANUAL" ở chân trang BI-RADS → trước đây thành "sổ tay v2025")
+      const srcPlain = src.replace(/<\/?\d+>/g, '').replace(/\S*\d\S*/g, ' ');
       const LS0 = srcPlain.match(/\p{L}/gu) || [];
       const realWord = (srcPlain.match(/\p{L}{4,}/gu) || []).some(w => (w.match(/[AEIOUY]/g) || []).length >= 2);
       if (LS0.length >= 4 && realWord && LS0.every(ch => ch === ch.toUpperCase()) && /\p{Ll}/u.test(v.replace(/<\/?\d+>/g, ''))) {
-        v = v.replace(/(<\/?\d+>)|([^<]+)/g, (m, tag) => tag ? m : m.toLocaleUpperCase('vi'));
+        v = v.replace(/(<\/?\d+>)|([^<]+)/g, (m, tag) => tag ? m : m.replace(/\S+/g, w => /\d/.test(w) ? w : w.toLocaleUpperCase('vi')));
       }
     }
     // 1c) v10.10: nhãn mục ("I.", "2.", "A.") vẽ thành khối riêng bên trái mà AI lặp lại ở đầu bản dịch → "I. I. CÁC LOẠI…"
@@ -738,6 +772,31 @@ export function polishTranslations(blocks: LayoutBlock[], translations: Record<s
         const lab = lm[1] + '.';
         const hasLabel = blocks.some(o => o !== b && o.plain.trim() === lab && Math.abs(o.top - b.top) < 0.6 * b.size && o.x1 <= b.x0 + 1);
         if (hasLabel) v = v.replace(/^((<\d+>)?\s*)([IVXLC]+|\d{1,2}|[A-Z])\.\s+/, '$1');
+      }
+    }
+    // 1c2) v11: cụm đánh dấu trong câu gốc VIẾT HOA toàn bộ ("<1>HISTORY</1>: …", "<1>NOTE</1>: …") mà bản dịch viết
+    //      thường ("lịch sử:", "ghi chú:" — Atlas X-quang tuyến vú tr.32) → viết hoa phần trong thẻ tương ứng
+    for (const m of b.text.matchAll(/<(\d+)>([^<]*)<\/\1>/g)) {
+      // cụm trong thẻ bị để nguyên tiếng Anh ("<1>HISTORY</1>") mà bảng thuật ngữ có cách dịch → dùng bảng thuật ngữ
+      const g = glossaryExact(m[2]);
+      if (g && g !== m[2] && v.includes(`<${m[1]}>${m[2]}</${m[1]}>`)) v = v.split(`<${m[1]}>${m[2]}</${m[1]}>`).join(`<${m[1]}>${g}</${m[1]}>`);
+      const L = m[2].match(/\p{L}/gu) || [];
+      if (L.length < 3 || L.some(ch => ch !== ch.toUpperCase())) continue;
+      v = v.replace(new RegExp(`<${m[1]}>([^<]*)</${m[1]}>`, 'g'), (_s, inner) => `<${m[1]}>${inner.replace(/\S+/g, (w: string) => /\d/.test(w) ? w : w.toLocaleUpperCase('vi'))}</${m[1]}>`);
+    }
+    // (model bỏ mất thẻ: "<1>HISTORY</1>: A 44-year-old…" → "tiền sử: Một…" → viết hoa nhãn trước dấu ":")
+    {
+      const lm = b.text.match(/^<(\d+)>([^<]{2,30})<\/\1>\s*:/);
+      if (lm && !/^\s*<\d+>/.test(v) && !(lm[2].match(/\p{L}/gu) || []).some(ch => ch !== ch.toUpperCase())) {
+        v = v.replace(/^([^:<]{2,40}):/, (_s, lab: string) => `<${lm[1]}>${lab.trim().toLocaleUpperCase('vi')}</${lm[1]}>:`); // giữ cả kiểu chữ (đậm) của nhãn
+      }
+    }
+    // 1d) v11: câu gốc bắt đầu bằng chữ HOA mà bản dịch bắt đầu bằng chữ thường ("4.5.2 Malignant" → "ác tính",
+    //     "Breast Doppler Ductal Echography…" → "siêu âm ống tuyến vú doppler…" — Atlas tr.ix) → viết hoa chữ cái đầu
+    {
+      const s0 = src.replace(/<\/?\d+>/g, '').match(/\p{L}/u)?.[0];
+      if (s0 && s0 !== s0.toLowerCase()) {
+        v = v.replace(/^((?:<\/?\d+>|[^\p{L}])*)(\p{Ll})/u, (m, pre, ch) => pre + ch.toLocaleUpperCase('vi'));
       }
     }
     const plainV = v.replace(/<\/?\d+>/g, '');
@@ -762,12 +821,21 @@ export function polishTranslations(blocks: LayoutBlock[], translations: Record<s
         (src.match(/\b[A-Z]{2,}\b/g) || []).some(w => w.length >= 4 && /[AEIOU]/.test(w) && !/^(ECG|EKG|CCTA|CTCA|SPECT|TAVR|TAVI|ASCVD)$/.test(w));
       if (!srcCapsRun && !(LS.length >= 4 && LS.every(ch => ch === ch.toUpperCase()))) {
         const keepUp = new Set((src.match(/[\p{L}\d-]+/gu) || []).filter(t => /\p{Lu}.*\p{Lu}/u.test(t) && t === t.toUpperCase()));
-        v = v.replace(/((?:[\p{Lu}\d][\p{Lu}\d-]*\p{Lu}[\p{Lu}\d-]*|[\p{Lu}]{2,})(?:\s+(?:[\p{Lu}\d][\p{Lu}\d-]*\p{Lu}[\p{Lu}\d-]*|[\p{Lu}]{2,}))+)/gu, (run) => {
+        // v11: không đụng tới phần trong thẻ mà cụm gốc tương ứng VIẾT HOA ("<1>NOTE</1>:" → "<1>GHI CHÚ</1>:")
+        const capsTags = [...b.text.matchAll(/<(\d+)>([^<]*)<\/\1>/g)].filter(m => { const L = m[2].match(/\p{L}/gu) || []; return L.length >= 3 && L.every(ch => ch === ch.toUpperCase()); }).map(m => m[1]);
+        const protect = capsTags.length ? new RegExp(`(<(${[...new Set(capsTags)].join('|')})>[^<]*</\\2>)`, 'g') : null;
+        const lowerRuns = (s: string) => s.replace(/((?:[\p{Lu}\d][\p{Lu}\d-]*\p{Lu}[\p{Lu}\d-]*|[\p{Lu}]{2,})(?:\s+(?:[\p{Lu}\d][\p{Lu}\d-]*\p{Lu}[\p{Lu}\d-]*|[\p{Lu}]{2,}))+)/gu, (run) => {
           const ws = run.split(/\s+/);
           if (ws.filter(w => !keepUp.has(w)).length < 2) return run;
           return ws.map(w => keepUp.has(w) ? w : w.toLocaleLowerCase('vi')).join(' ');
         });
+        v = protect ? v.split(protect).map((part, i) => (i % 3 === 0 ? lowerRuns(part) : part)).filter((_, i) => i % 3 !== 2).join('') : lowerRuns(v);
       }
+    }
+    // 2c) v11: nhãn VIẾT HOA không có thẻ ở đầu khối ("HISTOPATHOLOGY: Fibroadenoma." → "mô bệnh học: …") → viết hoa nhãn
+    {
+      const um = b.text.match(/^([A-Z][A-Z\s\-\/&]{2,30}):/);
+      if (um && (um[1].match(/[A-Z]/g) || []).length >= 3) v = v.replace(/^([^:<]{2,40}):/, (_s, lab: string) => `${lab.toLocaleUpperCase('vi')}:`);
     }
     // 3) dấu chấm cuối thừa ở tiêu đề / nhãn ngắn
     if (/\.\s*(<\/\d+>)?\s*$/.test(v) && !/[.!?…:;)\]]\s*$/.test(src) && src.split(' ').length <= 12 && b.lineCount <= 2 && !/\.\.\s*$/.test(v)) {
@@ -910,6 +978,9 @@ const COMMON_EN = new Set(('the and of with for in on to by from or not see also
  * Bảng thuật ngữ của người dùng (Cài đặt) vẫn được ưu tiên trước.
  */
 const CELL_VI: Record<string, string> = {
+  // v11: nhãn hướng trong hình / sơ đồ — nano dịch nhầm "Lateral" thành "Chếch trong-ngoài" (lẫn với thuật ngữ MLO)
+  'lateral': 'Phía ngoài', 'medial': 'Phía trong', 'superior': 'Phía trên', 'inferior': 'Phía dưới',
+  'anterior': 'Phía trước', 'posterior': 'Phía sau', 'head': 'Đầu', 'foot': 'Chân', 'left': 'Trái', 'right': 'Phải',
   'age': 'Tuổi', 'age (years)': 'Tuổi (năm)', 'sex': 'Giới', 'gender': 'Giới', 'women': 'Nữ', 'men': 'Nam', 'female': 'Nữ',
   'male': 'Nam', 'females': 'Nữ', 'males': 'Nam', 'mild': 'Nhẹ', 'moderate': 'Trung bình', 'severe': 'Nặng',
   'low': 'Thấp', 'high': 'Cao', 'very low': 'Rất thấp', 'very high': 'Rất cao', 'intermediate': 'Trung gian',
@@ -940,6 +1011,27 @@ export function localCell(text: string): string | undefined {
  * của đoạn dưới, Interventional US tr.94): bản dịch dài gấp nhiều lần câu gốc ngắn VÀ trùng phần đầu với bản dịch của khối
  * khác trên trang → bỏ bản dịch đó (khối được dịch bù / hiện trong danh sách "Sửa lỗi").
  */
+/**
+ * v11: model dịch cả phần chữ của khối KẾ TIẾP vào khối trước (mục lục 2 dòng: "Nonpalpable Solid Breast Masses That
+ * Are Partially or Completely" | "Obscured at Mammography …180" → dòng 1 thành "…bị che khuất tại nhũ ảnh", dòng 2 lại
+ * "Bị che khuất tại nhũ ảnh" — Atlas tr.x). Bản dịch khối trước KẾT THÚC bằng đúng bản dịch khối sau, trong khi chữ gốc
+ * khối trước không chứa chữ gốc khối sau → cắt phần lặp ở cuối khối trước.
+ */
+export function dropSpilledTail(blocks: LayoutBlock[], out: Record<string, string>) {
+  const low = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s*(?:[.·…]\s*){3,}\s*\S*\s*$/, '').replace(/[\s.,;:]+$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  for (let i = 0; i + 1 < blocks.length; i++) {
+    const A = blocks[i], B = blocks[i + 1];
+    const va = out[A.id], vb = out[B.id];
+    if (!va || !vb || !A.translatable || !B.translatable || /<\d+>/.test(va)) continue;
+    const ta = low(va), tb = low(vb);
+    if (tb.length < 8 || tb.split(' ').length < 2 || ta.length < tb.length + 6 || !ta.endsWith(tb)) continue;
+    if (low(A.plain).includes(low(B.plain))) continue; // chữ gốc lặp thật
+    const idx = va.toLowerCase().lastIndexOf(tb);
+    if (idx <= 0) continue;
+    out[A.id] = va.slice(0, idx).replace(/[\s,;:–-]+$/, '').trim();
+  }
+}
+
 export function dropMisplaced(blocks: { id: string; text: string }[], out: Record<string, string>) {
   const plain = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim();
   const wc = (t: string) => (plain(t).match(/\S+/g) || []).length;
@@ -951,7 +1043,10 @@ export function dropMisplaced(blocks: { id: string; text: string }[], out: Recor
     const head = plain(v).toLowerCase().slice(0, 40);
     if (head.length < 25) continue;
     const dup = blocks.some(o => o !== b && out[o.id] && wc(o.text) > 2 * ns && plain(out[o.id]).toLowerCase().includes(head));
-    if (dup) delete out[b.id];
+    // v11: tiêu đề ngắn (≤ 6 từ) nhận bản dịch dài gấp ≥ 5 lần + 12 từ — gần như chắc chắn là bản dịch của đoạn văn bên
+    // dưới (lệch mã khối) dù đoạn đó được dịch với câu chữ khác → bỏ để dịch bù (Atlas X-quang tuyến vú tr.32)
+    const runaway = ns <= 6 && nv >= 5 * ns + 12;
+    if (dup || runaway) delete out[b.id];
   }
   // v10.10: AI lệch mã khối (bìa sách: khối "CLINICAL ULTRASOUND" nhận "JAN DODGEON", tên tác giả nhận chữ rác của khối dưới):
   // bản dịch trùng nguyên văn chữ gốc của KHỐI KHÁC (không phải của chính nó) → bỏ để dịch bù
@@ -983,6 +1078,125 @@ function isUntranslated(src: string, v: string): boolean {
   if (/\bet al\.|\bdoi\b|\b(19|20)\d{2}[;:,]\s*\d/.test(a)) return false;
   const stop = words.filter(w => /^(the|and|of|with|is|are|was|were|for|in|on|to|by|from|as|or|that|this|which|be|may|can|not|has|have)$/.test(w)).length;
   return stop >= 2;
+}
+
+/**
+ * v11: bản dịch "nửa vời" của model nhỏ (gpt-4.1-nano): giữ nguyên từ tiếng Anh của câu gốc, thường còn bọc trong thẻ <n>
+ * mà câu gốc KHÔNG có ("chiều dài <1>crown–rump</1>", "bệnh <1>developmental dysplasia</1> của khớp <1>hip</1>" — danh mục
+ * viết tắt Clark's tr.17). Trả về điểm (số từ tiếng Anh bị chép nguyên + thẻ lạ ×2); 0 = bình thường.
+ */
+export function partialEnglishScore(src: string, v: string): number {
+  if (!v) return 0;
+  const srcTags = new Set((src.match(/<(\d+)>/g) || []));
+  const stray = (v.match(/<(\d+)>/g) || []).filter(t => !srcTags.has(t)).length;
+  const srcPlain = src.replace(/<\/?\d+>/g, ' ');
+  // tên riêng / viết tắt / thuốc viết hoa → được giữ; chỉ tính từ thường tiếng Anh (≥ 4 chữ, không dấu) chép nguyên
+  const srcWords = new Set((srcPlain.match(/(?<![\p{L}\d-])[a-z]{4,}(?![\p{L}\d])/gu) || []).filter(w => !/^(https?|www|html|mmhg|vivo|vitro)$/.test(w)));
+  if (!srcWords.size) return stray * 2;
+  const vPlain = v.replace(/<\/?\d+>/g, ' ');
+  // câu gốc là tài liệu tham khảo / đường dẫn → bỏ qua
+  if (/https?:|www\.|doi:/i.test(srcPlain)) return stray * 2;
+  const kept = (vPlain.match(/(?<![\p{L}\d-])[a-z]{4,}(?![\p{L}\d])/gu) || []).filter(w => srcWords.has(w));
+  const n = new Set(kept).size;
+  // ≥ 2 từ tiếng Anh thường bị chép nguyên, hoặc 1 từ nếu đi kèm thẻ lạ
+  if (n >= 2 || (n >= 1 && stray > 0) || stray > 0) return n + stray * 2;
+  return 0;
+}
+
+/**
+ * v11: model nhỏ trả bản dịch LỆCH MÃ KHỐI (bản dịch của khối i gắn vào mã khối i−1 / i+1): chú thích Hình 2.16 nhận
+ * "HISTOPATHOLOGY: U xơ tuyến", tiêu đề "Exaggerated Craniocaudal Views" nhận cả đoạn văn bên dưới… (Atlas X-quang
+ * tuyến vú tr.32). Nhận ra bằng "mốc" không đổi khi dịch (số, từ viết tắt IN HOA, nhãn (A)…): mốc của bản dịch khớp
+ * khối bên cạnh rõ hơn hẳn khối của chính nó → trả về mã các khối lệch (để dịch lại từng khối riêng).
+ */
+export function findShiftedBlocks(blocks: { id: string; plain: string }[], out: Record<string, string>): string[] {
+  const anchors = (t: string) => new Set((t.replace(/<\/?\d+>/g, ' ').match(/\d+(?:[.,]\d+)*|\b[A-Z][A-Z0-9]{1,}\b|\([A-Za-z]\)/g) || []).map(x => x.replace(',', '.')));
+  const sim = (a: Set<string>, b: Set<string>) => { if (!a.size && !b.size) return 1; let n = 0; a.forEach(x => { if (b.has(x)) n++; }); return n / Math.max(1, a.size + b.size - n); };
+  const S = blocks.map(b => anchors(b.plain));
+  const V = blocks.map(b => anchors(out[b.id] || ''));
+  const bad: string[] = [];
+  // hai khối KHÁC câu gốc nhận CÙNG một bản dịch (tên sách tách 2 khung: "ESSENTIAL GUIDE TO" và "CLINICAL ULTRASOUND"
+  // đều nhận "HƯỚNG DẪN CẦN THIẾT VỀ SIÊU ÂM LÂM SÀNG" — bìa Clark's) → dịch lại từng khối riêng
+  {
+    const nv = (t: string) => t.replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const byV = new Map<string, string[]>();
+    for (const b of blocks) { const v = out[b.id]; if (v && nv(v).length >= 10) { const k = nv(v); byV.set(k, [...(byV.get(k) || []), b.id]); } }
+    for (const ids of byV.values()) {
+      if (ids.length < 2) continue;
+      const srcs = new Set(ids.map(id => nv(blocks.find(b => b.id === id)!.plain)));
+      if (srcs.size > 1) bad.push(...ids);
+    }
+  }
+  for (let i = 0; i < blocks.length; i++) {
+    if (!out[blocks[i].id] || bad.includes(blocks[i].id)) continue;
+    // khối ngắn nhận bản dịch dài gấp nhiều lần ("HISTOPATHOLOGY: Fibroadenoma." nhận nguyên câu "LƯU Ý: Hình LMO…")
+    {
+      const sl = blocks[i].plain.replace(/\s+/g, ' ').trim().length;
+      const vl0 = (out[blocks[i].id] || '').replace(/<\/?\d+>/g, '').length;
+      if (sl <= 60 && vl0 > 2 * sl + 20) { bad.push(blocks[i].id); continue; }
+      // đoạn dài mà bản dịch cụt hẳn ("Một số nhà nghiên cứu đã" cho cả đoạn 600 ký tự — Atlas tr.xix)
+      if (sl >= 150 && vl0 < 0.3 * sl) { bad.push(blocks[i].id); continue; }
+    }
+    const own = sim(S[i], V[i]);
+    if (own >= 0.34 || (S[i].size < 2 && V[i].size < 2)) continue;
+    const nb = [i - 1, i + 1].filter(j => j >= 0 && j < blocks.length && S[j].size >= 1);
+    if (nb.some(j => sim(S[j], V[i]) >= 0.6 && sim(S[j], V[i]) > own + 0.3)) { bad.push(blocks[i].id); continue; }
+    // bản dịch mất hết mốc của câu gốc và ngắn hẳn (chỉ là bản dịch của một khối ngắn khác) → cũng là lệch
+    const vl = (out[blocks[i].id] || '').replace(/<\/?\d+>/g, '').length;
+    if (S[i].size >= 3 && own === 0 && vl < 0.35 * blocks[i].plain.length) bad.push(blocks[i].id);
+  }
+  return bad;
+}
+
+/** Bỏ thẻ <n> mà câu gốc không có (model tự thêm) — giữ phần chữ bên trong. */
+export function stripStrayTags(src: string, v: string): string {
+  const srcTags = new Set((src.match(/<(\d+)>/g) || []).map(t => t.replace(/[<>]/g, '')));
+  return v.replace(/<\/?(\d+)>/g, (m, n) => (srcTags.has(n) ? m : ''));
+}
+
+/**
+ * v11: model đặt thẻ màu/đậm vào SAI từ: câu gốc "…phantom containing … <1>calcium hydroxyapatite</1>…" (chữ xanh liên kết)
+ * nhưng bản dịch "Điểm số canxi <1>coronary</1> …" — tô xanh nhầm từ "coronary" (lấy từ chỗ khác của câu gốc, để nguyên
+ * tiếng Anh), còn cụm đúng thì mất màu (CT tim tr.22). Phần trong thẻ của bản dịch là chữ tiếng Anh có trong câu gốc nhưng
+ * KHÔNG nằm trong thẻ tương ứng → bỏ thẻ sai; nếu cụm đúng còn nguyên văn trong bản dịch thì bọc thẻ lại cho cụm đó.
+ */
+export function fixMovedTags(src: string, v: string): string {
+  const srcPlainLow = src.replace(/<\/?\d+>/g, '').toLowerCase();
+  const srcInner = new Map<string, string[]>();
+  for (const m of src.matchAll(/<(\d+)>([\s\S]*?)<\/\1>/g)) {
+    const arr = srcInner.get(m[1]) || [];
+    arr.push(m[2].trim());
+    srcInner.set(m[1], arr);
+  }
+  let out = v;
+  const matches = (inner: string, want: string[]) => { const a = inner.toLowerCase(); return want.some(w => { const b = w.toLowerCase(); return !!b && (a.includes(b) || b.includes(a)); }); };
+  for (const [n, want] of srcInner) {
+    const occ = [...out.matchAll(new RegExp(`<${n}>([\\s\\S]*?)</${n}>`, 'g'))];
+    if (!occ.length) continue;
+    const wrong = (m: RegExpMatchArray) => {
+      const inner = m[1].trim();
+      // cụm chữ Latinh để nguyên, có trong câu gốc nhưng không thuộc cụm được đánh dấu → đặt sai chỗ
+      return /^[A-Za-z][A-Za-z\s\-]{3,}$/.test(inner) && !matches(inner, want) && srcPlainLow.includes(inner.toLowerCase());
+    };
+    let drop = occ.filter(wrong);
+    // thẻ lặp NHIỀU lần hơn câu gốc (đoạn chỉ có 1 cụm xanh mà bản dịch tô 6 cụm) → giữ các lần khớp cụm gốc,
+    // không có lần nào khớp thì giữ đủ số lần đầu tiên
+    const keepable = occ.filter(m => !drop.includes(m));
+    if (keepable.length > want.length) {
+      const good = keepable.filter(m => matches(m[1].trim(), want));
+      const keep = (good.length ? good : keepable).slice(0, want.length);
+      drop = drop.concat(keepable.filter(m => !keep.includes(m)));
+    }
+    if (!drop.length) continue;
+    for (const m of drop) out = out.replace(m[0], m[1]);
+    // cụm gốc còn nguyên văn trong bản dịch mà chưa có thẻ → bọc lại
+    for (const w of want) {
+      if (w.length < 3 || new RegExp(`<${n}>[^<]*${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(out)) continue;
+      const i = out.toLowerCase().indexOf(w.toLowerCase());
+      if (i >= 0 && !/<\d+>[^<]*$/.test(out.slice(0, i))) out = out.slice(0, i) + `<${n}>` + out.slice(i, i + w.length) + `</${n}>` + out.slice(i + w.length);
+    }
+  }
+  return out;
 }
 
 /** v10.6: chạy các phần với tối đa `n` phần cùng lúc (dịch bù / dịch lại số liệu trước đây gửi hết một lượt). */
@@ -1102,8 +1316,32 @@ async function translateBlocks(
   await Promise.all(Array.from({ length: Math.min(plan.parallel, chunks.length) }, runOne));
   checkAbort(signal);
   dropMisplaced(blocks, out);
+  // v11: bản dịch lệch mã khối → dịch lại TỪNG khối riêng (một khối một lượt thì không thể lệch)
+  {
+    const shifted = findShiftedBlocks(blocks, out);
+    if (shifted.length) {
+      console.warn(`[Layout] ${shifted.length} khối nhận nhầm bản dịch của khối bên cạnh → dịch lại từng khối.`);
+      for (const id of shifted) delete out[id];
+      const one = blocks.filter(b => shifted.includes(b.id));
+      try {
+        const again = await runPool(one, plan.parallel, b => translator.translateLayoutBlocks([{ id: b.id, text: b.text }], signal));
+        for (const r of again) Object.assign(out, r);
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        console.warn('[Layout] Dịch lại khối lệch thất bại:', e);
+      }
+    }
+  }
   // Khối AI bỏ sót HOẶC trả nguyên văn tiếng Anh (thỉnh thoảng xảy ra) → dịch bù một lần
-  const missing = blocks.filter(b => !out[b.id] || isUntranslated(b.text, out[b.id]));
+  // v11: + khối dịch nửa vời (giữ từ tiếng Anh / thẻ lạ) → dịch lại một lần, chỉ nhận bản mới nếu tốt hơn
+  const partial = new Map<string, number>();
+  for (const b of blocks) {
+    const v = out[b.id];
+    if (!v || chainInfo.has(b.id)) continue;
+    const s = partialEnglishScore(b.text, v);
+    if (s > 0) partial.set(b.id, s);
+  }
+  const missing = blocks.filter(b => !out[b.id] || isUntranslated(b.text, out[b.id]) || partial.has(b.id));
   if (missing.length) {
     try {
       const again = await runPool(chunkBlocks(missing, plan.blocks, plan.chars), plan.parallel, chunk =>
@@ -1111,7 +1349,10 @@ async function translateBlocks(
       again.forEach(r => {
         for (const [id, v] of Object.entries(r)) {
           const b = missing.find(x => x.id === id);
-          if (!out[id] || (b && !isUntranslated(b.text, v))) out[id] = v;
+          if (!b) continue;
+          const prev = partial.get(id);
+          if (prev !== undefined) { if (!isUntranslated(b.text, v) && partialEnglishScore(b.text, v) < prev) out[id] = v; continue; }
+          if (!out[id] || !isUntranslated(b.text, v)) out[id] = v;
         }
       });
     } catch (e) {
@@ -1216,7 +1457,7 @@ export function isReferenceBlock(plain: string, afterRefHeading: boolean): boole
   const t = (plain || '').replace(/\s+/g, ' ').trim();
   if (t.length < 12) return false;
   if (isReferenceLine(t)) return true;
-  if (!afterRefHeading) return false;
+  if (!afterRefHeading || looksLikeProse(t)) return false; // v11: đoạn văn có trích dẫn "(2001)" không phải mục tham khảo
   if (/\bdoi\b|https?:\/\/|www\./i.test(t)) return true;
   return /\b(19|20)\d{2}[a-z]?\b/.test(t) && /^(\[?\d{1,3}[.)\]]?\s+)?[A-ZÀ-Ý][\p{L}'’-]+,?\s+[A-Z]/u.test(t);
 }
@@ -1390,11 +1631,32 @@ async function translatePageWithLayoutInner(
         console.info(`[Layout] Trang ${pageNumber}: không có chữ để dịch → giữ nguyên trang gốc.`);
         return noTextResult(await finishPage({ ...analyzed, blocks: [], scanned: true }, pageNumber, {}, undefined, undefined, signal));
       }
-      analyzed = applyOcr(analyzed, ocr);
+      // v11: kết quả OCR không tin cậy (nhiều khung đặt sai chỗ / đè nhau — trang biểu mẫu dày đặc, CĐHA tuyến vú – Kiến
+      // thức thiết yếu tr.31) → đọc lại 1 lần; vẫn kém thì GIỮ NGUYÊN trang gốc và đánh dấu để báo khi xuất PDF (trước đây
+      // vẽ ra trang lẫn lộn chữ dịch đè chữ gốc).
+      const quality = (a: Analyzed) => { const r: any = refinedOcr.get(a.blocks); return r ? Math.max(r.badRatio || 0, r.overlapRatio || 0) : 0; };
+      const base = analyzed;
+      analyzed = applyOcr(base, ocr);
+      if (ocr.length >= 8 && quality(analyzed) > 0.2) {
+        console.warn(`[Layout] Trang ${pageNumber}: OCR đặt sai chỗ nhiều khối (${Math.round(quality(analyzed) * 100)}%) → đọc lại.`);
+        try {
+          const again = normalizeOcrBoxes(await translator.ocrLayoutBlocks(ocrImage(base.canvas), signal, { mode: 'full' }), base.canvas);
+          checkAbort(signal);
+          if (again.length) {
+            const a2 = applyOcr(base, again);
+            if (quality(a2) < quality(analyzed)) { analyzed = a2; ocr = again; }
+          }
+        } catch (e) { if (signal?.aborted) throw e; }
+        if (quality(analyzed) > 0.3) {
+          console.warn(`[Layout] Trang ${pageNumber}: OCR vẫn không tin cậy → giữ nguyên trang gốc (cần dịch lại / kiểm tra).`);
+          return noTextResult(await finishPage({ ...base, blocks: [], scanned: true }, pageNumber, {}, undefined, undefined, signal));
+        }
+      }
+      const ocrUsed = refinedOcr.get(analyzed.blocks) || ocr;
       const translations: Record<string, string> = {};
       const missing: LayoutBlock[] = [];
       for (const b of analyzed.blocks) {
-        const v = ocrTranslation(ocr, b);
+        const v = ocrTranslation(ocrUsed, b);
         const g = glossaryExact(b.plain) ?? localCell(b.plain);
         // AI để nguyên tiếng Anh (thường gặp với chữ IN HOA / chữ dọc như "MAMMOGRAPHY") → bảng thuật ngữ hoặc dịch bù
         if (g && (!v || normKey(v).toLowerCase() === normKey(b.plain).toLowerCase())) translations[b.id] = g;
@@ -1744,7 +2006,7 @@ function openLayoutDBOnce(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v38'; // v38: dòng mục lục có số trang cột phải tách riêng, bảng kẻ không bị coi là khung lưu đồ, dòng căn đều không nối sang cột bên, giữ VIẾT HOA như bản gốc; // v37: chú thích hình 2 cột không nối dòng đầu sang cột bên, nhãn Hình/Bảng giữ chữ đậm khi AI bỏ thẻ; // v36: ô lưu đồ có viền, bìa không giãn chữ, dòng Editors/tên tác giả chân trang riêng, cột viết tắt không co, tiêu đề bảng không kéo cột nhỏ, cụm lặp / VIẾT HOA / dấu chấm thừa trong bản dịch, ô chỉ có từ viết tắt giữ nguyên; // v35: cột viết tắt giữ nguyên, tên tác giả giữ nguyên, dòng căn đều có số/chỉ số không vỡ, thân bài dưới bảng không bị coi là ô bảng, bảng có kẻ tách ô cột hẹp, cỡ chữ bảng theo đa số ô; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
+const ENGINE_VERSION = 'v39'; // v39 (MediTrans v11): căn giữa/căn phải bỏ thụt lề, khối chữ ký căn phải, danh mục viết tắt không nối dòng, từ đậm đầu đoạn không tách, mục lục OCR nới khung, OCR bỏ khối trùng/dời chú thích, bỏ thẻ lạ, cắt phần dịch tràn sang khối sau; // v38: dòng mục lục có số trang cột phải tách riêng, bảng kẻ không bị coi là khung lưu đồ, dòng căn đều không nối sang cột bên, giữ VIẾT HOA như bản gốc; // v37: chú thích hình 2 cột không nối dòng đầu sang cột bên, nhãn Hình/Bảng giữ chữ đậm khi AI bỏ thẻ; // v36: ô lưu đồ có viền, bìa không giãn chữ, dòng Editors/tên tác giả chân trang riêng, cột viết tắt không co, tiêu đề bảng không kéo cột nhỏ, cụm lặp / VIẾT HOA / dấu chấm thừa trong bản dịch, ô chỉ có từ viết tắt giữ nguyên; // v35: cột viết tắt giữ nguyên, tên tác giả giữ nguyên, dòng căn đều có số/chỉ số không vỡ, thân bài dưới bảng không bị coi là ô bảng, bảng có kẻ tách ô cột hẹp, cỡ chữ bảng theo đa số ô; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch

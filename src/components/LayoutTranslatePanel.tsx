@@ -546,11 +546,15 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       if (failed.length) problems.push(`• ${failed.length} trang lỗi khi dựng lại (bị bỏ khỏi file): ${fmt(failed)}`);
       if (untranslatedPages.length || untranslatedRef.current) problems.push(`• Trang còn khối chưa có bản dịch (giữ chữ gốc): ${untranslatedPages.length ? fmt(untranslatedPages) : `${untranslatedRef.current} khối`}`);
       if (numericPages.length) problems.push(`• ${numericPages.length} trang có khối lệch số liệu so với bản gốc, chưa duyệt: ${fmt(numericPages)}`);
+      // v11: trang AI OCR không đọc ra chữ → đang giữ nguyên trang gốc (tiếng Anh); trước đây xuất PDF im lặng, không báo
+      const noTextPages = pages.filter(r => r.noText).map(r => r.pageNumber);
+      if (noTextPages.length) problems.push(`• ${noTextPages.length} trang AI không đọc được chữ, đang giữ nguyên bản gốc (trang có chữ thì nên dịch lại): ${fmt(noTextPages)}`);
       if (problems.length) {
-        const fixable = new Set([...untranslatedPages, ...numericPages]).size;
+        const redoPages = Array.from(new Set([...numericPages, ...noTextPages]));
+        const fixable = new Set([...untranslatedPages, ...redoPages]).size;
         const choice = await askExport(problems, pages.length, fixable);
         if (choice === 'cancel') { showToast('Đã huỷ xuất PDF.', 'info'); return; }
-        if (choice === 'fix') { fixPendingRef.current = { fill: untranslatedPages.filter(p => !numericPages.includes(p)), redo: numericPages }; return; }
+        if (choice === 'fix') { fixPendingRef.current = { fill: untranslatedPages.filter(p => !redoPages.includes(p)), redo: redoPages }; return; }
       }
       // v9.0: luôn xuất MỘT file PDF duy nhất cho toàn bộ các trang (trước đây chia 150 trang/file).
       // Ảnh trang được đọc lần lượt từ ổ đĩa và nhúng thẳng vào PDF nên vẫn nhẹ bộ nhớ.

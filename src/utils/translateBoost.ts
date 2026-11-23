@@ -108,11 +108,24 @@ export async function fixUntranslatedLines(md: string, svc: LayoutTranslator | n
 
 /* ---------------- Tài liệu tham khảo: giữ nguyên, KHÔNG gửi AI (tiết kiệm token) ---------------- */
 
+/** v11: câu văn xuôi (bắt đầu bằng từ thông dụng, hoặc đoạn dài nhiều hư từ) — không phải mục tài liệu tham khảo. */
+export function looksLikeProse(text: string): boolean {
+  const t = text.replace(/^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+|\[\d{1,3}\]\s*)/, '').trim();
+  if (/^(The|A|An|In|This|These|Those|It|Its|We|Our|As|At|For|On|To|Of|With|However|Although|When|While|If|Other|Another|Some|Most|Many|All|Both|Several|There|Because|Since|After|Before|During|Based|Unlike|Like|One|Two|Each|Such)\s/.test(t)) return true;
+  const words = t.toLowerCase().match(/\p{L}+/gu) || [];
+  const stop = words.filter(w => /^(the|of|and|to|in|that|with|was|were|which|is|are|be|been|has|have|had|by|for|as|this|these|than|but|not|their|it|its|also)$/.test(w)).length;
+  return words.length >= 40 && stop / words.length > 0.2;
+}
+
 /** Một dòng là mục tài liệu tham khảo: bắt đầu bằng tên tác giả + chữ viết tắt, có năm và dấu hiệu trích dẫn. */
 export function isReferenceLine(line: string): boolean {
   const t = line.replace(/^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+|\[\d{1,3}\]\s*)/, '').replace(/\*\*/g, '').trim();
   if (t.length < 25) return false;
   if (!/\b(19|20)\d{2}[a-z]?\b/.test(t)) return false;
+  // v11: câu văn thân bài có trích dẫn tác giả–năm ("The CAD marks have low specificity. Freer and Ulissey (2001)…",
+  // "Gur et al. (2004)…") từng bị coi là mục tài liệu tham khảo → giữ nguyên tiếng Anh CẢ CỘT, không báo lỗi
+  // (Chẩn đoán HA tuyến vú – Kiến thức thiết yếu tr.27). Mục tham khảo không bắt đầu bằng từ thông dụng và ít hư từ.
+  if (looksLikeProse(t)) return false;
   const author = /^[A-ZÀ-Ý][\p{L}'’\-]+(?:\s+[A-Z][\p{L}'’\-]+)?,?\s+(?:[A-Z]{1,3}\b|[A-Z]\.(?:\s?[A-Z]\.)*)/u.test(t);
   const cite = /\bet al\b|\bdoi\b|\b(19|20)\d{2}[a-z]?\s*[;.,:]\s*\(?\d|\d+\s*\(\d+\)\s*:\s*\d|:\s*\d+\s*[–-]\s*\d+|\bpp?\.\s*\d|\bIn:\s|\b(?:Springer|Elsevier|Wiley|Lippincott|Thieme)\b/i.test(t);
   return author && cite;

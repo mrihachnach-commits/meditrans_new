@@ -46,6 +46,8 @@ interface NormItem {
   hScale: number;    // co/giãn ngang để khớp độ rộng chữ gốc (font hẹp/rộng)
   /** Chữ hoa cỡ lớn đầu đoạn (drop cap) — tách khỏi dòng, gắn vào đoạn văn bên phải. */
   dropCap?: boolean;
+  /** v11: cỡ chữ GHI TRONG PDF (trước khi hiệu chỉnh theo mực trên ảnh) */
+  pdfSize?: number;
 }
 
 interface Run extends RunStyle { text: string; }
@@ -119,6 +121,8 @@ export interface LayoutBlock {
   /** v10.0: mỗi lần đổi kiểu chữ trong bản gốc đều trùng chỗ xuống dòng (mục lục: tên bài / tác giả in nghiêng)
    *  → bản dịch cũng xuống dòng tại chỗ đổi kiểu chữ. */
   breakOnStyle?: boolean;
+  /** v11: mỗi nhãn in nghiêng/đậm kết thúc bằng ":" ở đầu dòng gốc bắt đầu một dòng mới ("Form: … / Contour: …"). */
+  labelLines?: boolean;
   /** Chữ hoa cỡ lớn đầu đoạn: vẽ lại chữ cái đầu của bản dịch ở cùng vị trí/cỡ, các dòng bên cạnh thụt vào. */
   dropCap?: DropCap;
   /** v9.6: nhãn đầu khối in đậm trên ảnh scan ("Figure 1", "Table 2") → in đậm nhãn tương ứng của bản dịch ("Hình 1"). */
@@ -439,7 +443,7 @@ export function normalizeItems(
     if (Math.abs(m[1]) > 0.05 * Math.abs(m[0]) || m[0] <= 0) continue; // chữ xoay: giữ nguyên
     const st = getStyle(it.fontName);
     out.push({
-      str: it.str, x: m[4], y: m[5], size, w: Math.max(0, it.width * scale),
+      str: it.str, x: m[4], y: m[5], size, w: Math.max(0, it.width * scale), pdfSize: size,
       bold: st.bold, italic: st.italic, serif: st.serif, color: null, font: it.fontName, hScale: 1,
     });
   }
@@ -996,7 +1000,10 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[], rules: H
             // mẩu sau viết thường, là mẩu CUỐI hàng và chạm đúng mép phải cột chữ (mép phải xa nhất của các dòng bắt đầu
             // cùng mép trái với mẩu đang gom) → vẫn một dòng
             const nx = row[row.indexOf(it) + 1];
-            if (/^\s*\p{Ll}/u.test(it.str) && gap <= 6 * mainSize && !/[.!?:;]\W{0,2}$/.test(curText) && (!nx || nx.x - (it.x + it.w) > 1.5 * mainSize)) {
+            // v11: KHÔNG áp dụng khi mẩu sau bắt đầu ĐÚNG mép cột định nghĩa của ≥ 2 dòng lân cận (danh mục viết tắt Clark's
+            // tr.17: "cfNIPT" | "cell-free non-invasive…" — mép phải tình cờ trùng một dòng khác → bị nối thành 1 dòng, nhập
+            // vào khối "CFA" ở trên, bản dịch đè lên "common femoral artery")
+            if (j.exact < 2 && /^\s*\p{Ll}/u.test(it.str) && gap <= 6 * mainSize && !/[.!?:;]\W{0,2}$/.test(curText) && (!nx || nx.x - (it.x + it.w) > 1.5 * mainSize)) {
               const x0 = cur[0].x;
               let edge = -Infinity;
               for (let rj = Math.max(0, ri - 30); rj <= Math.min(rows.length - 1, ri + 30); rj++) {
@@ -1046,7 +1053,10 @@ function buildSegments(rawItems: NormItem[], gutterOverride?: number[], rules: H
         // rơi vào cỡ của chữ "2" mũ)
         const sizedCur = cur.filter(c => letterCount(c.str) > 0 && c.size > 0.75 * mainSize);
         const curSize = median((sizedCur.length ? sizedCur : cur).map(c => c.size));
-        const sizeBreak = gap > 0.5 * Math.min(it.size, curSize) &&
+        // v11: cỡ ghi trong PDF bằng nhau (chỉ khác do đo mực: từ in đậm ngắn "Doppler" đầu đoạn đo ra 28,5 so với 33,6) →
+        // vẫn cùng dòng. Trước đây từ đậm bị tách thành khối riêng, giữ nguyên chữ gốc và đè lên dòng dịch (Clark's tr.8)
+        const samePdfSize = !!it.pdfSize && !!prevMain.pdfSize && Math.abs(it.pdfSize - prevMain.pdfSize) < 0.03 * it.pdfSize;
+        const sizeBreak = !samePdfSize && gap > 0.5 * Math.min(it.size, curSize) &&
           Math.abs(it.size - curSize) > 0.1 * Math.max(it.size, curSize) &&
           letterCount(curText) >= 2 && (letterCount(it.str) >= 2 || LABEL_RE.test(it.str.trim()));
         // v10.6: dòng đầu chú thích hình/bảng căn đều ("Fig. 19.11 Aortic   Dissection   Related   Aortic") có khe rộng
@@ -1700,6 +1710,13 @@ export function buildBlocks(
       // là một mục riêng — trước đây các mục liền nhau bị nhập thành đoạn, bản dịch ngắt dòng lệch số trang (mục lục Clark's)
       const pageNumOn = (l: Segment) => segments.some(n => n !== l && /^\d{1,4}$/.test(n.text.trim()) && Math.abs(n.y - l.y) < 0.4 * l.size && n.x0 > l.x1 + 0.8 * l.size && n.x0 - l.x1 < 40 * l.size);
       if (pageNumOn(last) && pageNumOn(seg)) continue;
+      // v11: dòng TOÀN chữ đậm, ngắn hoặc kết thúc bằng ":" ngay dưới đoạn văn thường = nhãn / tiêu đề mới ("Lung-/pleura
+      // window:" dưới đoạn hướng dẫn bài tập — CT Teaching Manual tr.45), không phải dòng tiếp của đoạn
+      {
+        const lettered = (l: Segment) => l.runs.filter(r => /\p{L}/u.test(r.text));
+        const allBold = (l: Segment) => { const rs = lettered(l); return rs.length > 0 && rs.every(r => r.bold); };
+        if (allBold(seg) && !b.lines.some(allBold) && (/:\s*$/.test(segText) || seg.x1 - seg.x0 < 0.6 * blockWidth)) continue;
+      }
       if (((prevShort && !centeredPair) || indentStart) && !(rightCont && !leftAligned) && !emailLine) continue;
       if (gap < bestGap) { bestGap = gap; bestBlock = b; }
     }
@@ -1764,6 +1781,23 @@ export function buildBlocks(
     const columnEdge = blocks.some(o => o !== b && o.lineCount >= 2 && Math.abs(o.x1 - b.x1) < 0.6 * b.size &&
       (o.align === 'justify' || o.lineCount >= 3));
     if (!columnEdge && sameRight.length >= 2 && ragged >= 1 && sameRight.length > sameLeft) b.align = 'right';
+  }
+  // v11: khối chữ ký / địa chỉ căn phải ở cuối bài ("A Stewart Whitley / Series Editor / ISRRT Director… / Preston, UK" —
+  // Clark's tr.9): các dòng ngắn xếp chồng, chung mép phải với lề cột nhưng bắt đầu lùi xa vào giữa. Quy tắc cột nhãn ở trên
+  // bỏ qua vì mép phải trùng lề cột (columnEdge) → trước đây căn trái, bản dịch xuống dòng bị dồn sang trái, lệch khỏi khối.
+  {
+    const near = (a: LayoutBlock, o: LayoutBlock) => Math.min(Math.abs(o.top - a.bottom), Math.abs(a.top - o.bottom)) < 1.6 * a.size;
+    const colLeft = (a: LayoutBlock) => Math.min(...blocks.filter(o => o.lineCount >= 2 && o.x0 < a.x1 && o.x1 > a.x0 && Math.abs(o.x1 - a.x1) < 0.6 * a.size).map(o => o.x0), a.x0);
+    const inset = (a: LayoutBlock) => a.x0 - colLeft(a) > 2.5 * a.size;
+    const cands = blocks.filter(b => b.align === 'left' && !b.leader && !b.dropCap && !b.tableId && b.lineCount <= 3 && inset(b) &&
+      !blocks.some(o => o !== b && Math.abs(o.top - b.top) < 0.5 * b.size && (o.x1 <= b.x0 + 1 || o.x0 >= b.x1 - 1)));
+    const flip: LayoutBlock[] = [];
+    for (const b of cands) {
+      const mates = blocks.filter(o => o !== b && Math.abs(o.x1 - b.x1) < 0.5 * b.size && Math.abs(o.size - b.size) < 0.25 * b.size &&
+        near(b, o) && o.lineCount <= 3 && Math.abs(o.x0 - b.x0) > 1.5 * b.size && inset(o));
+      if (mates.length) flip.push(b);
+    }
+    for (const b of flip) b.align = 'right';
   }
   // v10.7: cột CHỮ VIẾT TẮT của bảng viết tắt ("CAD | Coronary artery disease", "PCI | Percutaneous…") giữ nguyên, không
   // gửi đi dịch — trước đây AI dịch luôn "CAD" thành "Bệnh động mạch vành" rồi nhét vào ô hẹp, chữ tí hon chồng lên hàng dưới
@@ -1907,6 +1941,18 @@ function finalizeBlock(b: WorkBlock, pageWidth: number): LayoutBlock {
     // "(white arrows)") là tình cờ, không phải ngắt dòng theo kiểu chữ → trước đây dòng 2 bị ép xuống dòng, giãn chữ rất thưa
     breakOnStyle = B >= 1 && B === T && !(B === 1 && fullBefore === 1);
   }
+  // v11: khối "nhãn: giá trị" mỗi mục một dòng, nhãn in nghiêng/đậm ("Form: oval… / Contour: mostly sharp… / Density: …
+  // / Size: 2×2 cm" — Atlas Giảng dạy X-quang tr.33) → bản dịch trước đây chảy thành một đoạn liền ("…dạng thùy Viền: chủ
+  // yếu…"). Đánh dấu để khi dàn chữ, mỗi nhãn in nghiêng/đậm có dấu ":" bắt đầu một dòng mới.
+  let labelLines = false;
+  if (lines.length >= 2) {
+    const labelStart = (l: Segment) => {
+      const r0 = l.runs.find(r => /[\p{L}\p{N}]/u.test(r.text));
+      if (!r0 || !(r0.bold || r0.italic) || (r0.bold === baseStyle.bold && r0.italic === baseStyle.italic)) return false;
+      return /^\s*[\p{L}][\p{L}\s\-\/()]{0,30}:/u.test(l.text);
+    };
+    labelLines = lines.filter(labelStart).length >= 2;
+  }
   const width = b.x1 - b.x0;
   let align: BlockAlign = 'left';
   if (lines.length >= 3) {
@@ -1955,6 +2001,7 @@ function finalizeBlock(b: WorkBlock, pageWidth: number): LayoutBlock {
     restOffset: restOffset > 0.4 * b.size ? restOffset : 0,
     bold: baseStyle.bold,
     breakOnStyle: breakOnStyle || undefined,
+    labelLines: labelLines || undefined,
     italic: baseStyle.italic || count(s => s.italic) > 0.5,
     serif: count(s => s.serif) >= 0.5,
     align,
@@ -2211,6 +2258,16 @@ function layoutWords(
   return layoutWordsInner(m, words, b, base, width, size, lineRatio, useBodyRight);
 }
 
+/**
+ * v11: thụt đầu dòng / thụt treo chỉ có nghĩa với khối căn trái / căn đều. Khối căn giữa (trang tên sách: "Former Senior
+ * Lecturer… / University of Salford, UK / Associate Professor") có mép trái các dòng so le chỉ vì canh giữa → trước đây
+ * bị coi là thụt treo, các dòng sau bị đẩy lệch sang phải (Clark's tr.3).
+ */
+function lineIndent(b: LayoutBlock, i: number): number {
+  if (b.align === 'center' || b.align === 'right') return 0;
+  return i === 0 ? b.firstOffset : b.restOffset;
+}
+
 function layoutWordsInner(
   m: Measurer, words: Word[], b: LayoutBlock, base: RunStyle, width: number, size: number, lineRatio: number,
   useBodyRight: boolean,
@@ -2220,7 +2277,7 @@ function layoutWordsInner(
   const space = m.width(' ', fontCss(base, serif, size)) * hs;
   const scale = size / b.size;
   const lineWidth = (i: number) => {
-    const w = width - (i === 0 ? b.firstOffset : b.restOffset) * scale - (b.dropCap && i < b.dropCap.lines ? b.dropCap.w : 0);
+    const w = width - lineIndent(b, i) * scale - (b.dropCap && i < b.dropCap.lines ? b.dropCap.w : 0);
     // Mục lục nhiều dòng: các dòng trên ngắt như bản gốc (chừa khoảng cho số trang)
     return useBodyRight && b.bodyRight ? Math.min(w, b.bodyRight + 0.5 * b.size - b.x0) : w;
   };
@@ -2257,10 +2314,24 @@ function layoutWordsInner(
     else expanded.push(w);
   }
   const styleKey = (w: Word | undefined) => { const p = w?.find(q => /[\p{L}\p{N}]/u.test(q.text)) || w?.[0]; return p ? `${!!p.style.bold}|${!!p.style.italic}` : ''; };
-  for (const w of expanded) {
+  // v11: vị trí bắt đầu một nhãn in nghiêng/đậm kết thúc bằng ":" (khối labelLines) → xuống dòng trước nhãn
+  const labelAt = new Set<number>();
+  if (b.labelLines) {
+    const styled = (w: Word | undefined) => { const p = w?.find(q => /[\p{L}\p{N}]/u.test(q.text)); return !!p && (!!p.style.bold || !!p.style.italic) && !(p.style.bold === base.bold && p.style.italic === base.italic); };
+    for (let i = 1; i < expanded.length; i++) {
+      if (!styled(expanded[i]) || styled(expanded[i - 1])) continue;
+      for (let j = i; j < Math.min(expanded.length, i + 5) && styled(expanded[j]); j++) {
+        const t = expanded[j].map(p => p.text).join('');
+        if (/:\s*$/.test(t) || /^:/.test(expanded[j + 1]?.map(p => p.text).join('') || '')) { labelAt.add(i); break; }
+      }
+    }
+  }
+  for (let wi = 0; wi < expanded.length; wi++) {
+    const w = expanded[wi];
     const ww = wordWidth(m, w, serif, size, hs);
     const limit = lineWidth(lines.length);
-    const styleBreak = !!b.breakOnStyle && line.length > 0 && styleKey(line[line.length - 1]) !== styleKey(w) && /[\p{L}\p{N}]/u.test(w.map(p => p.text).join(''));
+    const styleBreak = (!!b.breakOnStyle && line.length > 0 && styleKey(line[line.length - 1]) !== styleKey(w) && /[\p{L}\p{N}]/u.test(w.map(p => p.text).join(''))) ||
+      (labelAt.has(wi) && line.length > 0);
     if (line.length && (styleBreak || lw + space + ww > limit)) {
       lines.push(line);
       line = [w];
@@ -2274,7 +2345,7 @@ function layoutWordsInner(
 
   // v10.4: đoạn căn đều → ngắt dòng cân bằng cả đoạn (kiểu Knuth–Plass rút gọn): cùng số dòng như cách ngắt tham lam
   // nhưng chia đều khoảng trống cho các dòng → không còn dòng giãn rất rộng ("Ưu điểm của MLD đơn thuần, được")
-  if (b.align === 'justify' && !b.leader && !b.breakOnStyle && !b.dropCap && lines.length >= 2 && expanded.length <= 1500) {
+  if (b.align === 'justify' && !b.leader && !b.breakOnStyle && !labelAt.size && !b.dropCap && lines.length >= 2 && expanded.length <= 1500) {
     const n = expanded.length;
     const ws = expanded.map(w => wordWidth(m, w, serif, size, hs));
     const LINE_PEN = 1e7;
@@ -2335,7 +2406,7 @@ function drawLaidOut(
   let y = top + size * 0.93;
   lo.lines.forEach((line, i) => {
     const isLast = i === lo.lines.length - 1;
-    const offset = (i === 0 ? b.firstOffset : b.restOffset) * scale + (b.dropCap && i < b.dropCap.lines ? b.dropCap.w : 0);
+    const offset = lineIndent(b, i) * scale + (b.dropCap && i < b.dropCap.lines ? b.dropCap.w : 0);
     const avail = width - offset;
     const widths = line.map(w => wordWidth(m, w, serif, size, hs));
     const natural = widths.reduce((s, w) => s + w, 0) + space * Math.max(0, line.length - 1);
@@ -3648,6 +3719,8 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
   // Khung AI (pixel)
   type Pre = { o: OcrBlock; X0: number; X1: number; Y0: number; Y1: number; rotate?: 'up' | 'down'; pitch: number; idx: number };
   const pre: Pre[] = [];
+  const withText = ocr.filter(o => o?.text?.trim());
+  const dirShare = withText.length >= 6 ? withText.filter(o => /^(up|down)$/i.test(String(o.dir || ''))).length / withText.length : 0;
   for (let idx = 0; idx < ocr.length; idx++) {
     const o = ocr[idx];
     if (!o || !Array.isArray(o.box_2d) || o.box_2d.length !== 4 || !o.text?.trim()) continue;
@@ -3655,15 +3728,61 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
     if (![ymin, xmin, ymax, xmax].every(Number.isFinite)) continue;
     if (ymin > ymax) [ymin, ymax] = [ymax, ymin];
     if (xmin > xmax) [xmin, xmax] = [xmax, xmin];
-    const X0 = Math.max(0, xmin / 1000 * W), X1 = Math.min(W, xmax / 1000 * W);
+    let X0 = Math.max(0, xmin / 1000 * W), X1 = Math.min(W, xmax / 1000 * W);
     let Y0 = Math.max(0, ymin / 1000 * H), Y1 = Math.min(H, ymax / 1000 * H);
     if (X1 - X0 < 3) continue;
     if (Y1 - Y0 < 0.012 * H) { // khung AI quá thấp → nới thành ít nhất một dòng chữ
       const c = (Y0 + Y1) / 2;
       Y0 = Math.max(0, c - 0.006 * H); Y1 = Math.min(H, c + 0.006 * H);
     }
+    // v11: dòng mục lục ("C. ARCHITECTURAL DISTORTION ....107") mà khung AI chỉ bao phần chữ (không gồm chấm dẫn + số
+    // trang) → chấm dẫn và số trang gốc không bị xoá, nằm cạnh chấm dẫn/số trang vẽ lại (BI-RADS tr.ix: ".....107" hai lần).
+    // Nới khung sang phải (và trái) theo mực thật trên đúng dải dòng đó, dừng khi gặp khoảng trống dài.
+    if (LEADER_RE.test(o.text.replace(/\s+/g, ' ').trim()) && (Y1 - Y0) < 0.05 * H) {
+      const yA = Math.round(Y0 + 0.15 * (Y1 - Y0)), yB = Math.round(Y1 - 0.15 * (Y1 - Y0));
+      const colInk = (x: number) => {
+        for (let y = yA; y <= yB; y++) { const i = (y * W + x) * 4; if (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 150) return true; }
+        return false;
+      };
+      const maxGap = Math.max(8, 2.5 * (Y1 - Y0));
+      let last = Math.round(X1), gap = 0;
+      for (let x = Math.round(X1); x < Math.min(W - 1, X1 + 0.6 * W); x++) {
+        if (colInk(x)) { last = x; gap = 0; } else if (++gap > maxGap) break;
+      }
+      X1 = Math.min(W, last + 2);
+      let first = Math.round(X0); gap = 0;
+      for (let x = Math.round(X0) - 1; x > Math.max(0, X0 - 0.3 * W); x--) {
+        if (colInk(x)) { first = x; gap = 0; } else if (++gap > maxGap) break;
+      }
+      X0 = Math.max(0, first - 2);
+    } else if ((o.lines || 1) <= 1 && (Y1 - Y0) < 0.04 * H && !/^(up|down)$/i.test(String(o.dir || ''))) {
+      // v11: khối 1 dòng mà khung AI hụt cuối dòng ("Độ sâu và/hoặc khoảng cách từ núm vú" còn sót "ple" của "nipple" —
+      // BI-RADS tr.10) → nới mép phải theo mực liền mạch (khoảng trống < 0,8 chiều cao dòng, tức trong cùng một cụm từ)
+      const yA = Math.round(Y0 + 0.2 * (Y1 - Y0)), yB = Math.round(Y1 - 0.2 * (Y1 - Y0));
+      const colInk = (x: number) => {
+        for (let y = yA; y <= yB; y++) { const i = (y * W + x) * 4; if (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 140) return true; }
+        return false;
+      };
+      const maxGap = Math.max(4, 0.8 * (Y1 - Y0));
+      const ruleAt = (x: number) => { // đường kẻ dọc: mực phủ gần kín cả chiều cao dải dòng
+        let n = 0;
+        for (let y = Math.round(Y0); y <= Math.round(Y1); y++) { const i = (y * W + x) * 4; if (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 160) n++; }
+        return n > 0.9 * (Y1 - Y0 + 1);
+      };
+      let last = Math.round(X1), gap = 0;
+      for (let x = Math.round(X1); x < Math.min(W - 1, X1 + 0.15 * W); x++) {
+        if (ruleAt(x)) break;
+        if (colInk(x)) { last = x; gap = 0; } else if (++gap > maxGap) break;
+      }
+      // chỉ nới khi phần mực tiếp theo ngắn (đuôi từ), không phải cả một cột chữ khác
+      if (last - X1 > 0 && last - X1 < 6 * (Y1 - Y0)) X1 = Math.min(W, last + 2);
+    }
     const dir = String(o.dir || '').toLowerCase();
     let rotate: 'up' | 'down' | undefined = dir === 'up' ? 'up' : dir === 'down' ? 'down' : undefined;
+    // v11: AI gắn "dir" cho chữ NGANG (BI-RADS tr.xvi: mọi khối, kể cả "Major Indication", đều "dir":"down") → cả trang vẽ
+    // xoay dọc, chữ khổng lồ. Chữ xoay thật có khung cao hơn rộng; khung bẹt ngang thì bỏ "dir". Quá nửa số khối có "dir"
+    // cũng là dấu hiệu model trả sai → bỏ hết.
+    if (rotate && ((X1 - X0) > 1.2 * (Y1 - Y0) || dirShare > 0.5)) rotate = undefined;
     // v9.6: AI quên báo "dir" cho tab chữ dọc (khung cao, hẹp, một từ/cụm ngắn) → coi là chữ đọc từ dưới lên
     if (!rotate && (Y1 - Y0) > 3 * (X1 - X0) && (X1 - X0) < 0.06 * W && o.text.trim().length >= 4 && !/\s\S+\s\S+\s\S+\s/.test(o.text.trim())) rotate = 'up';
     const n = Math.max(1, Math.round(o.lines || 1));
@@ -4046,7 +4165,11 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
   const capsShare = (t: string) => { const L = t.match(/\p{L}/gu) || []; return L.length ? L.filter(c => c === c.toUpperCase() && c !== c.toLowerCase()).length / L.length : 0; };
   {
     const dens = out.map((b, i) => ({ b, d: inkDensity.get(i) ?? 0 })).filter(x => !x.b.guided && !x.b.rotate && x.d > 0);
+    const paraSize = median(dens.filter(y => y.b.lineCount >= 2).map(y => y.b.size)) || 0;
     for (const x of dens) {
+      // v11: chữ cỡ lớn (tiêu đề "IV. FINDINGS" gấp đôi thân bài) có mật độ mực khác hẳn chữ nhỏ → không so được với đoạn
+      // văn; trước đây tiêu đề chữ thường bị vẽ ĐẬM (BI-RADS tr.19). Chỉ tự nhận đậm khi có khối cùng cỡ để so.
+      if (paraSize > 0 && x.b.size > 1.5 * paraSize && !dens.some(y => y !== x && Math.abs(y.b.size - x.b.size) < 0.2 * x.b.size)) continue;
       // Mốc chữ thường = các đoạn văn nhiều dòng (hiếm khi in đậm); không có thì dùng bách phân vị 30 của trang
       const paras = dens.filter(y => y.b.lineCount >= 2).map(y => y.d);
       const all = dens.map(y => y.d).sort((p, q) => p - q);
@@ -4332,21 +4455,42 @@ export function refineOcrBoxes(ctx: CanvasRenderingContext2D, ocr: OcrBlock[]): 
     };
     const used = new Set<TextRegion>();
     // Dời khối sai chỗ
-    for (const i of bad) {
+    const merged = new Set<number>();
+    for (const i of [...bad]) {
+      if (merged.has(i)) continue;
       const B = boxes[i]!;
       const len = ocr[i].text.trim().length;
       const expected = charArea ? len * charArea : area(B);
-      let best: TextRegion | null = null, bestScore = Infinity;
+      let best: TextRegion | null = null, bestScore = Infinity, mate = -1;
+      const xOv = (R: Bx) => Math.max(0, Math.min(R.x1, B.x1) - Math.max(R.x0, B.x0)) / Math.max(1, Math.min(R.x1 - R.x0, B.x1 - B.x0));
       for (const R of regions) {
-        if (used.has(R) || claimedBy(R, i) || photoFrac(R.x0, R.y0, R.x1, R.y1) > 0.3) continue;
-        const ratio = Math.abs(Math.log(area(R) / expected));
-        if (ratio > Math.log(2.8)) continue;
+        if (used.has(R) || photoFrac(R.x0, R.y0, R.x1, R.y1) > 0.3) continue;
         const dist = Math.hypot((R.x0 + R.x1 - B.x0 - B.x1) / 2 / W, (R.y0 + R.y1 - B.y0 - B.y1) / 2 / H);
+        // v11: chỉ dời tới vùng chữ GẦN (khung AI lệch ít, thường lệch dọc 1–3 dòng) và cùng cột — trước đây chú thích
+        // "Figure 2 – …" dưới nhũ ảnh bị dời lên tận góc trên bên phải (vùng tab "MAMMOGRAPHY"), chữ dịch tí hon (BI-RADS tr.31)
+        if (dist > 0.08 || xOv(R) < 0.5) continue;
+        // Vùng đã có khối khác (dòng tiếp theo của CÙNG chú thích, AI tách riêng "(SM). Pathology: Cyst.") → gộp hai khối
+        const claimers = boxes.map((Bj, j) => (j !== i && Bj && !bad.has(j) && inter(Bj, R) > 0.25 * Math.min(area(R), area(Bj)) ? j : -1)).filter(j => j >= 0);
+        if (claimers.length > 1) continue;
+        const j = claimers.length ? claimers[0] : -1;
+        if (j >= 0 && (Math.abs(j - i) !== 1 || ocr[j].text.trim().length > len)) continue;
+        const ratio = Math.abs(Math.log(area(R) / (j >= 0 ? (len + ocr[j].text.trim().length) * (charArea || area(B) / len) : expected)));
+        if (ratio > Math.log(2.8)) continue;
         const score = ratio + 2 * dist;
-        if (score < bestScore) { bestScore = score; best = R; }
+        if (score < bestScore) { bestScore = score; best = R; mate = j; }
       }
-      if (best) { used.add(best); setBox(i, best); console.info('[Layout] OCR: dời khối đặt sai chỗ →', ocr[i].text.slice(0, 40)); }
-      else { out[i] = { ...ocr[i], text: '' }; console.info('[Layout] OCR: bỏ khối nằm trên ảnh, không tìm được chỗ đúng →', ocr[i].text.slice(0, 40)); }
+      if (best) {
+        used.add(best); setBox(i, best);
+        if (mate >= 0) {
+          // gộp: khối đứng trước giữ cả hai phần chữ / bản dịch theo thứ tự đọc
+          const [a, b] = mate < i ? [mate, i] : [i, mate];
+          const joinT = (x?: string, y?: string) => [x, y].filter(s => s && s.trim()).join(' ');
+          out[i] = { ...out[i], text: joinT(ocr[a].text, ocr[b].text), v: ocr[a].v || ocr[b].v ? joinT(ocr[a].v, ocr[b].v) : undefined, lines: (ocr[a].lines || 1) + (ocr[b].lines || 1) };
+          out[mate] = { ...ocr[mate], text: '' };
+          bad.add(mate); merged.add(mate); // không cho bước khớp vùng bên dưới gán lại khối đã gộp
+        }
+        console.info('[Layout] OCR: dời khối đặt sai chỗ →', ocr[i].text.slice(0, 40));
+      } else { out[i] = { ...ocr[i], text: '' }; console.info('[Layout] OCR: bỏ khối nằm trên ảnh, không tìm được chỗ đúng →', ocr[i].text.slice(0, 40)); }
     }
     // Khớp khối với vùng chữ thật: khung AI chỉ phủ một phần (chú thích bị nhét vào cột hẹp ở giữa, chữ gốc hai bên
     // không được xoá) hoặc thòng xuống khoảng trắng → thay bằng đúng vùng chữ gốc, khi vùng đó không thuộc khối khác.
@@ -4365,6 +4509,18 @@ export function refineOcrBoxes(ctx: CanvasRenderingContext2D, ocr: OcrBlock[]): 
       used.add(R);
       setBox(i, R);
     });
+    // v11: tỉ lệ khối AI đặt sai chỗ (phải dời / bỏ) — cao = kết quả OCR không tin cậy (trang biểu mẫu dày đặc)
+    const counted = boxes.filter(Boolean).length;
+    (out as any).badRatio = counted ? bad.size / counted : 0;
+    // … và tỉ lệ khối chồng lên khối khác (khung AI lệch → nhiều khung đè nhau)
+    {
+      const fin = out.map(o => (o && o.text?.trim() && !isRot(o) ? toPx(o) : null)).filter(Boolean) as Bx[];
+      let ov = 0;
+      for (let i = 0; i < fin.length; i++) {
+        if (fin.some((q, j) => j !== i && inter(fin[i], q) > 0.3 * Math.min(area(fin[i]), area(q)))) ov++;
+      }
+      (out as any).overlapRatio = fin.length ? ov / fin.length : 0;
+    }
     return out;
   } catch (e) {
     console.warn('[Layout] Không kiểm tra được toạ độ OCR:', e);

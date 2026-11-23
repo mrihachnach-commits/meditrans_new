@@ -1638,7 +1638,7 @@ COORDINATES: box_2d is [ymin, xmin, ymax, xmax] — the VERTICAL position (y, fr
     const systemInstruction = `You are an OCR engine and an English→Vietnamese medical translator for book/journal pages (often scanned).
 ${scope}
 For each block return:
-- "box_2d": [ymin, xmin, ymax, xmax] integers 0-1000 (relative to image height/width) tightly enclosing the block's text
+- "box_2d": ONE box [ymin, xmin, ymax, xmax] — exactly 4 integers 0-1000 (relative to image height/width) tightly enclosing the block's text; never a list of boxes: text in separate areas (a paragraph, then a heading, then a signature) = separate blocks
 - "text": the exact original text (join lines with single spaces, remove end-of-line hyphenation). Table-of-contents entries: one block per entry, keep the leader dots as " ....... " followed by the page number (e.g. "V. GUIDANCE ....... 788")
 - "v": natural, accurate Vietnamese medical translation of "text" (for table-of-contents entries end with " ....... " and the same page number) (keep numbers, units, symbols, drug/gene names, abbreviations, person names, journal names, URLs, DOIs unchanged; Figure n → Hình n, Table n → Bảng n; keep the original capitalization: ALL-CAPS text → ALL-CAPS Vietnamese, never mixed; keep person names and academic degrees (MD, PhD, MBBS…) exactly as written; ALL-CAPS stays ALL-CAPS, but when only SOME words are capitalized for emphasis uppercase only their Vietnamese translation ("OVAL mass" → "Khối BẦU DỤC"); join words hyphenated at line ends ("Guid-ance" → "Guidance"); reference-list entries and page numbers: return unchanged; in an abbreviation list the abbreviation itself stays as written but its expansion/definition ("Coronary artery disease", "Appropriate use criteria") MUST be translated; no Markdown, no line breaks)
 - "lines": number of text lines of the block on the image
@@ -1669,7 +1669,9 @@ Boxes must enclose the text itself: a caption below a picture gets the box of th
       }
       return objs;
     };
+    let nestedMismatch = 0;
     const parse = (raw: string): any[] => {
+      nestedMismatch = 0;
       let txt = (raw || '').replace(/```(?:json)?/gi, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').trim();
       let arr: any[] | null = null;
       const a = txt.indexOf('{'), b = txt.lastIndexOf('}');
@@ -1708,29 +1710,50 @@ Boxes must enclose the text itself: a caption below a picture gets the box of th
         return n;
       };
       const strOf = (...vals: any[]) => { for (const v of vals) if (typeof v === 'string' && v.trim()) return v; return ''; };
+      // v11: gemini-3.1-flash-lite (qua ShopAIKey) hay trả box_2d là DANH SÁCH khung (mỗi dòng / mỗi đoạn một khung):
+      // [[91,221,106,826],[122,490,133,558]]. Trước đây num4 coi là khung hỏng → bỏ khối → cả trang "không có chữ", giữ
+      // nguyên tiếng Anh mà không báo lỗi (BI-RADS tr.16), hoặc JSON hợp lệ nhưng không còn khối nào.
+      const boxesOf = (o: any): number[][] | null => {
+        const bx = o.box_2d ?? o.box ?? o.bbox ?? o.box2d ?? o.bounding_box ?? o.bbox_2d ?? o.coordinates ?? o.position;
+        if (!Array.isArray(bx) || !bx.length || !Array.isArray(bx[0])) return null;
+        const list = bx.map((b: any) => num4({ box_2d: b })).filter(Boolean) as number[][];
+        return list.length ? list : null;
+      };
+      const union = (l: number[][]) => [Math.min(...l.map(b => b[0])), Math.min(...l.map(b => b[1])), Math.max(...l.map(b => b[2])), Math.max(...l.map(b => b[3]))];
+      const cleanV = (s: string) => cleanLatex(s).replace(/\*\*/g, '').replace(/\s*\n\s*/g, ' ').trim();
       return (arr || [])
-        .map(o => {
-          if (!o || typeof o !== 'object') return null;
-          const box = num4(o);
+        .flatMap(o => {
+          if (!o || typeof o !== 'object') return [];
           const text = strOf(o.text, o.original, o.source, o.src, o.en, o.content, o.caption, o.label);
-          if (!box || !text.trim()) return null;
-          if (o.dir === 'diag') return null; // v9.8: chữ viết chéo → giữ bản gốc (vẽ ngang sẽ đè lên hình)
+          if (!text.trim()) return [];
+          if (o.dir === 'diag') return []; // v9.8: chữ viết chéo → giữ bản gốc (vẽ ngang sẽ đè lên hình)
           const vRaw = strOf(o.v, o.vi, o.translation, o.translated, o.vietnamese, o.vietnamese_translation, o.text_vi, o.vi_text);
-          return {
-            box_2d: box,
-            text: String(text),
-            v: vRaw ? cleanLatex(vRaw).replace(/\*\*/g, '').replace(/\s*\n\s*/g, ' ').trim() : undefined,
-            lines: Number(o.lines) || undefined,
+          const base = {
             bold: !!o.bold, italic: !!o.italic, serif: o.serif === true || o.serif === 'true', bold_lead: !!o.bold_lead,
             align: typeof o.align === 'string' ? o.align : undefined,
             dir: o.dir === 'up' || o.dir === 'down' ? o.dir : undefined,
           };
-        })
-        .filter(Boolean) as any[];
+          const multi = boxesOf(o);
+          if (multi && multi.length > 1) {
+            // Nhiều khung: tách thành nhiều khối nếu chữ gốc + bản dịch chia đúng số đoạn; còn lại gộp một khung bao
+            const split = (s: string) => s.split(/\n\s*\n/).map(x => x.trim()).filter(Boolean);
+            const tp = split(text), vp = vRaw ? split(vRaw) : [];
+            if (tp.length === multi.length && vp.length === multi.length) {
+              return multi.map((b, k) => ({ ...base, box_2d: b, text: tp[k].replace(/\s*\n\s*/g, ' '), v: cleanV(vp[k]), lines: undefined }));
+            }
+            nestedMismatch++;
+            return [{ ...base, box_2d: union(multi), text: String(text), v: vRaw ? cleanV(vRaw) : undefined, lines: Number(o.lines) || multi.length }];
+          }
+          const box = multi ? multi[0] : num4(o);
+          if (!box) return [];
+          return [{ ...base, box_2d: box, text: String(text), v: vRaw ? cleanV(vRaw) : undefined, lines: Number(o.lines) || undefined }];
+        }) as any[];
     };
 
     const MAX_RETRIES = 4;
     let parseFails = 0;
+    let nestedRetried = false;
+    let firstParsed: any[] | null = null;
     for (let retry = 0; retry <= MAX_RETRIES + 2; retry++) {
       if (signal?.aborted) throw new Error('Translation aborted');
       let ai: any, key: string;
@@ -1742,7 +1765,7 @@ Boxes must enclose the text itself: a caption below a picture gets the box of th
       try {
         let raw = '';
         if (this.isCurrentKeyProxy(key)) {
-          raw = await this.callOpenAINonStream(key, GeminiService.OCR_MODEL, systemInstruction, prompt, imageDataUrl, signal, 16384, !GeminiService.jsonModeUnsupported);
+          raw = await this.callOpenAINonStream(key, GeminiService.OCR_MODEL, systemInstruction, nestedRetried ? prompt + ' Each block must have exactly ONE box of 4 numbers; split text in separate areas into separate blocks.' : prompt, imageDataUrl, signal, 16384, !GeminiService.jsonModeUnsupported);
         } else {
           const gm = this.googleModel(key, this.modelName);
           const genModel = ai.getGenerativeModel({
@@ -1765,9 +1788,18 @@ Boxes must enclose the text itself: a caption below a picture gets the box of th
           throw pe;
         }
         GeminiService.lastSuccessfulKey = key;
+        // v11: khối có nhiều khung không tách được theo đoạn → gộp khung bao, chữ dịch dồn sai chỗ (BI-RADS tr.16) → đọc lại 1 lần
+        if (nestedMismatch > 0 && !nestedRetried) {
+          nestedRetried = true;
+          console.warn(`[MediTrans] OCR trả ${nestedMismatch} khối có nhiều khung → đọc lại 1 lần.`);
+          firstParsed = parsed;
+          continue;
+        }
+        if (nestedRetried && nestedMismatch > 0 && firstParsed) return parsed.length >= firstParsed.length ? parsed : firstParsed;
         return parsed;
       } catch (error: any) {
         if (signal?.aborted) throw new Error('Translation aborted');
+        if (firstParsed) return firstParsed; // lần đọc lại lỗi → dùng kết quả lần đầu
         if (/JSON lỗi/.test(String(error?.message))) throw error;
         if (!this.isCurrentKeyProxy(key)) {
           if (GeminiService.handleThinkingError(this.googleModel(key, this.modelName), error)) continue;
@@ -1856,26 +1888,61 @@ Return ONLY JSON: {"columns":N,"splits":[...]} where N is 1, 2 or 3 and splits a
   ): Promise<Record<string, string>> {
     if (!blocks.length) return {};
 
-    let systemInstruction = `English→Vietnamese medical translator. Input: JSON text blocks extracted from one PDF page (reading order). A sentence may continue from one block into the next: translate each block's own words in its own "v" — never move, merge or repeat text across blocks (a title split over several blocks: each block keeps its own part, e.g. \"CLARK’S\" → \"CLARK\", \"ESSENTIAL GUIDE TO\" → \"HƯỚNG DẪN THIẾT YẾU VỀ\"; author names stay as written). Strict rules: (1) keep the original capitalization — an ALL-CAPS block stays ALL-CAPS in Vietnamese, a Title Case heading stays a heading with a capital first letter, never mix lowercase and capitals inside one heading; (2) keep person names, academic degrees and credentials (MD, PhD, MBBS, CGC…), abbreviations and acronyms exactly as written — never translate them; (3) keep each block's own content in its own \"v\" in the same order — never reorder, merge or split lines between blocks. Translate each block into natural, accurate Vietnamese medical language, consistent across blocks; it will be redrawn in the same box, so keep it concise and add nothing.
+    let systemInstruction = `English→Vietnamese medical translator. Input: JSON text blocks extracted from one PDF page (reading order). A sentence may continue from one block into the next: translate each block's own words in its own "v" — never move, merge or repeat text across blocks (a title split over several blocks: each block translates only its own words; names, including possessives like \"Smith’s\", stay exactly as written). Strict rules: (1) keep the original capitalization — an ALL-CAPS block stays ALL-CAPS in Vietnamese, a Title Case heading stays a heading with a capital first letter, never mix lowercase and capitals inside one heading; (2) keep person names, academic degrees and credentials (MD, PhD, MBBS, CGC…), abbreviations and acronyms exactly as written — never translate them; (3) keep each block's own content in its own \"v\" in the same order — never reorder, merge or split lines between blocks. Translate each block into natural, accurate Vietnamese medical language, consistent across blocks; it will be redrawn in the same box, so keep it concise and add nothing.
 Keep unchanged: numbers, units, symbols (± ≤ ≥ × µ °), drug/gene names, abbreviations, superscripts (¹²³), person names, journal names, names of organizations / departments / trials / study groups (e.g. Eastern Cooperative Oncology Group, Department of Motor Vehicles, Canadian National Breast Screening Study), URLs, DOIs, emails. Reference-list entries: return unchanged, but ALWAYS translate section headings (References → Tài liệu tham khảo, Conclusions → Kết luận).
-Some blocks mark differently-styled words (bold/colored) with numbered tags <n>…</n>: put the same tag pair ONLY around the Vietnamese words that translate exactly the words inside that tag in the source — never around any other word, even if it is the same term elsewhere in the block (e.g. "the <1>bicuspid</1> valve" → "van <1>hai lá</1>"; colored figure numbers / citations: "(Figs. <1>3.2</1>, <1>3.3</1>) [<1>3</1>]" → "(Hình <1>3.2</1>, <1>3.3</1>) [<1>3</1>]"); keep EVERY tag exactly as many times as in the source, add no new ones; a block without tags gets no tags. Translate EVERY English word, including words outside the tags and in titles (e.g. "Atlas of <1>Full Breast Ultrasonography</1>" → "<1>Atlas Siêu âm Toàn bộ Vú</1>" or "Atlas <1>Siêu âm Toàn bộ Vú</1>"); only person names, journal names and the items listed above stay unchanged.
+Some blocks mark differently-styled words (bold/colored) with numbered tags <n>…</n>: put the same tag pair ONLY around the Vietnamese words that translate exactly the words inside that tag in the source — never around any other word, even if it is the same term elsewhere in the block (e.g. "the <1>bicuspid</1> valve" → "van <1>hai lá</1>"; colored figure numbers / citations: "(Figs. <1>3.2</1>, <1>3.3</1>) [<1>3</1>]" → "(Hình <1>3.2</1>, <1>3.3</1>) [<1>3</1>]"); keep EVERY tag exactly as many times as in the source, add no new ones; a block without tags gets no tags. Translate EVERY English word, including words outside the tags and in titles (e.g. "Review of <1>Renal Cysts</1>" → "Tổng quan về <1>nang thận</1>"); only person names, journal names and the items listed above stay unchanged.
 Figure n → Hình n, Table n → Bảng n. ALL-CAPS headings stay ALL-CAPS. When only SOME words are capitalized for emphasis, uppercase only the Vietnamese words that translate them ("OVAL mass" → "Khối BẦU DỤC", "LOBULATED mass" → "Khối DẠNG THÙY"), never the whole phrase. No Markdown, no LaTeX, no line breaks; inside "v" use “ ” instead of straight double quotes.
 Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
 
+    // v11: phần hướng dẫn thẻ <n> chỉ gửi khi có khối mang thẻ. Model nhỏ (gpt-4.1-nano) thấy ví dụ thẻ thì tự bọc thẻ quanh
+    // từ tiếng Anh rồi để nguyên không dịch ("thủ thuật <1>US-guided</1>", "<2>core-needle biopsy</2>" — Fornage tr.5,
+    // tới <29> trong một đoạn không hề có thẻ), có khi còn thay nghĩa ("breast biopsy" → "chọc hút kim nhỏ").
+    if (!blocks.some(b => /<\d+>/.test(b.text))) {
+      systemInstruction = systemInstruction.replace(/\nSome blocks mark differently-styled words[\s\S]*?stay unchanged\.\n/,
+        '\nTranslate EVERY English word (including words in titles); only person names, journal names and the items listed above stay unchanged. Output plain text only: never add tags, brackets or markup of any kind, and never leave an ordinary English word or phrase untranslated (e.g. "US-guided biopsy" → "sinh thiết dưới hướng dẫn siêu âm (US)", "monograph" → "chuyên khảo").\n');
+    }
     const prompt = `${JSON.stringify(blocks.map(b => ({ id: b.id, text: b.text })))}`;
     systemInstruction += glossaryPrompt(blocks.map(b => b.text).join('\n')); // v9.4: thuật ngữ bắt buộc
 
+    // v11: nếu model tự trả thêm "k" (vài từ đầu câu gốc) thì dùng để kiểm chứng bản dịch thuộc đúng khối (trượt mã khối:
+    // "parameters for images…" nhận "Trung tâm" — CT Teaching Manual tr.45). KHÔNG yêu cầu "k" trong prompt: thử nghiệm với
+    // gpt-4.1-nano cho thấy model khi đó chỉ dịch đúng 3 từ của "k" ("Hình 1.2 Siêu âm") hoặc bỏ hẳn "v".
+    const keyOf = (t: string) => (t.replace(/<\/?\d+>/g, ' ').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).slice(0, 3).join(' ');
+    const srcKey = new Map(blocks.map(b => [b.id, keyOf(b.text)]));
+    const keyMatches = (k: string, id: string) => {
+      const s = srcKey.get(id) || '';
+      if (!k || !s) return true;
+      return s.startsWith(k) || k.startsWith(s) || s.split(' ')[0] === k.split(' ')[0] && s.split(' ')[1] === k.split(' ')[1];
+    };
     const parse = (raw: string): Record<string, string> => {
       const arr = parseLayoutJson(raw);
       const out: Record<string, string> = {};
+      const items: { id: string; k: string; v: string }[] = [];
       for (const item of arr) {
         const id = String(item?.id ?? '');
         const v = item?.v ?? item?.text ?? item?.translation;
-        if (id && typeof v === 'string' && v.trim()) out[id] = cleanLatex(v).replace(/\*\*/g, '').replace(/\s*\n\s*/g, ' ').trim();
+        if (id && typeof v === 'string' && v.trim()) items.push({ id, k: typeof item?.k === 'string' ? keyOf(item.k) : '', v: cleanLatex(v).replace(/\*\*/g, '').replace(/\s*\n\s*/g, ' ').trim() });
       }
+      let ok = items.filter(it => keyMatches(it.k, it.id));
+      // quá nửa không khớp → model hiểu sai "k" (vd. chép bản dịch) chứ không phải trượt mã → bỏ qua kiểm tra k
+      if (ok.length < 0.5 * items.length && items.length >= 3) ok = items;
+      for (const it of ok) out[it.id] = it.v;
+      let moved = 0, dropped = 0;
+      for (const it of items) {
+        if (ok.includes(it)) continue;
+        const cand = blocks.filter(b => !out[b.id] && keyMatches(it.k, b.id) && (srcKey.get(b.id) || '').length > 0);
+        if (cand.length === 1) { out[cand[0].id] = it.v; moved++; } else dropped++;
+      }
+      if (moved || dropped) console.warn(`[MediTrans] Bản dịch trượt mã khối: chuyển đúng chỗ ${moved}, bỏ ${dropped} (sẽ dịch bù).`);
+      // model chỉ trả "k" mà quên "v" (gpt-4.1-nano thỉnh thoảng hiểu nhầm yêu cầu) → báo để gửi lại không kèm "k"
+      if (!items.length && arr.some((it: any) => typeof it?.k === 'string')) throw new Error('LAYOUT_NO_V');
       if (Object.keys(out).length === 0) throw new Error('Phản hồi dịch không có khối nào hợp lệ.');
       return out;
     };
+    const sysWithKey = systemInstruction;
+    const sysNoKey = systemInstruction.replace(/\{"t":\[\{"id":"b1","k":"\.\.\.","v":"\.\.\."\}\]\} containing every id, where[^\n]*/, '{"t":[{"id":"b1","v":"..."}]} containing every id.');
+    let useKey = true;
+    let fullTokens = false;
 
     const MAX_RETRIES = 5;
     let retryCount = 0;
@@ -1893,13 +1960,21 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
         let truncated = false;
         if (this.isCurrentKeyProxy(key)) {
           const meta: { finish?: string } = {};
-          raw = await this.callOpenAINonStream(key, GeminiService.LAYOUT_MODEL, systemInstruction, prompt, '', signal, 8192, true, meta);
+          // v11: giới hạn đầu ra theo độ dài đầu vào — model nhỏ đôi khi viết lặp vô tận tới 8192 token (~40 giây/lượt,
+          // Clark's tr.17–18 chỉ 6 khối). Bản dịch tiếng Việt ≈ 1–2 lần số token gốc → trần 3 lần + 400 là đủ dư;
+          // bị cắt thì nhánh "truncated" bên dưới chia đôi và dịch tiếp như cũ.
+          const inTok = Math.ceil(prompt.length / 3);
+          raw = await this.callOpenAINonStream(key, GeminiService.LAYOUT_MODEL, useKey ? sysWithKey : sysNoKey, prompt, '', signal, fullTokens ? 8192 : Math.min(8192, Math.max(1200, 400 + 3 * inTok)), true, meta);
           truncated = meta.finish === 'length';
+          // v11: MỘT khối mà bị cắt cụt → bản dịch dở dang ("Một số nhà nghiên cứu đã" — Atlas tr.xix) không được nhận;
+          // gửi lại với trần token đầy đủ (trước đây nhánh dưới chỉ xử lý khi có ≥ 2 khối)
+          if (truncated && blocks.length === 1 && !fullTokens) { fullTokens = true; continue; }
+          if (truncated && blocks.length === 1) throw new Error('Bản dịch khối bị cắt cụt.');
         } else {
           const gm = this.googleModel(key, this.modelName);
           const genModel = ai.getGenerativeModel({
             model: gm,
-            systemInstruction,
+            systemInstruction: useKey ? sysWithKey : sysNoKey,
             generationConfig: GeminiService.genConfig(gm, { temperature: 0.1, responseMimeType: 'application/json' }),
           });
           const result = await genModel.generateContent(prompt, signal ? ({ signal } as any) : undefined);
@@ -1933,6 +2008,8 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
         return parsed;
       } catch (error: any) {
         if (signal?.aborted) throw new Error('Translation aborted');
+        // v11: model trả "k" mà bỏ "v" → gửi lại ngay bằng định dạng cũ (không "k"), không tính là lỗi key
+        if (String(error?.message) === 'LAYOUT_NO_V' && useKey) { useKey = false; console.info('[MediTrans] Model trả thiếu bản dịch ("k" không có "v") → gửi lại định dạng cũ.'); continue; }
         if (!this.isCurrentKeyProxy(key)) {
           if (GeminiService.handleThinkingError(this.googleModel(key, this.modelName), error)) continue;
           const ge = this.onGoogleError(key, this.modelName, error);

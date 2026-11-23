@@ -886,3 +886,71 @@ Thêm vào bộ hồi quy: CT tim tr.12, 35, 44, 48, 56, 57, 68, 73, 103, 108 (s
 **Về model gpt-4.1-nano**: phần lớn lỗi hoa/thường, dịch học vị, lệch khối là do model nano làm ẩu; nay đã có code kiểm tra và sửa sau khi dịch nên kết quả ổn định dù dùng nano. Nếu muốn chất lượng câu chữ tốt hơn, có thể nhập model mạnh hơn (vd. gpt-4.1-mini) ở ô model dịch giữ định dạng.
 
 **Không phải lỗi phần mềm**: Atlas, Interventional, CT tim không còn khối tiếng Anh chưa dịch.
+
+## v11 — Chạy dịch thật v10.10 (gpt-4.1-nano) trên 16 cuốn sách, sửa lỗi tận gốc (engine v39)
+
+Đã dịch giữ định dạng bằng chính bộ máy của web (pdf.js + layoutEngine + GeminiService qua ShopAIKey, model gpt-4.1-nano;
+OCR giữ mặc định gemini-3.1-flash-lite) rồi rà từng trang bản xuất PDF. Lỗi tìm thấy và cách sửa:
+
+**Bản dịch (model nano)**
+- **Thẻ lạ + sót tiếng Anh hàng loạt** (Fornage: 380 khối / 126 trang; Atlas, CT tim, mọi sách): nano bắt chước ví dụ thẻ `<1>…</1>`
+  trong prompt, tự bọc thẻ quanh từ tiếng Anh rồi để nguyên ("thủ thuật <1>US-guided</1>", "<2>core-needle biopsy</2>"), có khi
+  đổi nghĩa ("breast biopsy" → "chọc hút kim nhỏ"). Nay phần hướng dẫn thẻ chỉ gửi khi trang có chữ màu/đậm; thẻ model tự thêm bị bỏ.
+- **Dịch nửa vời** (giữ nguyên 2+ từ tiếng Anh thường của câu gốc) → tự dịch lại 1 lần, chỉ nhận bản tốt hơn.
+- **Lệch mã khối**: bản dịch của khối này gắn vào khối bên cạnh (tiêu đề "Benign Solid Masses" nhận cả đoạn văn; chú thích Hình 2.16
+  nhận "HISTOPATHOLOGY: U xơ tuyến"). Nay so "mốc" (số, từ viết tắt, nhãn (A)…) và độ dài → dịch lại riêng từng khối lệch.
+- **Dịch tràn sang khối sau** (mục lục 2 dòng: dòng 1 dịch luôn dòng 2 → lặp "bị che khuất tại nhũ ảnh") → cắt phần lặp.
+- **Thẻ màu đặt sai từ / lặp quá số lần** (CT tim tr.22: tô xanh "coronary" thay vì "calcium hydroxyapatite") → sửa lại thẻ.
+- Ví dụ trong prompt bị nano chép nguyên vào tiêu đề chạy ("Atlas of Mammography" → "Hướng dẫn thiết yếu về…") → bỏ ví dụ tên sách.
+- "CLARK’S" bị dịch mất "’S" → giữ nguyên tên riêng.
+- Giới hạn token đầu ra theo độ dài đầu vào (trước đây nano đôi khi viết lặp tới 8192 token, ~40 giây/lượt).
+- Thuật ngữ sai nghĩa: "M mode" → "chế độ Doppler" (!), "IM node" (hạch vú trong) → "hạch trung thất" (!), "The elbow" → "Cổ tay",
+  "paediatric hip" → "Khớp h hip"… → thêm ~60 thuật ngữ bắt buộc (chế độ M/B, hạch vú trong, khuỷu tay, khớp háng, cơ ngực lớn,
+  dưới đòn/trên đòn, cùng bên/đối bên, sinh thiết lõi kim, Hội Điện quang Hoa Kỳ, TIỀN SỬ…).
+- Viết hoa: chữ đầu khối viết hoa như bản gốc ("ác tính" → "Ác tính"); nhãn VIẾT HOA "HISTORY:", "NOTE:", "HISTOPATHOLOGY:"
+  → "TIỀN SỬ:", "GHI CHÚ:", "MÔ BỆNH HỌC:" (trước đây "lịch sử:", "ghi chú:"); "v2025 MANUAL" không còn thành "sổ tay v2025".
+
+**Dàn trang**
+- Khối **căn giữa** có mép trái so le (trang tên sách) bị coi là thụt treo → các dòng sau lệch phải (Clark’s tr.3).
+- Khối **chữ ký căn phải** cuối bài bị căn trái, bản dịch xuống dòng dồn sang trái (Clark’s tr.9).
+- **Danh mục viết tắt**: "cfNIPT | cell-free…" nối thành một dòng rồi nhập vào khối "CFA" → chữ đè lên nhau, cả bảng dồn lên (Clark’s tr.17–18).
+- **Từ in đậm đầu đoạn** ("Doppler ultrasound…") bị tách thành khối riêng giữ chữ gốc, đè giữa 2 dòng dịch (Clark’s tr.8):
+  cỡ chữ đo theo mực của từ đậm ngắn lệch 15% → nay so cỡ ghi trong PDF.
+- **Dòng "nhãn: giá trị"** ("Form: … / Contour: … / Density: … / Size: …") bị chảy thành một đoạn → mỗi nhãn một dòng như bản gốc.
+- **Font có chân** Thieme "Gulliver", "Berling"… bị vẽ bằng font không chân → nhận đúng.
+- **Đoạn văn có trích dẫn tác giả–năm** ("The CAD marks… Freer and Ulissey (2001)…") bị coi là tài liệu tham khảo → giữ nguyên
+  tiếng Anh CẢ CỘT mà không báo (Chẩn đoán HA tuyến vú – Kiến thức thiết yếu tr.27). Nay câu văn xuôi không bị nhận nhầm.
+
+**OCR (BI-RADS — trang scan)**
+- gemini-3.1-flash-lite hay trả `box_2d` là danh sách khung → khối bị bỏ → **trang có chữ bị coi là "không có chữ", giữ nguyên tiếng Anh
+  và xuất PDF không báo** (BI-RADS tr.xvii), hoặc lỗi "JSON lỗi" (tr.v). Nay đọc được khung lồng, tách theo đoạn; không tách được thì đọc lại.
+- Xuất PDF: thêm cảnh báo "N trang AI không đọc được chữ, đang giữ nguyên bản gốc" + đưa vào nút "Sửa lỗi".
+- **Mục lục OCR**: khung AI chỉ bao phần chữ → chấm dẫn + số trang gốc không bị xoá, nằm cạnh chấm dẫn vẽ lại (".....107" hai lần) → nới khung theo mực.
+- Cụm in đậm/nghiêng giữa đoạn bị AI trả thêm thành khối riêng → vẽ 2 lần, đoạn bị ép nhỏ (tr.8) → bỏ khối trùng.
+- Chú thích hình lệch khung: bị "dời" lên tận góc trang (vùng tab dọc), chữ tí hon; dòng 2 của chú thích đè lên ảnh (tr.31, 37) → chỉ dời
+  tới vùng chữ gần, cùng cột; gộp 2 khối của cùng chú thích.
+- Tiêu đề cỡ lớn không còn bị tự nhận là chữ đậm theo mật độ mực.
+
+**Lưu ý khi cập nhật**: engine lên v39 → trang đã dịch tự dàn lại từ bản dịch đã lưu (không tốn token). Các trang đã dịch bằng v10.10
+có lỗi do model (thẻ lạ, sót tiếng Anh, lệch khối, thuật ngữ sai) vẫn giữ bản dịch cũ trong bản lưu → bấm **Dịch lại** cho các trang đó.
+
+**Về model**: các lỗi nghĩa (thuật ngữ sai, lệch khối, sót tiếng Anh) chủ yếu do gpt-4.1-nano. v11 bắt và tự dịch lại được phần lớn,
+nhưng không bắt được mọi câu dịch sai nghĩa. Với sách y khoa nên dùng gpt-4.1-mini cho "Dịch giữ định dạng" nếu ngân sách cho phép.
+**Bổ sung trong lượt kiểm chứng cuối (v11)**
+- Hai khối khác câu gốc nhận cùng một bản dịch (tên sách tách 2 khung ở bìa Clark's) → dịch lại từng khối.
+- Đoạn dài nhận bản dịch cụt ("Một số nhà nghiên cứu đã" cho cả đoạn — Atlas tr.xix), khối ngắn nhận bản dịch dài gấp nhiều lần
+  → dịch lại riêng. Một khối bị cắt cụt vì hết token → gửi lại với trần token đầy đủ, không nhận bản dở dang.
+- Dòng toàn chữ đậm kết thúc bằng ":" ngay dưới đoạn văn ("Lung-/pleura window:") không còn bị nhập vào đoạn (CT Teaching Manual).
+- OCR: dòng 1 khung hụt cuối ("…khoảng cách từ núm vú" còn sót "ple") → nới khung theo mực liền mạch, dừng ở đường kẻ bảng.
+- OCR: kết quả đặt sai chỗ / đè nhau quá nhiều (trang biểu mẫu dày đặc) → đọc lại; vẫn kém thì giữ trang gốc và báo khi xuất PDF
+  (trước đây có thể ra trang lẫn lộn chữ dịch đè chữ gốc).
+- Thuật ngữ thêm: tâm thu/tâm trương, co/giãn đồng thể tích, van hai lá/ba lá/động mạch chủ, hẹp/hở van, diện tích van (AVA giữ nguyên),
+  chênh áp cao/thấp, thể tích nhát bóp, thất/nhĩ trái–phải, "Exercise n" → "Bài tập n" (trước đây "Thể dục"), cửa sổ/thang xám…
+- Đã thử bắt model chép lại 3 từ đầu câu gốc ("k") để kiểm chứng mã khối: gpt-4.1-nano khi đó chỉ dịch đúng 3 từ đó hoặc bỏ hẳn bản
+  dịch → KHÔNG dùng; chỉ đọc "k" nếu model tự trả.
+
+**Hạn chế còn lại (do model nano)**: trang dạng phiếu bài tập/biểu mẫu nhiều ô nhãn ngắn (CT Teaching Manual tr.45) vẫn có thể bị
+gán lệch bản dịch giữa các nhãn ngắn; một số câu dịch sai nghĩa không có số liệu/từ viết tắt để đối chiếu. Nên dùng gpt-4.1-mini cho các
+sách này, hoặc mở "Sửa" để chỉnh tay.
+- OCR: AI gắn "dir" (chữ xoay) cho cả chữ ngang → cả trang vẽ xoay dọc, chữ khổng lồ (BI-RADS tr.xvi). Nay khung bẹt ngang hoặc quá nửa số khối có "dir" thì coi là chữ ngang.
+- Nhãn hướng trong sơ đồ (Lateral/Medial/Head/Foot…) dịch trên máy: trước đây nano dịch "Lateral" thành "Chếch trong-ngoài".
