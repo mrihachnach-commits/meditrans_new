@@ -21,6 +21,7 @@ import { clearLayoutTranslationMemory, layoutTranslationMemorySize } from './ser
 import { deleteApiKeyReliably, getPendingKeyDeletes, retryPendingKeyDeletes, PENDING_DELETES_EVENT } from './services/keyDeletion';
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { LayoutTranslatePanel } from './components/LayoutTranslatePanel';
+import { usePinchZoom, PINCH_TOUCH_CLASS } from './hooks/usePinchZoom';
 import { buildPageMarkdown } from './services/layoutTranslationService';
 import { splitMarkdownForParallel, fixUntranslatedLines, splitReferenceSegments } from './utils/translateBoost';
 import { UserProfile, ApiKeyItem, SystemShopAiKey, getEffectiveUserLevel } from './types';
@@ -2600,12 +2601,55 @@ export default function App() {
     setPdfScrollEl(el);
   }, []);
 
+  // v11.3: zoom bằng hai ngón tay (điện thoại / máy tính bảng) cho PDF gốc, bản dịch giữ định dạng và bản dịch chữ
+  const PDF_ZOOM_MIN = 0.5, PDF_ZOOM_MAX = 3; // cùng giới hạn với nút +/− và Ctrl + lăn chuột
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const fontSizeRef = useRef(fontSize);
+  fontSizeRef.current = fontSize;
+  const commitPinchZoom = useCallback((next: number) => {
+    const v = Number(Math.min(PDF_ZOOM_MAX, Math.max(PDF_ZOOM_MIN, next)).toFixed(2));
+    if (Math.abs(v - zoomRef.current) < 0.005) return false;
+    setIsAutoFit(false);
+    setZoom(v);
+    return true;
+  }, []);
+  const pdfZoomControl = useMemo(() => ({
+    getValue: () => zoomRef.current,
+    commit: commitPinchZoom,
+    min: PDF_ZOOM_MIN,
+    max: PDF_ZOOM_MAX,
+  }), [commitPinchZoom]);
+  usePinchZoom(pdfScrollEl, {
+    ...pdfZoomControl,
+    enabled: !!pdfDoc,
+    getTarget: () => canvasRef.current,
+  });
+  const [textScrollEl, setTextScrollEl] = useState<HTMLDivElement | null>(null);
+  usePinchZoom(textScrollEl, {
+    enabled: translationPanelMode !== 'layout',
+    getValue: () => fontSizeRef.current,
+    commit: (next: number) => {
+      const v = Math.round(Math.min(30, Math.max(12, next)));
+      if (v === fontSizeRef.current) return false;
+      setFontSize(v);
+      return true;
+    },
+    min: 12,
+    max: 30,
+    getContent: el => el.querySelector<HTMLElement>('.markdown-body'),
+    wheelStep: 1,
+  });
+
   // Kích thước hiển thị của trang PDF bên trái → tab "Giữ định dạng" hiển thị cùng cỡ (phóng to/thu nhỏ đồng bộ)
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return;
     const update = () => {
-      const r = el.getBoundingClientRect();
+      let r: { width: number; height: number } = el.getBoundingClientRect();
+      // v11.3: khung bản gốc đang ẩn (điện thoại, chế độ chỉ xem bản dịch) → lấy cỡ CSS đã đặt khi vẽ,
+      // để zoom bằng hai ngón trên bản dịch giữ định dạng vẫn đổi cỡ khung trang
+      if (r.width < 2 || r.height < 2) r = { width: parseFloat(el.style.width) || 0, height: parseFloat(el.style.height) || 0 };
       if (r.width < 2 || r.height < 2) return;
       setLeftPageBox(prev => (prev && Math.abs(prev.w - r.width) < 0.5 && Math.abs(prev.h - r.height) < 0.5) ? prev : { w: r.width, h: r.height });
     };
@@ -4771,7 +4815,7 @@ export default function App() {
                 className={cn(
                   "flex-1 overflow-auto pdf-container relative bg-slate-100 pb-52 md:pb-8",
                   isFullScreen ? "p-0" : "p-4 md:p-8",
-                  isPanning ? "cursor-grab select-none touch-none" : "cursor-auto"
+                  isPanning ? "cursor-grab select-none touch-none" : cn("cursor-auto", PINCH_TOUCH_CLASS)
                 )} 
                 ref={setPdfContainerEl}
                 onMouseDown={handleMouseDown}
@@ -5229,7 +5273,7 @@ export default function App() {
                 </div>
               </div>
               
-              <div className={cn("flex-1 bg-white", translationPanelMode === 'layout' ? "p-0 overflow-hidden flex flex-col min-h-0" : "overflow-auto p-6 md:p-12")}>
+              <div ref={setTextScrollEl} className={cn("flex-1 bg-white", translationPanelMode === 'layout' ? "p-0 overflow-hidden flex flex-col min-h-0" : cn("overflow-auto p-6 md:p-12", PINCH_TOUCH_CLASS))}>
                 {layoutPanelMounted && pdfDoc && (
                   <div className={translationPanelMode === 'layout' ? "flex-1 min-h-0 flex flex-col" : "hidden"}>
                     <LayoutTranslatePanel
@@ -5247,6 +5291,7 @@ export default function App() {
                       fullScreen={isFullScreen}
                       bulkRequest={layoutBulkRequest}
                       onBulkStateChange={setLayoutBulkState}
+                      zoomControl={pdfZoomControl}
                       cloud={user && fileId && fileOwnerId
                         ? { ownerId: fileOwnerId, fileId, canWrite: user.uid === fileOwnerId || userRole === 'admin' }
                         : null}
@@ -6824,33 +6869,40 @@ export default function App() {
                   </datalist>
                   <p className="text-[10px] text-slate-400 leading-tight">Dịch các khối chữ của trang PDF có lớp chữ (tab &quot;Giữ định dạng&quot;). Gõ tên model bất kỳ mà proxy hỗ trợ, hoặc để trống để dùng gpt-4.1-nano. Với key hệ thống, model ngoài danh sách cho phép sẽ tự về model mặc định của máy chủ.</p>
                 </div>
-                {([
-                  ['mediTrans_proxyModelOcr', 'Model Proxy cho OCR giữ định dạng:', 'gemini-3.1-flash-lite', 'Đọc trang scan / chữ trong hình kèm toạ độ khung chữ. Model Gemini cho toạ độ chính xác nhất.'],
-                ] as const).map(([key, label, def, hint]) => (
-                  <div key={key} className="space-y-2 pt-3 border-t border-slate-100">
-                    <div className="flex items-center justify-between gap-2">
-                      <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                        <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                        {label}
-                      </label>
-                      <select
-                        defaultValue={localStorage.getItem(key) || ''}
-                        onChange={(e) => { if (e.target.value) localStorage.setItem(key, e.target.value); else localStorage.removeItem(key); showToast(`Đã chọn ${e.target.value || 'Mặc định (' + def + ')'}.`, 'success'); }}
-                        className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 font-bold outline-none cursor-pointer"
-                      >
-                        <option value="">⚙️ Mặc định ({def})</option>
-                        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-                        <option value="gpt-6-luna">gpt-6-luna (tắt suy nghĩ)</option>
-                        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
-                        <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
-                        <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
-                        <option value="gpt-4o-mini">gpt-4o-mini</option>
-                        <option value="gpt-4.1">gpt-4.1</option>
-                      </select>
-                    </div>
-                    <p className="text-[10px] text-slate-400 leading-tight">{hint} Model có suy nghĩ được tự tắt suy nghĩ.</p>
-                  </div>
-                ))}
+                {/* v11.1: OCR giữ định dạng — tự nhập tên model như dịch thường (mặc định gemini-3.1-flash-lite) */}
+                <div className="space-y-2 pt-3 border-t border-slate-100">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                    Model Proxy cho OCR giữ định dạng:
+                  </label>
+                  <input
+                    type="text"
+                    list="ocr-model-list"
+                    defaultValue={localStorage.getItem('mediTrans_proxyModelOcr') || ''}
+                    placeholder="Mặc định: gemini-3.1-flash-lite"
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      const prev = localStorage.getItem('mediTrans_proxyModelOcr') || '';
+                      if (v === prev) return;
+                      if (v && !/^[\w.\-:/]{2,80}$/.test(v)) { showToast('Tên model không hợp lệ (chỉ chữ, số, dấu . - _ : /).', 'error'); return; }
+                      if (v) localStorage.setItem('mediTrans_proxyModelOcr', v); else localStorage.removeItem('mediTrans_proxyModelOcr');
+                      showToast(`OCR giữ định dạng dùng ${v || 'gemini-3.1-flash-lite (mặc định)'}.`, 'success');
+                    }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                    className="w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:ring-2 focus:ring-emerald-500 outline-none text-slate-800"
+                  />
+                  <datalist id="ocr-model-list">
+                    <option value="gemini-3.1-flash-lite" />
+                    <option value="gemini-3.5-flash-lite" />
+                    <option value="gemini-3-flash-preview" />
+                    <option value="gpt-4.1-nano" />
+                    <option value="gpt-4.1-mini" />
+                    <option value="gpt-4o-mini" />
+                    <option value="gpt-4.1" />
+                    <option value="gpt-6-luna" />
+                  </datalist>
+                  <p className="text-[10px] text-slate-400 leading-tight">Đọc trang scan / chữ trong hình kèm toạ độ khung chữ. Gõ tên model bất kỳ mà proxy hỗ trợ, hoặc để trống để dùng gemini-3.1-flash-lite. Model Gemini cho toạ độ chính xác nhất; model có suy nghĩ được tự tắt suy nghĩ. Với key hệ thống, model ngoài danh sách cho phép sẽ tự về model mặc định của máy chủ.</p>
+                </div>
 
                 {/* 4. Số luồng đồng thời (ShopAIKey / key hệ thống) */}
                 <div className="space-y-2 pt-3 border-t border-slate-100">

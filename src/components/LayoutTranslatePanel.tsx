@@ -28,6 +28,7 @@ import { LayoutCloudTarget, loadCloudLayoutPages, saveCloudLayoutPage } from '..
 import { isFirestoreQuotaBlocked } from '../services/firestoreQuota';
 import { checkNumeric, describeNumericIssue } from '../services/numericQa';
 import { aiTelemetryCsv, clearAiTelemetry, onAiTelemetry, summarizeAiTelemetry } from '../services/aiTelemetry';
+import { usePinchZoom, PINCH_TOUCH_CLASS } from '../hooks/usePinchZoom';
 
 interface LayoutTranslatePanelProps {
   pdfDoc: PDFDocumentProxy;
@@ -45,6 +46,8 @@ interface LayoutTranslatePanelProps {
   pageBox?: { w: number; h: number } | null;
   /** Vùng cuộn của trình xem PDF bên trái → cuộn đồng bộ hai bên. */
   syncScrollEl?: HTMLElement | null;
+  /** v11.3: zoom bằng hai ngón tay / Ctrl + lăn chuột trên khung bản dịch → đổi zoom chung với trang gốc */
+  zoomControl?: { getValue: () => number; commit: (next: number) => boolean; min: number; max: number } | null;
   fullScreen?: boolean;
   /** Yêu cầu dịch hàng loạt từ Cài đặt ("Dịch toàn bộ giữ định dạng"). Đổi id để kích hoạt.
    *  v10.3: kèm docKey — yêu cầu của tài liệu khác bị bỏ qua. */
@@ -68,7 +71,7 @@ const iconBtn = 'inline-flex items-center justify-center gap-1 h-7 px-2 rounded-
 
 export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   pdfDoc, numPages, currentPage, docKey, fileName, translator, showToast, cloud,
-  toolbarTarget, pageBox, syncScrollEl, fullScreen, bulkRequest, onBulkStateChange,
+  toolbarTarget, pageBox, syncScrollEl, fullScreen, bulkRequest, onBulkStateChange, zoomControl,
 }) => {
   const [results, setResults] = useState<Record<number, LayoutPageResult>>({});
   const [errors, setErrors] = useState<Record<number, string>>({});
@@ -128,6 +131,21 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   cloudPairsRef.current = cloudPairs;
   const urlCache = useRef<Map<number, { blob: Blob; url: string }>>(new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  const setScrollRef = useCallback((el: HTMLDivElement | null) => {
+    (scrollRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+    setScrollEl(el);
+  }, []);
+  usePinchZoom(scrollEl, {
+    enabled: !!zoomControl,
+    getValue: () => zoomControl?.getValue() ?? 1,
+    commit: next => zoomControl?.commit(next) ?? false,
+    min: zoomControl?.min ?? 0.5,
+    max: zoomControl?.max ?? 3,
+    // khung trang (con của lớp bọc inline-block) đổi cỡ theo trang PDF bên trái
+    getTarget: el => (el.firstElementChild?.firstElementChild as HTMLElement | null) ?? null,
+    wheelStep: 0.1,
+  });
   const cloudKey = cloud ? `${cloud.ownerId}/${cloud.fileId}/${cloud.canWrite}` : '';
   // App tạo object `cloud` mới mỗi lần vẽ lại → giữ cố định theo cloudKey. Trước đây mỗi lần App vẽ lại (rất thường
   // xuyên khi đang dịch) hiệu ứng đồng bộ chạy lại và GHI LẠI mọi trang chưa được xác nhận lên Firestore → cạn hạn
@@ -602,7 +620,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       right.removeEventListener('scroll', fromRight);
       cancelAnimationFrame(release);
     };
-  }, [syncScrollEl, currentPage, pageBox?.w, pageBox?.h, toolbarTarget]);
+  }, [syncScrollEl, scrollEl, currentPage, pageBox?.w, pageBox?.h, toolbarTarget]);
 
   /* -------- hiển thị -------- */
   const current = results[currentPage];
@@ -914,8 +932,8 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       )}
 
       {/* Vùng xem: cùng bố cục với trình xem PDF bên trái */}
-      <div ref={scrollRef}
-        className={`flex-1 min-h-0 overflow-auto bg-slate-100 ${fullScreen ? 'p-0' : 'p-4 md:p-8'}`}>
+      <div ref={setScrollRef}
+        className={`flex-1 min-h-0 overflow-auto bg-slate-100 ${PINCH_TOUCH_CLASS} ${fullScreen ? 'p-0' : 'p-4 md:p-8'}`}>
         <div className="inline-block min-w-full text-center align-top">
           <div className={`inline-block text-left relative shadow-2xl bg-white overflow-hidden shrink-0 ${fullScreen ? 'my-0' : 'my-8 rounded-lg border border-slate-200'}`}
             style={frameStyle}>

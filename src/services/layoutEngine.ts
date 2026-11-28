@@ -219,6 +219,12 @@ const LABEL_RE = new RegExp(`^(\\d{1,3}(\\.\\d{1,3})*[.)]?|\\(\\d{1,2}\\)|\\(?[a
 /** Ký hiệu đầu dòng dính liền chữ trong cùng một item: "• Breast", "o Conical…" */
 const LEADING_BULLET_RE = new RegExp(`^(\\s*[${BULLET_CHARS}])(\\s+)(?=\\S)`);
 const LEADER_RE = /^([\s\S]*?\S)\s*(?:[.·…]\s*){4,}\s*(\d{1,4}|[ivxlcdm]{1,6})?\s*$/i;
+/** v11.2: dòng mục lục OCR có chấm dẫn + SỐ TRANG chỉ trong bản dịch (text không có). */
+function ocrLeaderInV(o: { text?: string; v?: string }): boolean {
+  const v = (o.v || '').replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim();
+  const m = v.match(LEADER_RE);
+  return !!m && !!m[2] && /^\d{1,4}$/.test(m[2]) && !LEADER_RE.test((o.text || '').replace(/\s+/g, ' ').trim());
+}
 
 function isTranslatableText(text: string): boolean {
   const t = text.trim();
@@ -3738,7 +3744,10 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
     // v11: dòng mục lục ("C. ARCHITECTURAL DISTORTION ....107") mà khung AI chỉ bao phần chữ (không gồm chấm dẫn + số
     // trang) → chấm dẫn và số trang gốc không bị xoá, nằm cạnh chấm dẫn/số trang vẽ lại (BI-RADS tr.ix: ".....107" hai lần).
     // Nới khung sang phải (và trái) theo mực thật trên đúng dải dòng đó, dừng khi gặp khoảng trống dài.
-    if (LEADER_RE.test(o.text.replace(/\s+/g, ' ').trim()) && (Y1 - Y0) < 0.05 * H) {
+    // v11.2: model chỉ ghi chấm dẫn + số trang trong BẢN DỊCH ("v"), không có trong "text" (BI-RADS tr.10, gemini-2.5-flash-lite)
+    // → trước đây không nhận là dòng mục lục: chấm dẫn/số trang gốc không bị xoá, vẽ lại lần nữa ("…225 · · · 225"), chữ gốc
+    // đầu dòng còn sót ("E. ASSOCIAT")
+    if ((LEADER_RE.test(o.text.replace(/\s+/g, ' ').trim()) || ocrLeaderInV(o)) && (Y1 - Y0) < 0.05 * H) {
       const yA = Math.round(Y0 + 0.15 * (Y1 - Y0)), yB = Math.round(Y1 - 0.15 * (Y1 - Y0));
       const colInk = (x: number) => {
         for (let y = yA; y <= yB; y++) { const i = (y * W + x) * 4; if (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 150) return true; }
@@ -3776,6 +3785,13 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
       }
       // chỉ nới khi phần mực tiếp theo ngắn (đuôi từ), không phải cả một cột chữ khác
       if (last - X1 > 0 && last - X1 < 6 * (Y1 - Y0)) X1 = Math.min(W, last + 2);
+      // v11.2: … và mép trái (khung bắt đầu giữa từ, chữ gốc đầu dòng còn sót)
+      let first = Math.round(X0); gap = 0;
+      for (let x = Math.round(X0) - 1; x > Math.max(0, X0 - 0.15 * W); x--) {
+        if (ruleAt(x)) break;
+        if (colInk(x)) { first = x; gap = 0; } else if (++gap > maxGap) break;
+      }
+      if (X0 - first > 0 && X0 - first < 6 * (Y1 - Y0)) X0 = Math.max(0, first - 2);
     }
     const dir = String(o.dir || '').toLowerCase();
     let rotate: 'up' | 'down' | undefined = dir === 'up' ? 'up' : dir === 'down' ? 'down' : undefined;
@@ -3811,6 +3827,7 @@ export function blocksFromOcr(ctx: CanvasRenderingContext2D, ocr: OcrBlock[], id
     let leaderNum: string | undefined;
     const lm = text.match(LEADER_RE);
     if (lm && !rotate) { text = lm[1].trim(); leaderNum = lm[2] || ''; }
+    else if (!rotate && ocrLeaderInV(o)) leaderNum = (o.v || '').replace(/<\/?\d+>/g, '').replace(/\s+/g, ' ').trim().match(LEADER_RE)?.[2] || '';
     const al = String(o.align || '').toLowerCase();
     const base = {
       id: '', text, plain: text, styles: [] as RunStyle[],
@@ -4416,6 +4433,39 @@ export function scanTextRegions(img: ImageData): { regions: TextRegion[]; photoF
  *  - khung chỉ phủ một phần vùng chữ (không khối nào khác dùng) → nới ra cả vùng.
  * Nhãn ngắn trong ảnh (L, R, CC, MLO…) giữ nguyên. Trả về mảng CÙNG ĐỘ DÀI (khối bị bỏ có text rỗng).
  */
+/** v11.2: tỉ lệ ô mực chữ (bỏ ảnh, bỏ đường kẻ mảnh) nằm ngoài mọi khung OCR. */
+function uncoveredInk(ctx: CanvasRenderingContext2D, bgL: number, photoFrac: (x0: number, y0: number, x1: number, y1: number) => number,
+  boxes: { x0: number; y0: number; x1: number; y1: number }[]): number {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const c = Math.max(4, Math.round(W / 300));
+  const darkT = bgL - 90;
+  const padX = 0.006 * W, padY = 0.004 * H;
+  let tot = 0, miss = 0;
+  for (let y0 = 0; y0 < H; y0 += c) for (let x0 = 0; x0 < W; x0 += c) {
+    const y1 = Math.min(H, y0 + c), x1 = Math.min(W, x0 + c);
+    let n = 0, rows = 0, minC = 1e9, maxC = -1, minR = 1e9, maxR = -1;
+    const colSeen = new Uint8Array(c);
+    for (let y = y0; y < y1; y++) {
+      let rowHas = false;
+      for (let x = x0; x < x1; x++) {
+        const i = (y * W + x) * 4;
+        if (((d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8) < darkT) { n++; rowHas = true; colSeen[x - x0] = 1; minC = Math.min(minC, x); maxC = Math.max(maxC, x); }
+      }
+      if (rowHas) { rows++; minR = Math.min(minR, y); maxR = Math.max(maxR, y); }
+    }
+    if (n < 2) continue;
+    let cols = 0; for (let k = 0; k < c; k++) cols += colSeen[k];
+    // đường kẻ ngang / dọc mảnh (bảng, biểu mẫu) không phải chữ
+    if ((rows <= 3 && cols >= 0.8 * (x1 - x0)) || (cols <= 3 && rows >= 0.8 * (y1 - y0))) continue;
+    if (photoFrac(x0, y0, x1, y1) > 0.3) continue;
+    tot++;
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    if (!boxes.some(B => cx >= B.x0 - padX && cx <= B.x1 + padX && cy >= B.y0 - padY && cy <= B.y1 + padY)) miss++;
+  }
+  return tot >= 30 ? miss / tot : 0;
+}
+
 export function refineOcrBoxes(ctx: CanvasRenderingContext2D, ocr: OcrBlock[]): OcrBlock[] {
   try {
     const W = ctx.canvas.width, H = ctx.canvas.height;
@@ -4520,6 +4570,9 @@ export function refineOcrBoxes(ctx: CanvasRenderingContext2D, ocr: OcrBlock[]): 
         if (fin.some((q, j) => j !== i && inter(fin[i], q) > 0.3 * Math.min(area(fin[i]), area(q)))) ov++;
       }
       (out as any).overlapRatio = fin.length ? ov / fin.length : 0;
+      // v11.2: tỉ lệ MỰC CHỮ (ngoài ảnh, không tính đường kẻ) KHÔNG có khối OCR nào phủ — model bỏ sót cả mảng trang
+      // (BI-RADS tr.520: biểu mẫu chỉ đọc nửa trên, nửa dưới giữ tiếng Anh; trang chữ dày bị cắt cụt JSON)
+      (out as any).uncoveredRatio = uncoveredInk(ctx, scan.bgL, photoFrac, out.map(o => (o && o.text?.trim() ? toPx(o) : null)).filter(Boolean) as Bx[]);
     }
     return out;
   } catch (e) {

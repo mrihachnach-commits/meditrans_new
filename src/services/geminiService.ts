@@ -566,8 +566,15 @@ export class GeminiService implements TranslationService {
   public static readonly PROXY_MODEL_CHOICES = ['gpt-4.1-nano', 'gpt-4.1-mini', 'gpt-6-luna', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite', 'gpt-4o-mini', 'gpt-4.1'];
   public static currentOcrModel(): string {
     const v = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_proxyModelOcr') : null)?.trim() || '';
-    return GeminiService.PROXY_MODEL_CHOICES.includes(v) ? v : GeminiService.PROXY_OCR_MODEL;
+    return /^[\w.\-:/]{2,80}$/.test(v) ? v : GeminiService.PROXY_OCR_MODEL; // v11.1: tự nhập tên model
   }
+  /** v11.2: model OCR dự phòng — dùng khi model OCR đang chọn lỗi / trả rỗng / đặt sai khung trên một trang
+   *  (gemini-2.5-flash-lite bỏ sót ~6% trang BI-RADS: trang chữ dày, mục lục, biểu mẫu). */
+  public static ocrFallbackModel(): string {
+    const cur = GeminiService.currentOcrModel().toLowerCase();
+    return cur === GeminiService.PROXY_OCR_MODEL ? 'gemini-3.5-flash-lite' : GeminiService.PROXY_OCR_MODEL;
+  }
+  private static readonly OCR_AS = '__ocr_as__:';
   /** Mã chức năng nội bộ (truyền thay cho tên model). */
   private static readonly LAYOUT_MODEL = '__layout_fixed__';
   private static readonly OCR_MODEL = '__ocr_fixed__';
@@ -579,10 +586,10 @@ export class GeminiService implements TranslationService {
   private mapModelForOpenAI(modelName: string): string {
     const ls = (k: string) => (typeof window !== 'undefined' ? localStorage.getItem(k) : null)?.trim() || '';
     // v10.4: dịch giữ định dạng / OCR giữ định dạng có ô chọn model riêng trong Cài đặt (chỉ các model được phép)
-    const pick = (k: string, def: string) => { const v = ls(k); return GeminiService.PROXY_MODEL_CHOICES.includes(v) ? v : def; };
     // v10.8: dịch giữ định dạng: người dùng tự nhập tên model (mặc định gpt-4.1-nano)
     if (modelName === GeminiService.LAYOUT_MODEL) { const v = ls('mediTrans_proxyModelLayout'); return /^[\w.\-:/]{2,80}$/.test(v) ? v : GeminiService.PROXY_LAYOUT_MODEL; }
-    if (modelName === GeminiService.OCR_MODEL) return pick('mediTrans_proxyModelOcr', GeminiService.PROXY_OCR_MODEL);
+    if (modelName === GeminiService.OCR_MODEL) return GeminiService.currentOcrModel(); // v11.1: tự nhập tên model
+    if (modelName.startsWith(GeminiService.OCR_AS)) return modelName.slice(GeminiService.OCR_AS.length); // v11.2: model OCR dự phòng
     if (GeminiService.isDeepEngine(modelName)) return ls('mediTrans_customOpenAIModelDeep') || GeminiService.PROXY_DEEP_MODEL;
     return ls('mediTrans_customOpenAIModelNormal') || ls('mediTrans_customOpenAIModel') || GeminiService.PROXY_NORMAL_MODEL;
   }
@@ -1625,10 +1632,15 @@ Rules:
    * OCR + dịch giữ định dạng cho trang scan (MỘT lần gọi): trả về từng khối chữ với vị trí trên ảnh,
    * chữ gốc và bản dịch tiếng Việt. Dùng chung hệ thống key / xoay key / key hệ thống của web.
    */
-  async ocrLayoutBlocks(imageDataUrl: string, signal?: AbortSignal, opts: { mode?: 'full' | 'extra'; regions?: number[][]; retryEmpty?: boolean } = {}): Promise<any[]> {
+  ocrFallbackModel(): string { return GeminiService.ocrFallbackModel(); }
+
+  async ocrLayoutBlocks(imageDataUrl: string, signal?: AbortSignal, opts: { mode?: 'full' | 'extra'; regions?: number[][]; retryEmpty?: boolean; fallback?: boolean } = {}): Promise<any[]> {
     const extra = opts.mode === 'extra';
+    // v11.2: đọc lại bằng model OCR dự phòng (chỉ áp dụng khi dùng proxy; key Google dùng model của key)
+    const ocrModelName = opts.fallback ? GeminiService.ocrFallbackModel() : GeminiService.currentOcrModel();
+    const OCR_CALL = opts.fallback ? GeminiService.OCR_AS + ocrModelName : GeminiService.OCR_MODEL;
     // v10.4: model GPT không quen định dạng box_2d của Gemini → nhắc rõ thứ tự (y trước x) và thang 0–1000
-    const gptBoxHint = /^(gpt|o\d)/i.test(GeminiService.currentOcrModel())
+    const gptBoxHint = /^(gpt|o\d)/i.test(ocrModelName)
       ? `
 COORDINATES: box_2d is [ymin, xmin, ymax, xmax] — the VERTICAL position (y, from the top edge) comes FIRST, then the horizontal position (x, from the left edge). Use a 0-1000 scale for both axes (0 = top/left edge, 1000 = bottom/right edge), NOT pixels. Measure each box carefully against the page: a block in the right column has xmin > 500; a footer near the bottom has ymin > 900.`
       : '';
@@ -1765,7 +1777,7 @@ Boxes must enclose the text itself: a caption below a picture gets the box of th
       try {
         let raw = '';
         if (this.isCurrentKeyProxy(key)) {
-          raw = await this.callOpenAINonStream(key, GeminiService.OCR_MODEL, systemInstruction, nestedRetried ? prompt + ' Each block must have exactly ONE box of 4 numbers; split text in separate areas into separate blocks.' : prompt, imageDataUrl, signal, 16384, !GeminiService.jsonModeUnsupported);
+          raw = await this.callOpenAINonStream(key, OCR_CALL, systemInstruction, nestedRetried ? prompt + ' Each block must have exactly ONE box of 4 numbers; split text in separate areas into separate blocks.' : prompt, imageDataUrl, signal, 16384, !GeminiService.jsonModeUnsupported);
         } else {
           const gm = this.googleModel(key, this.modelName);
           const genModel = ai.getGenerativeModel({

@@ -47,6 +47,8 @@ export interface LayoutBlockTranslator {
    * (box_2d [ymin,xmin,ymax,xmax] 0..1000, text gốc, v = bản dịch, số dòng, kiểu chữ, căn lề).
    */
   ocrLayoutBlocks?(imageDataUrl: string, signal?: AbortSignal, opts?: OcrRequestOptions): Promise<OcrBlock[]>;
+  /** v11.2: tên model OCR dự phòng (đọc lại trang khi model đang chọn lỗi / trả rỗng / kết quả kém). */
+  ocrFallbackModel?(): string;
 }
 
 /**
@@ -59,6 +61,8 @@ export interface OcrRequestOptions {
   retryEmpty?: boolean;
   /** Vùng ảnh trên trang, box_2d [ymin, xmin, ymax, xmax] 0..1000. */
   regions?: number[][];
+  /** v11.2: dùng model OCR dự phòng thay cho model đang chọn. */
+  fallback?: boolean;
 }
 
 /** Khoá đặc biệt trong danh sách cặp câu: lưu kết quả OCR (vị trí khối) để dựng lại trang không cần gọi AI. */
@@ -1066,6 +1070,15 @@ function isUntranslated(src: string, v: string): boolean {
   if (a !== plain(v)) return false;
   const words = a.match(/[a-z]{2,}/g) || [];
   if (words.length === 0) return false;
+  // v11.2: dòng VIẾT HOA chép nguyên văn ("APPENDIX A – MAMMOGRAPHIC VIEWS", "MAMMOGRAPHY LEXICON SUMMARY FORM" — mục lục
+  // BI-RADS tr.10) → sót. Không tính tên người / học vị, dòng chỉ có viết tắt (ACR BI-RADS®), tài liệu tham khảo.
+  {
+    const raw = src.replace(/<\/?\d+>/g, ' ');
+    if (!/\p{Ll}/u.test(raw) && /[A-Z]{4}/.test(raw) && !/,\s*(MD|MBBS|DO|MS|MPH|FACR|RN|RT)\b|HTTPS?:|WWW\./.test(raw)) {
+      const real = words.filter(w => w.length >= 4 && (w.match(/[aeiouy]/g) || []).length >= 2 && !/^(acr|rads|mri|birads)$/.test(w));
+      if (real.length >= 2 && real.some(w => w.length >= 6)) return true;
+    }
+  }
   // Khối ngắn (tiêu đề 1–3 từ): sót nếu toàn là từ tiếng Anh thông dụng (tên riêng, thuốc, viết tắt không bị bắt)
   // v10.8: cụm 2–3 từ có từ viết thường thông dụng tiếng Anh ("Coronary artery disease", "Appropriate use criteria" — cột
   // nghĩa của danh mục viết tắt) mà AI trả nguyên văn → sót (tên riêng viết hoa mọi từ như "American Heart Association" vẫn giữ)
@@ -1386,8 +1399,9 @@ function blankResult(r: LayoutPageResult): LayoutPageResult {
   return { ...r, scanned: false, blank: true, blockCount: 0, overflowCount: 0, shrunkCount: 0, pairs: [{ s: BLANK_PAIR_KEY, v: '1' }] };
 }
 
-function noTextResult(r: LayoutPageResult): LayoutPageResult {
-  return { ...r, scanned: false, blank: true, noText: true, blockCount: 0, overflowCount: 0, shrunkCount: 0, pairs: [{ s: NOTEXT_PAIR_KEY, v: '1' }] };
+/** v11.2: fallbackTried = đã đọc cả bằng model OCR dự phòng ('2'); bản lưu '1' (chỉ một model) sẽ được đọc lại một lần. */
+function noTextResult(r: LayoutPageResult, fallbackTried = false): LayoutPageResult {
+  return { ...r, scanned: false, blank: true, noText: true, blockCount: 0, overflowCount: 0, shrunkCount: 0, pairs: [{ s: NOTEXT_PAIR_KEY, v: fallbackTried ? '2' : '1' }] };
 }
 
 /**
@@ -1602,25 +1616,42 @@ async function translatePageWithLayoutInner(
       if (analyzed.scanned && isBlankCanvas(analyzed.canvas)) {
         return blankResult(await finishPage({ ...analyzed, blocks: [] }, pageNumber, {}, undefined, undefined, signal));
       }
+      const canFallback = !!translator.ocrFallbackModel;
+      let usedFallback = false;
+      const read = async (img: HTMLCanvasElement, o: OcrRequestOptions = {}) =>
+        normalizeOcrBoxes(await translator.ocrLayoutBlocks!(ocrImage(img), signal, o), analyzed.canvas);
       let ocr: OcrBlock[];
       try {
-        ocr = normalizeOcrBoxes(await translator.ocrLayoutBlocks(ocrImage(analyzed.canvas), signal), analyzed.canvas);
+        ocr = await read(analyzed.canvas);
       } catch (e: any) {
+        if (signal?.aborted) throw e;
         // Bộ lọc nội dung của model chặn ảnh y khoa (ảnh vú, cơ thể) → thử lại với ảnh đã che hình
-        if (signal?.aborted || !/safety|content.?(filter|policy|management)|blocked|prohibited|moderation|policy/i.test(String(e?.message))) throw e;
-        console.warn(`[Layout] Trang ${pageNumber}: model chặn ảnh trang → che hình rồi đọc lại.`, e);
-        ocr = [];
+        if (/safety|content.?(filter|policy|management)|blocked|prohibited|moderation|policy/i.test(String(e?.message))) {
+          console.warn(`[Layout] Trang ${pageNumber}: model chặn ảnh trang → che hình rồi đọc lại.`, e);
+          ocr = [];
+        } else if (canFallback && !/level 2|đăng nhập|api key/i.test(String(e?.message))) {
+          // v11.2: model OCR đang chọn lỗi trên trang này (bảo trì, JSON hỏng, quá tải) → đọc bằng model dự phòng
+          console.warn(`[Layout] Trang ${pageNumber}: OCR lỗi (${String(e?.message).slice(0, 80)}) → đọc lại bằng ${translator.ocrFallbackModel!()}.`);
+          try { ocr = await read(analyzed.canvas, { mode: 'full', fallback: true }); usedFallback = true; } catch (e2) { if (signal?.aborted) throw e2; throw e; }
+        } else throw e;
       }
       checkAbort(signal);
       // v9.5: trang scan có ảnh lớn + chú thích (vd. BI-RADS tr.28: 2 ảnh nhũ ảnh + "Figure 1 – Breast Density…" + tab dọc
       // "MAMMOGRAPHY") → AI đôi khi trả {"blocks":[]}. Trước đây bị coi là trang trắng và lưu lại vĩnh viễn → bản dịch
       // giống hệt bản gốc, nút dịch bị khoá. Nay: trang có mực → hỏi lại AI một lần, nhấn mạnh phải đọc chú thích.
-      if (!ocr.length && inkRatio(analyzed.canvas) >= 0.003) {
+      const inked = inkRatio(analyzed.canvas) >= 0.003;
+      if (!ocr.length && inked) {
         console.info(`[Layout] Trang ${pageNumber}: AI chưa thấy chữ trên trang có hình → đọc lại lần 2.`);
         // Lần 2: che các ảnh lớn (nhũ ảnh/siêu âm) — model hay bỏ qua hoặc bị bộ lọc chặn khi trang toàn ảnh y khoa
         const masked = maskPhotosCanvas(analyzed.canvas);
         try {
-          ocr = normalizeOcrBoxes(await translator.ocrLayoutBlocks(ocrImage(masked || analyzed.canvas), signal, { mode: 'full', retryEmpty: true }), analyzed.canvas);
+          ocr = await read(masked || analyzed.canvas, { mode: 'full', retryEmpty: true });
+          // v11.2: vẫn rỗng → model dự phòng (gemini-2.5-flash-lite trả rỗng cho cả trang chữ: BI-RADS tr.14, 484, 834)
+          if (!ocr.length && canFallback && !usedFallback) {
+            checkAbort(signal);
+            console.info(`[Layout] Trang ${pageNumber}: vẫn chưa thấy chữ → đọc bằng ${translator.ocrFallbackModel!()}.`);
+            try { ocr = await read(masked || analyzed.canvas, { mode: 'full', retryEmpty: true, fallback: true }); usedFallback = true; } catch (e) { if (signal?.aborted) throw e; }
+          }
         } finally {
           if (masked) { masked.width = 0; masked.height = 0; }
         }
@@ -1629,27 +1660,35 @@ async function translatePageWithLayoutInner(
       if (!ocr.length) {
         // Vẫn không có chữ: trang chỉ có hình → giữ nguyên trang gốc, ghi chú nhẹ, vẫn cho dịch lại (không khoá như trang trắng)
         console.info(`[Layout] Trang ${pageNumber}: không có chữ để dịch → giữ nguyên trang gốc.`);
-        return noTextResult(await finishPage({ ...analyzed, blocks: [], scanned: true }, pageNumber, {}, undefined, undefined, signal));
+        return noTextResult(await finishPage({ ...analyzed, blocks: [], scanned: true }, pageNumber, {}, undefined, undefined, signal), usedFallback);
       }
       // v11: kết quả OCR không tin cậy (nhiều khung đặt sai chỗ / đè nhau — trang biểu mẫu dày đặc, CĐHA tuyến vú – Kiến
       // thức thiết yếu tr.31) → đọc lại 1 lần; vẫn kém thì GIỮ NGUYÊN trang gốc và đánh dấu để báo khi xuất PDF (trước đây
       // vẽ ra trang lẫn lộn chữ dịch đè chữ gốc).
-      const quality = (a: Analyzed) => { const r: any = refinedOcr.get(a.blocks); return r ? Math.max(r.badRatio || 0, r.overlapRatio || 0) : 0; };
+      // v11.2: thêm tỉ lệ mực chữ bị bỏ sót (model chỉ đọc một phần trang) và đọc lại bằng MODEL DỰ PHÒNG
+      const placeQ = (a: Analyzed) => { const r: any = refinedOcr.get(a.blocks); return r ? Math.max(r.badRatio || 0, r.overlapRatio || 0) : 0; };
+      const missQ = (a: Analyzed) => { const r: any = refinedOcr.get(a.blocks); return r ? r.uncoveredRatio || 0 : 0; };
+      const quality = (a: Analyzed) => Math.max(placeQ(a), 0.8 * missQ(a));
       const base = analyzed;
       analyzed = applyOcr(base, ocr);
-      if (ocr.length >= 8 && quality(analyzed) > 0.2) {
-        console.warn(`[Layout] Trang ${pageNumber}: OCR đặt sai chỗ nhiều khối (${Math.round(quality(analyzed) * 100)}%) → đọc lại.`);
-        try {
-          const again = normalizeOcrBoxes(await translator.ocrLayoutBlocks(ocrImage(base.canvas), signal, { mode: 'full' }), base.canvas);
-          checkAbort(signal);
-          if (again.length) {
-            const a2 = applyOcr(base, again);
-            if (quality(a2) < quality(analyzed)) { analyzed = a2; ocr = again; }
-          }
-        } catch (e) { if (signal?.aborted) throw e; }
-        if (quality(analyzed) > 0.3) {
+      const poor = () => (ocr.length >= 8 && placeQ(analyzed) > 0.2) || placeQ(analyzed) > 0.35 || missQ(analyzed) > 0.35;
+      if (poor()) {
+        const tries: OcrRequestOptions[] = usedFallback ? [{ mode: 'full', fallback: true }] : canFallback ? [{ mode: 'full', fallback: true }, { mode: 'full' }] : [{ mode: 'full' }];
+        for (const o of tries) {
+          console.warn(`[Layout] Trang ${pageNumber}: OCR kém (${Math.round(quality(analyzed) * 100)}%: sai chỗ / đè nhau / bỏ sót) → đọc lại${o.fallback ? ' bằng ' + translator.ocrFallbackModel!() : ''}.`);
+          try {
+            const again = await read(base.canvas, o);
+            checkAbort(signal);
+            if (again.length) {
+              const a2 = applyOcr(base, again);
+              if (quality(a2) < quality(analyzed)) { analyzed = a2; ocr = again; }
+            }
+          } catch (e) { if (signal?.aborted) throw e; }
+          if (!poor()) break;
+        }
+        if (placeQ(analyzed) > 0.3) {
           console.warn(`[Layout] Trang ${pageNumber}: OCR vẫn không tin cậy → giữ nguyên trang gốc (cần dịch lại / kiểm tra).`);
-          return noTextResult(await finishPage({ ...base, blocks: [], scanned: true }, pageNumber, {}, undefined, undefined, signal));
+          return noTextResult(await finishPage({ ...base, blocks: [], scanned: true }, pageNumber, {}, undefined, undefined, signal), true);
         }
       }
       const ocrUsed = refinedOcr.get(analyzed.blocks) || ocr;
@@ -1739,12 +1778,15 @@ export async function renderPageFromPairs(
     // → dịch lại trang bằng OCR (nếu có bộ dịch), không còn hiện bản gốc y nguyên mãi mãi.
     if (analyzed.scanned && pairs.some(p => p.s === BLANK_PAIR_KEY || p.s === NOTEXT_PAIR_KEY)) {
       const wasNoText = pairs.some(p => p.s === NOTEXT_PAIR_KEY);
-      if (translator?.ocrLayoutBlocks && !wasNoText) {
+      // v11.2: trang "không có chữ" lưu khi CHƯA thử model OCR dự phòng ('1') mà trang có mực → đọc lại một lần
+      // (gemini-2.5-flash-lite trả rỗng / kết quả kém cho trang chữ thật: BI-RADS tr.14, 484, 591, 834…)
+      const retryNoText = wasNoText && !!translator?.ocrFallbackModel && pairs.some(p => p.s === NOTEXT_PAIR_KEY && p.v === '1') && inkRatio(analyzed.canvas) >= 0.003;
+      if (translator?.ocrLayoutBlocks && (!wasNoText || retryNoText)) {
         releaseAnalyzed(analyzed);
         const fresh = await translatePageWithLayout(pdfDoc, pageNumber, translator, signal);
         return { ...fresh, retranslated: Math.max(1, fresh.blockCount) };
       }
-      return noTextResult(await finishPage({ ...analyzed, blocks: [] }, pageNumber, {}, undefined, undefined, signal));
+      return noTextResult(await finishPage({ ...analyzed, blocks: [] }, pageNumber, {}, undefined, undefined, signal), pairs.some(p => p.s === NOTEXT_PAIR_KEY && p.v === '2'));
     }
     const ocr = parseOcr(OCR_PAIR_KEY);
     let extraOcr = parseOcr(OCR_EXTRA_KEY);
@@ -2006,7 +2048,7 @@ function openLayoutDBOnce(): Promise<IDBDatabase> {
 }
 
 // Đổi phiên bản bộ máy dàn trang → ảnh cũ trong đệm tự bị bỏ qua và được dựng lại từ bản dịch đã lưu (không tốn token)
-const ENGINE_VERSION = 'v39'; // v39 (MediTrans v11): căn giữa/căn phải bỏ thụt lề, khối chữ ký căn phải, danh mục viết tắt không nối dòng, từ đậm đầu đoạn không tách, mục lục OCR nới khung, OCR bỏ khối trùng/dời chú thích, bỏ thẻ lạ, cắt phần dịch tràn sang khối sau; // v38: dòng mục lục có số trang cột phải tách riêng, bảng kẻ không bị coi là khung lưu đồ, dòng căn đều không nối sang cột bên, giữ VIẾT HOA như bản gốc; // v37: chú thích hình 2 cột không nối dòng đầu sang cột bên, nhãn Hình/Bảng giữ chữ đậm khi AI bỏ thẻ; // v36: ô lưu đồ có viền, bìa không giãn chữ, dòng Editors/tên tác giả chân trang riêng, cột viết tắt không co, tiêu đề bảng không kéo cột nhỏ, cụm lặp / VIẾT HOA / dấu chấm thừa trong bản dịch, ô chỉ có từ viết tắt giữ nguyên; // v35: cột viết tắt giữ nguyên, tên tác giả giữ nguyên, dòng căn đều có số/chỉ số không vỡ, thân bài dưới bảng không bị coi là ô bảng, bảng có kẻ tách ô cột hẹp, cỡ chữ bảng theo đa số ô; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
+const ENGINE_VERSION = 'v40'; // v40 (MediTrans v11.2): mục lục OCR có chấm dẫn chỉ trong bản dịch không còn lặp số trang / sót chữ gốc, khung OCR 1 dòng nới cả mép trái; // v39 (MediTrans v11): căn giữa/căn phải bỏ thụt lề, khối chữ ký căn phải, danh mục viết tắt không nối dòng, từ đậm đầu đoạn không tách, mục lục OCR nới khung, OCR bỏ khối trùng/dời chú thích, bỏ thẻ lạ, cắt phần dịch tràn sang khối sau; // v38: dòng mục lục có số trang cột phải tách riêng, bảng kẻ không bị coi là khung lưu đồ, dòng căn đều không nối sang cột bên, giữ VIẾT HOA như bản gốc; // v37: chú thích hình 2 cột không nối dòng đầu sang cột bên, nhãn Hình/Bảng giữ chữ đậm khi AI bỏ thẻ; // v36: ô lưu đồ có viền, bìa không giãn chữ, dòng Editors/tên tác giả chân trang riêng, cột viết tắt không co, tiêu đề bảng không kéo cột nhỏ, cụm lặp / VIẾT HOA / dấu chấm thừa trong bản dịch, ô chỉ có từ viết tắt giữ nguyên; // v35: cột viết tắt giữ nguyên, tên tác giả giữ nguyên, dòng căn đều có số/chỉ số không vỡ, thân bài dưới bảng không bị coi là ô bảng, bảng có kẻ tách ô cột hẹp, cỡ chữ bảng theo đa số ô; // v34: gạch chân không còn bị coi là kẻ bảng / thành gạch ngang, ô bảng khít không nối sang cột bên, cỡ chữ bảng theo cột, dòng đầu chú thích căn đều không vỡ; // v33: danh sách lồng nhiều cấp, chỉ số trên không cắt dòng, ngắt dòng cân bằng cả đoạn, nhãn hình tràn sang vùng trắng; // v32: công thức giữ nguyên, ô bảng theo khung đường kẻ (gộp đúng ô nhiều dòng, mỗi mục một dòng, cả bảng một cỡ chữ, dùng hết bề ngang ô), số liệu cần duyệt; // v31: đoạn vắt cột dịch liền, bảng theo đường kẻ, khe cột hẹp, chồng khối, chỉ mục giữ gốc; // v30: bỏ chữ ẩn (bìa), đoạn có cụm in đậm không vỡ, vùng tài liệu tham khảo giữ nguyên, chú thích không tách theo nhãn đồ thị; // v29: chữ Medium = đậm, bảng viết tắt theo hàng, nhãn hình không gộp; // v28: danh sách cùng cỡ chữ + chảy liền, tách tiêu đề phụ, mục lục xuống dòng tên bài/tác giả; // v27: màu chữ chỉ theo đúng đoạn có màu ở bản gốc, nhãn trong hình theo khung AI + xoá sạch nền ảnh, chú thích giữ số dòng; // v26: chú thích sát ảnh, nhãn Hình đậm, chữ dọc đo theo mực; // v25: toạ độ OCR kiểm tra theo vùng chữ thật, chữ dọc, mực đen; // v24: trang scan có hình bị lưu nhầm là trang trắng → dịch lại; // v18: thụt treo, cỡ chữ chung theo đa số; v17: tiêu đề References… dịch trên máy; v16: tách cột theo cỡ chữ (chú thích ↔ thân bài), xoá theo mực thật hai bên; v15: không chép trả dải chữ gốc từ khối OCR, OCR hình mặc định tắt; v14: khe cột không bị AI xoá nhầm, bỏ khối OCR trùng chữ; v13: chữ hoa đầu đoạn, giữ đường kẻ bảng, màu chữ trên nền ảnh, căn giữa nhầm
 const cacheKey = (docKey: string, page: number) => `${ENGINE_VERSION}::${docKey}::${page}`;
 
 // Cặp câu gốc → câu dịch lưu trên máy theo khoá KHÔNG phụ thuộc phiên bản bộ máy → nâng cấp không mất bản dịch

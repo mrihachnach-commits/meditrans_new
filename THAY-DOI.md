@@ -954,3 +954,36 @@ gán lệch bản dịch giữa các nhãn ngắn; một số câu dịch sai ng
 sách này, hoặc mở "Sửa" để chỉnh tay.
 - OCR: AI gắn "dir" (chữ xoay) cho cả chữ ngang → cả trang vẽ xoay dọc, chữ khổng lồ (BI-RADS tr.xvi). Nay khung bẹt ngang hoặc quá nửa số khối có "dir" thì coi là chữ ngang.
 - Nhãn hướng trong sơ đồ (Lateral/Medial/Head/Foot…) dịch trên máy: trước đây nano dịch "Lateral" thành "Chếch trong-ngoài".
+
+## v11.1
+- Cài đặt: **Dịch giữ định dạng** và **OCR giữ định dạng** đều là ô tự nhập tên model (có gợi ý sẵn), giống dịch thường. Để trống = mặc định (dịch giữ định dạng: gpt-4.1-nano; OCR: gemini-3.1-flash-lite).
+- Gợi ý OCR có thêm gpt-4.1-nano. Model Gemini vẫn cho toạ độ khung chữ chính xác nhất; với model GPT app tự thêm hướng dẫn toạ độ.
+- Với key hệ thống, model ngoài danh sách cho phép của máy chủ sẽ tự về model mặc định.
+
+## v11.2 — Sửa lỗi OCR trang scan (BI-RADS 2025, OCR bằng gemini-2.5-flash-lite) — engine v40
+
+Rà cả 886 trang bản dịch BI-RADS: 55 trang giữ nguyên tiếng Anh (nhiều trang chữ thật: Lời nói đầu tr.14, tr.484, 591, 622, 626, 785, 826, 834, 851, 852, 881…), trang biểu mẫu/bảng dày (tr.520, 820) chữ dịch lệch khung, đè nhau, nửa trang bỏ sót; mục lục (tr.10) còn dòng VIẾT HOA tiếng Anh, số trang vẽ hai lần, chữ gốc sót đầu dòng.
+
+- **Model OCR dự phòng** (`GeminiService.ocrFallbackModel()`: gemini-3.1-flash-lite; nếu đang dùng chính model đó thì gemini-3.5-flash-lite). Trang được đọc lại bằng model dự phòng khi:
+  - model OCR đang chọn báo lỗi trên trang (bảo trì, quá tải, JSON hỏng) — trước đây trang bị lỗi luôn;
+  - đọc 2 lần vẫn trả rỗng trên trang có mực — trước đây lưu "không có chữ" vĩnh viễn, giữ tiếng Anh;
+  - kết quả kém: nhiều khung sai chỗ / đè nhau, **hoặc bỏ sót > 35% mực chữ trên trang** (chỉ số mới `uncoveredRatio` trong `refineOcrBoxes`, không tính ảnh và đường kẻ bảng). Giữ kết quả tốt hơn.
+- Trang đã lưu "không có chữ" mà chưa thử model dự phòng (bản dịch cũ) → lần dịch / mở lại tiếp theo tự đọc lại một lần. Trang đã thử cả hai model mà vẫn không đọc được vẫn được liệt kê khi xuất PDF để bấm "Sửa lỗi".
+- Dòng **VIẾT HOA chép nguyên văn** ("APPENDIX A – MAMMOGRAPHIC VIEWS") được coi là chưa dịch → dịch bù (không áp dụng cho tên người + học vị, dòng chỉ có viết tắt như "ACR BI-RADS®").
+- **Mục lục OCR**: model chỉ ghi chấm dẫn + số trang trong bản dịch, không có trong chữ gốc → nay vẫn nhận là dòng mục lục: nới khung xoá hết chấm dẫn/số trang gốc, số trang vẽ một lần ở cột phải.
+- Khung OCR một dòng bắt đầu giữa từ → nới cả mép trái theo mực liền mạch (hết "E. ASSOCIAT" sót bên cạnh bản dịch).
+- `ENGINE_VERSION` v40: trang OCR đã lưu được dựng lại theo quy tắc mới, không tốn token.
+
+Khuyến nghị: dùng gemini-3.1-flash-lite hoặc gemini-3.5-flash-lite cho OCR; gemini-2.5-flash-lite đọc kém trang chữ dày và bảng/biểu mẫu.
+
+## v11.3 — Zoom bằng hai ngón tay trên điện thoại / máy tính bảng
+
+- **Chụm / mở hai ngón tay** để thu nhỏ / phóng to:
+  - khung **PDF gốc** (đổi mức zoom, khung "Giữ định dạng" phóng theo như khi bấm +/−);
+  - khung **bản dịch giữ định dạng** (đổi zoom chung với trang gốc, hai bên vẫn cuộn đồng bộ);
+  - khung **bản dịch chữ / tóm tắt** (đổi cỡ chữ 12–30px, chữ tự dàn lại vừa màn hình — không phải kéo ngang).
+- Trong lúc chụm tay ảnh phóng ngay theo ngón tay; nhấc tay thì trang được vẽ lại nét ở mức zoom mới và **điểm giữa hai ngón tay giữ nguyên vị trí**. Vừa chụm vừa kéo hai ngón để di chuyển. Một ngón vẫn cuộn như cũ.
+- Trình duyệt không còn phóng cả giao diện (thanh công cụ, nút) khi chụm tay trong vùng xem tài liệu.
+- Điện thoại ở chế độ chỉ xem bản dịch: zoom bằng tay trên bản dịch giữ định dạng nay đổi đúng cỡ khung (trước đây khung trang gốc bị ẩn nên không đo được cỡ).
+- Máy tính: giữ nguyên nút +/−, Ctrl +/−/0, Ctrl + lăn chuột trên PDF gốc. Thêm: Ctrl + lăn chuột (hoặc chụm hai ngón trên touchpad) trên khung bản dịch giữ định dạng → đổi zoom; trên khung bản dịch chữ → đổi cỡ chữ.
+- Mã: `src/hooks/usePinchZoom.ts` (mới), `src/App.tsx`, `src/components/LayoutTranslatePanel.tsx`.
