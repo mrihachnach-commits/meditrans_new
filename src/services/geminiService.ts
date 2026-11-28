@@ -3,7 +3,7 @@ import { dlog } from '../utils/dlog';
 import { TranslationService, TranslationOptions } from "./translationService";
 import { cleanLatex } from "../utils/textFormatting";
 import { auth } from "../firebase";
-import { glossaryPrompt, glossaryCompact } from "./medicalGlossary";
+import { glossaryPrompt, glossaryCompact, VI_MEDICAL_STYLE, VI_MEDICAL_STYLE_SHORT } from "./medicalGlossary";
 import { recordAiCall, pageOfSignal } from "./aiTelemetry";
 
 /** Chờ có thể huỷ: bấm Dừng là thoát ngay, không phải đợi hết thời gian chờ thử lại (tới 8 giây). */
@@ -1164,8 +1164,8 @@ export class GeminiService implements TranslationService {
    * prompt cũ (~7.700 ký tự, lặp 2 lần) tốn ~3.000+ token/trang — nhiều hơn cả ảnh trang.
    * Giữ nguyên mọi quy tắc trình bày; đầu ra vẫn 100% tiếng Việt.
    */
-  public static buildPagePrompt(pageNumber: number): { systemInstruction: string; prompt: string } {
-    const systemInstruction = `You are an expert English→Vietnamese medical translator. Translate the page image into Vietnamese Markdown.
+  public static buildPagePrompt(pageNumber: number, sourceText?: string): { systemInstruction: string; prompt: string } {
+    let systemInstruction = `You are an expert English→Vietnamese medical translator. Translate the page image into Vietnamese Markdown.
 Rules:
 1. Translate EVERYTHING into Vietnamese: page title, section headings, subheadings, list items, paragraphs, table cells, captions, in-figure labels (Figure n → **Hình n**, Table n → **Bảng n**). Never leave an English heading or sentence untranslated; keep only abbreviations, drug/gene names, numbers and units as written (CT, MRI, TDLU, BI-RADS, mg).
 2. Omit page furniture entirely — running header/footer lines, chapter name in side tabs, page numbers. Do not output them in any language.
@@ -1179,6 +1179,9 @@ Example of the expected shape:
 **Các sự kiện phôi thai**
 - Tuần 4–6
   - Dải ngoại bì phát triển từ nách đến bẹn của thai nhi`;
+    // v11.4: văn phong y khoa + thuật ngữ bắt buộc. Trước đây chế độ đọc ảnh KHÔNG gửi bảng thuật ngữ; nay so khớp trên
+    // lớp chữ của trang (App đã có sẵn, không tốn thêm gì). Trang scan không có lớp chữ → chỉ có hướng dẫn văn phong.
+    systemInstruction += '\n' + VI_MEDICAL_STYLE + (sourceText ? glossaryPrompt(sourceText) : '');
     return { systemInstruction, prompt: `Page ${pageNumber}. Translate the whole page.` };
   }
 
@@ -1193,7 +1196,7 @@ Example of the expected shape:
       throw new Error("Translation aborted");
     }
 
-    const { systemInstruction, prompt } = GeminiService.buildPagePrompt(pageNumber);
+    const { systemInstruction, prompt } = GeminiService.buildPagePrompt(pageNumber, options.textContent);
 
     const MAX_RETRIES = 6;
     let retryCount = 0;
@@ -1378,7 +1381,7 @@ Example of the expected shape:
         throw new Error("Không tìm thấy API Key khả dụng.");
       }
 
-      const { systemInstruction, prompt } = GeminiService.buildPagePrompt(pageNumber);
+      const { systemInstruction, prompt } = GeminiService.buildPagePrompt(pageNumber, options.textContent);
 
       const isProxy = this.isCurrentKeyProxy(key);
 
@@ -1565,6 +1568,7 @@ Rules:
 2. Keep the Markdown EXACTLY: same headings (#), list markers and indentation, **bold**/*italic* markers, line breaks, blank lines and order. Do not merge, split, add or drop lines. ALL-CAPS headings stay ALL-CAPS.
 3. Output only the translated Markdown — no preamble, notes or code fences. Symbols as plain Unicode, never LaTeX.`;
     const prompt = markdown;
+    systemInstruction += '\n' + VI_MEDICAL_STYLE; // v11.4
     systemInstruction += glossaryPrompt(markdown); // v9.4: thuật ngữ bắt buộc (chỉ những từ có trong trang)
     const MAX_RETRIES = 5;
     let retryCount = 0;
@@ -1625,6 +1629,78 @@ Rules:
   }
 
   /**
+   * v11.4: Lập bảng thuật ngữ RIÊNG cho một tài liệu (một lần cho cả sách): nhận danh sách cụm từ lặp lại trích từ lớp chữ
+   * (chạy trên máy), AI chọn cụm là thuật ngữ chuyên môn và cho cách dịch tiếng Việt chuẩn. Các trang sau dùng đúng cách
+   * dịch này (cả dịch thường lẫn giữ định dạng) → thuật ngữ thống nhất trong toàn sách, kể cả thuật ngữ không có trong bảng chung.
+   * Chi phí: ~1 lượt gọi, khoảng 2–3 nghìn token vào + 3–5 nghìn token ra cho 350 cụm.
+   */
+  async buildDocumentGlossary(
+    candidates: { term: string; count: number }[], context: string, model?: string, signal?: AbortSignal,
+  ): Promise<{ en: string; vi: string }[]> {
+    if (!candidates.length) return [];
+    const requestModel = model || this.modelName;
+    const systemInstruction = `You are a senior Vietnamese medical terminologist (radiology, ultrasound, oncology, cardiology, endocrinology).
+The user sends numbered English phrases that recur in one medical book (with their frequency) and the book's title/first lines.
+Select ONLY phrases that are medical, anatomical, imaging, procedural, device, statistical or other technical terms; skip ordinary English phrases, person names, place names, journal names, fragments that are not a complete term.
+For each selected phrase give the standard Vietnamese term exactly as used in Vietnamese medical textbooks and Ministry of Health documents (Sino-Vietnamese where established: tăng sản, loạn sản, di căn, giảm âm, tăng âm, đậm độ, ngấm thuốc…). One concise term, lowercase unless it is a proper name, no explanation. Abbreviations/acronyms, drug and gene names, eponymous signs: keep the abbreviation or name, translate the generic part ("Cooper ligaments" → "dây chằng Cooper"). A term with no established Vietnamese equivalent: Vietnamese rendering + " (English term)".
+Return ONLY JSON: {"t":[{"id":"1","v":"thuật ngữ tiếng Việt"}, ...]} — ids of the selected phrases only.`;
+    const prompt = `Book: ${context.slice(0, 400)}\nPhrases (id|phrase|count):\n` + candidates.map((c, i) => `${i + 1}|${c.term}|${c.count}`).join('\n');
+    const parse = (raw: string) => {
+      const arr = parseLayoutJson(raw);
+      const out: { en: string; vi: string }[] = [];
+      for (const it of arr) {
+        const i = Number(it?.id) - 1;
+        const v = String(it?.v ?? '').replace(/\s+/g, ' ').trim();
+        if (!(i >= 0 && i < candidates.length) || !v || v.includes('=') || v.length > 80) continue;
+        if (v.toLowerCase() === candidates[i].term.toLowerCase()) continue;
+        out.push({ en: candidates[i].term, vi: v });
+      }
+      return out;
+    };
+    const MAX_RETRIES = 4;
+    let retryCount = 0;
+    while (retryCount <= MAX_RETRIES) {
+      if (signal?.aborted) throw new Error('Translation aborted');
+      let ai: any, key: string;
+      try { ({ ai, key } = await this.acquireKeyAndInstance()); } catch { throw new Error('Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.'); }
+      try {
+        let raw: string;
+        if (this.isCurrentKeyProxy(key)) {
+          raw = await this.callOpenAINonStream(key, requestModel, systemInstruction, prompt, '', signal, 8192, true);
+        } else {
+          const gm = this.googleModel(key, requestModel);
+          const genModel = ai.getGenerativeModel({
+            model: gm, systemInstruction,
+            generationConfig: GeminiService.genConfig(gm, { temperature: 0, maxOutputTokens: 8192, responseMimeType: 'application/json' }),
+          });
+          const res = await genModel.generateContent(prompt, signal ? ({ signal } as any) : undefined);
+          raw = res.response.text();
+        }
+        GeminiService.lastSuccessfulKey = key;
+        return parse(raw);
+      } catch (error: any) {
+        if (signal?.aborted) throw new Error('Translation aborted');
+        if (!this.isCurrentKeyProxy(key)) {
+          if (GeminiService.handleThinkingError(this.googleModel(key, requestModel), error)) continue;
+          const ge = this.onGoogleError(key, requestModel, error);
+          if (ge === 'retry') continue;
+          if (ge === 'continue') { retryCount++; continue; }
+        } else if (GeminiService.handleThinkingError(this.mapModelForGoogle(requestModel), error)) continue;
+        const msg = String(error?.message || '').toLowerCase();
+        if (msg.includes('level 2') || msg.includes('đăng nhập')) throw error;
+        const isQuota = msg.includes('429') || msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('401');
+        if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
+          retryCount++;
+          await sleepAbortable(GeminiService.retryDelay(error, Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500)), signal);
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Quá số lần thử lại.');
+  }
+
+  /**
    * Dịch giữ định dạng: dịch danh sách khối chữ (đã trích từ PDF) sang tiếng Việt.
    * Trả về map id → bản dịch. Khối nào model bỏ sót sẽ không có trong map (giữ nguyên chữ gốc).
    */
@@ -1660,7 +1736,7 @@ For each block return:
 - "align": "left" | "center" | "right" | "justify"
 - "dir": "up" if the text is rotated and reads bottom-to-top, "down" if it reads top-to-bottom; omit for normal horizontal text. For rotated text, "lines" counts the lines across the block.
 Return ONLY JSON: {"blocks":[...]} in reading order (column by column, top to bottom).
-Boxes must enclose the text itself: a caption below a picture gets the box of the caption lines, never a box on the picture. Grey/blank rectangles are hidden pictures: ignore them.${gptBoxHint}${extra ? '' : glossaryCompact()}`;
+Boxes must enclose the text itself: a caption below a picture gets the box of the caption lines, never a box on the picture. Grey/blank rectangles are hidden pictures: ignore them.${gptBoxHint}${VI_MEDICAL_STYLE_SHORT}${extra ? '' : glossaryCompact()}`;
     const prompt = extra
       ? 'Return only text inside the given image regions and rotated text, with boxes and Vietnamese translations. JSON only.'
       : 'OCR this page into text blocks with boxes and Vietnamese translations. JSON only.';
@@ -1914,6 +1990,7 @@ Return ONLY JSON: {"t":[{"id":"b1","v":"..."}]} containing every id.`;
         '\nTranslate EVERY English word (including words in titles); only person names, journal names and the items listed above stay unchanged. Output plain text only: never add tags, brackets or markup of any kind, and never leave an ordinary English word or phrase untranslated (e.g. "US-guided biopsy" → "sinh thiết dưới hướng dẫn siêu âm (US)", "monograph" → "chuyên khảo").\n');
     }
     const prompt = `${JSON.stringify(blocks.map(b => ({ id: b.id, text: b.text })))}`;
+    systemInstruction += VI_MEDICAL_STYLE_SHORT; // v11.4: văn phong y khoa
     systemInstruction += glossaryPrompt(blocks.map(b => b.text).join('\n')); // v9.4: thuật ngữ bắt buộc
 
     // v11: nếu model tự trả thêm "k" (vài từ đầu câu gốc) thì dùng để kiểm chứng bản dịch thuộc đúng khối (trượt mã khối:

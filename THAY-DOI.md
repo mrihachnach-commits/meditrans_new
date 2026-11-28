@@ -987,3 +987,69 @@ Khuyến nghị: dùng gemini-3.1-flash-lite hoặc gemini-3.5-flash-lite cho OC
 - Điện thoại ở chế độ chỉ xem bản dịch: zoom bằng tay trên bản dịch giữ định dạng nay đổi đúng cỡ khung (trước đây khung trang gốc bị ẩn nên không đo được cỡ).
 - Máy tính: giữ nguyên nút +/−, Ctrl +/−/0, Ctrl + lăn chuột trên PDF gốc. Thêm: Ctrl + lăn chuột (hoặc chụm hai ngón trên touchpad) trên khung bản dịch giữ định dạng → đổi zoom; trên khung bản dịch chữ → đổi cỡ chữ.
 - Mã: `src/hooks/usePinchZoom.ts` (mới), `src/App.tsx`, `src/components/LayoutTranslatePanel.tsx`.
+
+## v11.4 — Thuật ngữ y khoa chuẩn và thống nhất (dịch thường + giữ định dạng)
+
+Mục tiêu: bản dịch dùng đúng thuật ngữ chuyên ngành tiếng Việt, mỗi thuật ngữ một cách dịch trong cả cuốn, không sót tiếng Anh giữa câu.
+Dựa trên các lỗi thật trong bản rà soát Atlas siêu âm vú ("hoàng điểm" cho areola, 3–4 cách dịch fibroadenoma / mammography,
+"sonoelastography" để nguyên 155 lần, "vôi hoá" lẫn "vôi hóa").
+
+**1. Dịch thường chế độ đọc ảnh nay cũng dùng bảng thuật ngữ.** Trước đây chỉ chế độ "Ưu tiên lớp chữ" và "Giữ định dạng" gửi thuật ngữ bắt buộc;
+trang đi đường đọc ảnh (trang có bảng, nhiều nhãn hình) thì không. Nay web so khớp thuật ngữ trên lớp chữ của trang (đã có sẵn) và gửi kèm.
+Trang scan không có lớp chữ: chỉ gửi hướng dẫn văn phong.
+
+**2. Hướng dẫn văn phong y khoa tiếng Việt** gửi kèm mọi yêu cầu dịch (dịch thường, giữ định dạng, OCR):
+dùng thuật ngữ đã chuẩn hoá thay vì dịch từng chữ, ưu tiên từ Hán–Việt chuyên ngành, một thuật ngữ một cách dịch,
+thuật ngữ chưa có tương đương thì "tiếng Việt (tiếng Anh)" ở lần đầu, viết tắt được giải nghĩa thì dịch phần giải nghĩa và giữ chữ viết tắt
+("chụp cắt lớp vi tính (CT)"), giữ tên riêng trong tên dấu hiệu/giải phẫu ("dây chằng Cooper"), câu gọn tự nhiên, giữ nguyên mức độ khẳng định và số liệu.
+Chi phí: khoảng +300 token đầu vào/trang ở dịch thường, +120 token/lượt ở giữ định dạng.
+
+**3. Bảng thuật ngữ chung thêm ~320 mục** (tổng ~570), theo đúng các sách trong dự án: tuyến giáp – cận giáp – vùng cổ (TI-RADS, cao hơn rộng,
+xảo ảnh đuôi sao chổi, thần kinh thanh quản quặt ngược…), đốt nhiệt tuyến giáp (RFA, MWA, kỹ thuật đốt di chuyển, bóc tách bằng dịch, tỷ lệ giảm thể tích…),
+BI-RADS 2025 (thành phần mô vú a–d, bất đối xứng, vôi hoá đa hình thái mịn, ngấm thuốc không dạng khối, ngấm thuốc nhu mô nền…),
+CT tim (mảng xơ vữa, tái cấu trúc dương tính, dấu hiệu vòng khăn ăn, các nhánh động mạch vành, FFR…), kỹ thuật hình ảnh (xảo ảnh, Doppler, MPR/MIP, liều…),
+ngực, bụng, cơ xương khớp – can thiệp, thống kê y học. Vẫn chỉ gửi những thuật ngữ có trong trang (tối đa 50) nên gần như không tốn thêm token.
+"radial artery" = động mạch quay (không bị "radial = theo hướng nan hoa" của sách vú lấn sang).
+**Chị nên rà lại các mục mới** trong Cài đặt → Bảng thuật ngữ, sửa theo thói quen của khoa/bệnh viện (vd. "artifact = xảo ảnh" hay "nhiễu ảnh").
+
+**4. Bảng thuật ngữ riêng cho từng tài liệu** (Cài đặt → Bảng thuật ngữ → "Thuật ngữ riêng của tài liệu này"):
+- "Lập tự động bằng AI": web đọc lớp chữ cả sách trên máy (không tốn token), lấy ~350 cụm lặp lại nhiều nhất (bỏ tài liệu tham khảo, tên tác giả,
+  từ thông dụng), gửi MỘT lượt cho AI chọn cụm là thuật ngữ và cho cách dịch chuẩn. Khoảng 3–4 nghìn token vào, 3–5 nghìn token ra cho cả cuốn.
+- Mọi trang sau (cả dịch thường lẫn giữ định dạng) dùng đúng các cách dịch này → thuật ngữ không có trong bảng chung cũng thống nhất cả sách.
+- Sửa / xoá từng dòng rồi Lưu. Bảng chung luôn được ưu tiên khi trùng. Lập lại thì giữ nguyên các dòng đã có, chỉ bổ sung.
+- Mặc định tự lập khi bấm "Dịch toàn bộ" (cả 3 nút) nếu tài liệu chưa có bảng; tắt được. Sách scan (không có lớp chữ) thì bỏ qua.
+- Khoá theo vân tay PDF: cùng một file mở lại, đổi tên, mở trên máy khác vẫn nhận ra (bảng lưu trên máy này).
+
+**5. Sửa thuật ngữ còn sót tiếng Anh sau khi dịch.**
+- Giữ định dạng: khối có thuật ngữ trong bảng mà bản dịch vẫn để nguyên tiếng Anh (và không dùng cách dịch bắt buộc) → dịch lại một lần như khối "nửa vời".
+- Còn sót sau lượt đó (và ở dịch thường): thay bằng cách dịch bắt buộc, tránh lặp chữ ("siêu âm sonoelastography" → "siêu âm đàn hồi";
+  "Gynecomastia ở nam giới" → "Vú to ở nam giới"). Không đụng tới phần trong ngoặc (chú thích tiếng Anh hợp lệ), dòng không có chữ tiếng Việt,
+  tài liệu tham khảo.
+- Áp dụng cả khi dựng lại trang giữ định dạng đã lưu → bản dịch cũ được sửa ngay khi mở, không tốn token.
+
+**6. Thống nhất cách đặt dấu thanh** (Cài đặt → "Kiểu đặt dấu thanh"): mặc định kiểu mới "hóa, thùy, khỏe, thủy"; chọn được kiểu cũ "hoá, thuỳ, khoẻ, thuỷ"
+hoặc giữ nguyên. Áp dụng cho dịch thường, giữ định dạng, OCR và cả bảng thuật ngữ gửi cho AI. "quý", "hoạt", "toán"… không bị đổi.
+
+**7. OCR trang scan** gửi kèm bảng thuật ngữ rút gọn: nay ưu tiên thuật ngữ đã gặp trong chính tài liệu đó (bảng tài liệu + các trang đã dịch)
+thay vì 160 cụm dài nhất của bảng chung.
+
+**Lưu ý khi cập nhật:** với bảng thuật ngữ mặc định, bảng thay đổi nên bộ nhớ dịch (tiêu đề đầu trang, tên mục) tự xoá một lần, các tiêu đề được dịch lại theo thuật ngữ mới.
+Bảng thuật ngữ người dùng đã tự sửa vẫn nhận các mục mới. Bản dịch thường (chữ) đã lưu không tự đổi; bấm Dịch lại nếu muốn áp dụng.
+
+**Chưa làm (cần chị quyết vì tốn token):** lượt "rà soát thuật ngữ" thứ hai bằng model mạnh hơn cho mỗi trang (ước tính +60–100% token).
+Với sách quan trọng, cách rẻ hơn là chọn gpt-4.1-mini cho "Dịch giữ định dạng" (mặc định đang là gpt-4.1-nano, nguồn chính của lỗi nghĩa ở v11).
+
+Mã: `src/services/medicalGlossary.ts` (bảng thuật ngữ, văn phong, bảng tài liệu, dấu thanh, sửa thuật ngữ sót, trích cụm ứng viên),
+`src/services/geminiService.ts` (`buildPagePrompt` nhận lớp chữ, văn phong trong mọi prompt, `buildDocumentGlossary`),
+`src/services/layoutTranslationService.ts` (dịch lại khối sót thuật ngữ, chuẩn hoá khi vẽ), `src/App.tsx` (Cài đặt, tự lập bảng trước khi dịch toàn bộ).
+
+## v11.4.1 — Toàn màn hình chuyển được chế độ xem (máy tính bảng)
+
+- Khi bấm **Toàn màn hình**, thanh nổi ở đáy màn hình (giống điện thoại) hiện cả trên máy tính bảng / máy tính, gồm:
+  **PDF** (chỉ bản gốc, rộng hết màn hình) · **Đôi** (gốc + dịch) · **Dịch** (chỉ bản dịch, rộng hết màn hình), lật trang, dịch lại, tự dịch
+  và nút **thoát toàn màn hình** (trước đây nút thoát nằm trên khung PDF nên bị ẩn khi chỉ xem bản dịch).
+- Trên máy tính bảng nút to hơn cho dễ chạm. Chế độ "Đôi" chia trái/phải trên màn hình rộng, chia trên/dưới trên điện thoại.
+- Chế độ xem toàn màn hình được nhớ cho lần sau; tách riêng với chế độ xem của điện thoại khi không ở toàn màn hình.
+- Chỉ xem bản dịch + "Vừa chiều ngang": trang được phóng theo bề ngang màn hình nên bản dịch giữ định dạng hiện to hết khung.
+  Khung PDF bị ẩn không còn làm hỏng mức zoom.
+- Mã: `src/App.tsx`.

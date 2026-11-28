@@ -16,7 +16,7 @@ import { GoogleDrivePickerModal } from './components/GoogleDrivePickerModal';
 import { uploadFileToDrive, downloadDriveFileAsArrayBuffer, setGoogleOAuthToken, connectGoogleDrive, getOrCreateMediTransFolder, clearCachedMediTransFolderId, DriveFileMetadata } from './services/googleDriveService';
 import { saveActiveDocSession, getActiveDocSession, clearActiveDocSession, saveTranslationsCache, getTranslationsCache } from './services/storageService';
 import { guardedWrite, FIRESTORE_QUOTA_EVENT } from './services/firestoreQuota';
-import { getGlossaryText, setGlossaryText, DEFAULT_GLOSSARY_TEXT } from './services/medicalGlossary';
+import { getGlossaryText, setGlossaryText, DEFAULT_GLOSSARY_TEXT, setActiveGlossaryDoc, getDocGlossaryText, setDocGlossaryText, docGlossarySize, extractTermCandidates, finalizeVietnamesePage, getViToneStyle, setViToneStyle, ViToneStyle } from './services/medicalGlossary';
 import { clearLayoutTranslationMemory, layoutTranslationMemorySize } from './services/layoutTranslationService';
 import { deleteApiKeyReliably, getPendingKeyDeletes, retryPendingKeyDeletes, PENDING_DELETES_EVENT } from './services/keyDeletion';
 import { AdminPanelModal } from './components/AdminPanelModal';
@@ -768,6 +768,75 @@ export default function App() {
       setToast(null);
     }, duration);
   }, []);
+
+  // ── v11.4: bảng thuật ngữ riêng của tài liệu (khoá = vân tay PDF: giống nhau trên mọi máy, mọi tên file) ──
+  const glossaryDocKey = String((pdfDoc as any)?.fingerprints?.[0] || currentFileName || '');
+  const [docGlossaryText, setDocGlossaryTextState] = useState('');
+  const [docGlossaryBusy, setDocGlossaryBusy] = useState<string | null>(null);
+  const [autoDocGlossary, setAutoDocGlossary] = useState<boolean>(() => localStorage.getItem('mediTrans_autoDocGlossary') !== 'false');
+  const [viToneStyle, setViToneStyleState] = useState<ViToneStyle>(() => getViToneStyle());
+  useEffect(() => {
+    setActiveGlossaryDoc(glossaryDocKey);
+    setDocGlossaryTextState(getDocGlossaryText(glossaryDocKey));
+  }, [glossaryDocKey]);
+  const docGlossaryRunRef = useRef<Promise<void> | null>(null);
+  /**
+   * Đọc lớp chữ cả tài liệu (trên máy), lấy các cụm lặp lại, nhờ AI chọn cụm là thuật ngữ và cho cách dịch chuẩn (1 lượt gọi).
+   * force=false: bỏ qua nếu tài liệu đã có bảng. Lỗi không chặn việc dịch.
+   */
+  const buildDocGlossary = useCallback(async (force: boolean): Promise<void> => {
+    if (!pdfDoc || !glossaryDocKey || !translationService.current) return;
+    if (!force && docGlossarySize(glossaryDocKey) > 0) return;
+    if (docGlossaryRunRef.current) return docGlossaryRunRef.current;
+    const run = (async () => {
+      try {
+        const pages: string[] = [];
+        let chars = 0;
+        for (let p = 1; p <= pdfDoc.numPages; p++) {
+          if (p % 20 === 1) setDocGlossaryBusy(`Đọc lớp chữ trang ${p}/${pdfDoc.numPages}…`);
+          try {
+            const page = await pdfDoc.getPage(p);
+            const tc = await page.getTextContent();
+            const t = (tc.items as any[]).map(it => (it.str || '') + (it.hasEOL ? '\n' : ' ')).join('');
+            pages.push(t); chars += t.length;
+            page.cleanup();
+          } catch { pages.push(''); }
+        }
+        if (chars < 3000) {
+          if (force) showToast('Tài liệu gần như không có lớp chữ (sách scan) nên chưa lập được bảng thuật ngữ tự động. Bạn có thể nhập tay.', 'info');
+          return;
+        }
+        const cands = extractTermCandidates(pages, 350);
+        if (!cands.length) { if (force) showToast('Không tìm thấy cụm thuật ngữ lặp lại mới.', 'info'); return; }
+        setDocGlossaryBusy(`AI đang chuẩn hoá ${cands.length} cụm thuật ngữ…`);
+        const context = `${currentFileName} — ${pages.slice(0, 3).join(' ').replace(/\s+/g, ' ').slice(0, 300)}`;
+        const res = await (translationService.current as any).buildDocumentGlossary(cands, context, selectedEngine);
+        if (!res?.length) { if (force) showToast('AI không trả về thuật ngữ nào.', 'info'); return; }
+        // giữ các dòng người dùng đã tự sửa (không bị ghi đè)
+        const prev = getDocGlossaryText(glossaryDocKey);
+        const have = new Set(prev.split('\n').map(l => l.split('=')[0].trim().toLowerCase()).filter(Boolean));
+        const lines = res.filter((r: any) => !have.has(r.en.toLowerCase())).map((r: any) => `${r.en} = ${r.vi}`);
+        const head = prev.trim() ? prev.trim() : `# Thuật ngữ riêng của "${currentFileName || 'tài liệu'}" — AI lập ${new Date().toLocaleDateString('vi-VN')} từ ${cands.length} cụm lặp lại. Sửa / xoá dòng sai rồi bấm Lưu. Bảng chung luôn được ưu tiên.`;
+        const text = lines.length ? `${head}\n${lines.join('\n')}` : head;
+        setDocGlossaryText(glossaryDocKey, text);
+        setDocGlossaryTextState(text);
+        showToast(`Đã lập bảng thuật ngữ cho tài liệu: ${lines.length} thuật ngữ. Xem / sửa trong Cài đặt → Bảng thuật ngữ.`, 'success');
+      } catch (e: any) {
+        console.warn('[MediTrans] Lập bảng thuật ngữ tài liệu thất bại:', e);
+        if (force) showToast(`Chưa lập được bảng thuật ngữ: ${e?.message || e}`, 'error');
+      } finally {
+        setDocGlossaryBusy(null);
+        docGlossaryRunRef.current = null;
+      }
+    })();
+    docGlossaryRunRef.current = run;
+    return run;
+  }, [pdfDoc, glossaryDocKey, currentFileName, selectedEngine, showToast]);
+  /** Trước khi dịch toàn bộ: tự lập bảng thuật ngữ tài liệu (nếu bật và chưa có). Tối đa 3 phút, lỗi thì vẫn dịch. */
+  const ensureDocGlossary = useCallback(async () => {
+    if (!autoDocGlossary) return;
+    await Promise.race([buildDocGlossary(false), new Promise(r => setTimeout(r, 180000))]);
+  }, [autoDocGlossary, buildDocGlossary]);
   useEffect(() => () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); }, []);
 
   // Test Firebase connection
@@ -1053,6 +1122,16 @@ export default function App() {
   }, []);
   const [showTranslationPanel, setShowTranslationPanel] = useState(false);
   const [mobileViewMode, setMobileViewMode] = useState<'pdf' | 'translation' | 'split'>('pdf');
+  // v11.4.1: chế độ xem khi TOÀN MÀN HÌNH (máy tính bảng / máy tính): chỉ PDF · đôi · chỉ bản dịch — riêng với chế độ điện thoại
+  const [fsViewMode, setFsViewMode] = useState<'pdf' | 'translation' | 'split'>(() => {
+    const v = localStorage.getItem('mediTrans_fsViewMode');
+    return v === 'pdf' || v === 'translation' ? v : 'split';
+  });
+  useEffect(() => { localStorage.setItem('mediTrans_fsViewMode', fsViewMode); }, [fsViewMode]);
+  const viewMode = isFullScreen ? fsViewMode : mobileViewMode;
+  const fsViewModeRef = useRef(fsViewMode);
+  fsViewModeRef.current = fsViewMode;
+  const setViewMode = (m: 'pdf' | 'translation' | 'split') => (isFullScreen ? setFsViewMode(m) : setMobileViewMode(m));
   const [isBulkTranslating, setIsBulkTranslating] = useState(false);
   const [showBulkConfirm, setShowBulkConfirm] = useState(false);
   const [bulkTranslateProgress, setBulkTranslateProgress] = useState(0);
@@ -3214,7 +3293,11 @@ export default function App() {
         const page = await pdfDoc.getPage(pageToFit);
         const viewport = page.getViewport({ scale: 1 });
         const rect = containerRef.current.getBoundingClientRect();
-        const containerWidth = rect.width - 64;
+        // v11.4.1: khung PDF đang ẩn (toàn màn hình, chỉ xem bản dịch) → vừa theo bề ngang màn hình để bản dịch giữ định dạng
+        // hiện to hết khung; khung ẩn ở chế độ khác → giữ zoom cũ (trước đây ra zoom âm)
+        const w = rect.width >= 50 ? rect.width : (isFullScreenRef.current && fsViewModeRef.current === 'translation' ? window.innerWidth : 0);
+        if (w < 50) { page.cleanup(); return; }
+        const containerWidth = w - 64;
         const newZoom = containerWidth / viewport.width;
         setZoom(Number(newZoom.toFixed(2)));
         page.cleanup();
@@ -3228,7 +3311,7 @@ export default function App() {
     if (pdfDoc && isAutoFit) {
       fitToWidth();
     }
-  }, [mobileViewMode, pdfDoc, isAutoFit]);
+  }, [mobileViewMode, fsViewMode, isFullScreen, pdfDoc, isAutoFit]);
 
   const fitToWidthAction = () => {
     setIsAutoFit(true);
@@ -3319,7 +3402,7 @@ export default function App() {
             // Bảo đảm 100% tiếng Việt: dòng AI bỏ sót tiếng Anh → dịch bù riêng các dòng đó
             fullContent = await fixUntranslatedLines(fullContent, svc, signal);
             if (signal.aborted) return null;
-            return fullContent;
+            return finalizeVietnamesePage(md.markdown, fullContent); // v11.4: thuật ngữ tiếng Anh còn sót + thống nhất dấu thanh
           }
         } else {
           dlog(`[MediTrans] Trang ${targetPage}: dùng ảnh (${md.reason}).`);
@@ -3405,6 +3488,7 @@ export default function App() {
       if (fullContent.trim()) {
         fullContent = await fixUntranslatedLines(fullContent, svc, signal); // dòng sót tiếng Anh → dịch bù
         if (signal.aborted) return null;
+        fullContent = finalizeVietnamesePage(textContentStr, fullContent); // v11.4
       }
       return fullContent;
 
@@ -4626,8 +4710,10 @@ export default function App() {
             {/* Left Side: Original PDF */}
             <div className={cn(
               "flex flex-col bg-slate-100 overflow-hidden border-r border-slate-200 transition-all duration-300 ease-in-out relative min-w-0",
-              isFullScreen ? "w-1/2" : (showTranslationPanel || mobileViewMode !== 'pdf' ? "w-full md:w-1/2" : "w-full"),
-              mobileViewMode === 'pdf' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[45%] shrink-0 md:h-full" : "hidden md:flex")
+              isFullScreen
+                ? (fsViewMode === 'pdf' ? "flex w-full h-full" : fsViewMode === 'translation' ? "hidden" : "flex w-full h-[45%] shrink-0 md:w-1/2 md:h-full")
+                : cn(showTranslationPanel || mobileViewMode !== 'pdf' ? "w-full md:w-1/2" : "w-full",
+                  mobileViewMode === 'pdf' ? "flex h-full" : (mobileViewMode === 'split' ? "flex h-[45%] shrink-0 md:h-full" : "hidden md:flex"))
             )}>
               <div className="h-11 bg-white border-b border-slate-200 flex items-center justify-between px-3 shrink-0 z-20 shadow-sm overflow-x-auto no-scrollbar">
                 <div className="flex items-center gap-3 min-w-max">
@@ -4898,7 +4984,9 @@ export default function App() {
                 // còn lưu lại khi mở trên máy tính thì khung dịch không có bề rộng cố định, thanh công cụ (min-w-max) đẩy
                 // khung bản gốc bên trái bị bóp gần hết ("tràn viền", tuỳ thiết bị)
                 "flex flex-col bg-white overflow-hidden transition-all duration-300 min-w-0",
-                isFullScreen ? "flex w-1/2" : (mobileViewMode === 'translation' ? "flex h-full md:w-1/2" : (mobileViewMode === 'split' ? "flex h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0 md:w-1/2" : (showTranslationPanel ? "hidden md:flex w-1/2" : "hidden")))
+                isFullScreen
+                  ? (fsViewMode === 'translation' ? "flex w-full h-full" : fsViewMode === 'pdf' ? "hidden" : "flex w-full h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0 md:w-1/2")
+                  : (mobileViewMode === 'translation' ? "flex h-full md:w-1/2" : (mobileViewMode === 'split' ? "flex h-[55%] border-t-2 border-slate-200 md:h-full md:border-t-0 md:w-1/2" : (showTranslationPanel ? "hidden md:flex w-1/2" : "hidden")))
               )}
             >
               {/* v10.7: thanh công cụ khung dịch cuộn ngang được (thanh cuộn mảnh, kéo / lăn chuột) — trước đây ẩn thanh cuộn
@@ -5642,16 +5730,19 @@ export default function App() {
 
       {/* Mobile View Toggle & Navigation Floating Bar */}
       {pdfDoc && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] md:hidden flex flex-col items-center gap-3 w-[95%] max-w-[420px]">
+        <div className={cn("fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-3 w-[95%] max-w-[420px]",
+          // v11.4.1: toàn màn hình → thanh chuyển chế độ hiện cả trên máy tính bảng / máy tính (to hơn cho dễ chạm)
+          isFullScreen ? "md:max-w-[560px] md:bottom-4" : "md:hidden")}>
           {/* Main Action Bar */}
           <div className="w-full flex items-center bg-white/95 backdrop-blur-xl rounded-full shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-slate-200 p-1 gap-0.5 ring-1 ring-slate-900/5 animate-in fade-in slide-in-from-bottom-4 duration-500">
             {/* View Toggle */}
             <div className="flex bg-slate-100/80 rounded-full p-0.5 gap-0.5 shrink-0 ml-1">
               <button 
-                onClick={() => setMobileViewMode('pdf')}
+                onClick={() => setViewMode('pdf')}
                 className={cn(
                   "flex items-center gap-0.5 px-1.5 py-1 rounded-full text-[7px] font-black uppercase tracking-tighter transition-all duration-300",
-                  mobileViewMode === 'pdf' 
+                  isFullScreen && "md:px-3 md:py-1.5 md:text-[11px] md:gap-1",
+                  viewMode === 'pdf' 
                     ? "bg-white text-indigo-600 shadow-sm" 
                     : "text-slate-500"
                 )}
@@ -5660,10 +5751,11 @@ export default function App() {
                 PDF
               </button>
               <button 
-                onClick={() => setMobileViewMode('split')}
+                onClick={() => setViewMode('split')}
                 className={cn(
                   "flex items-center gap-0.5 px-1.5 py-1 rounded-full text-[7px] font-black uppercase tracking-tighter transition-all duration-300",
-                  mobileViewMode === 'split' 
+                  isFullScreen && "md:px-3 md:py-1.5 md:text-[11px] md:gap-1",
+                  viewMode === 'split' 
                     ? "bg-white text-indigo-600 shadow-sm" 
                     : "text-slate-500"
                 )}
@@ -5672,10 +5764,11 @@ export default function App() {
                 Đôi
               </button>
               <button 
-                onClick={() => setMobileViewMode('translation')}
+                onClick={() => setViewMode('translation')}
                 className={cn(
                   "flex items-center gap-0.5 px-1.5 py-1 rounded-full text-[7px] font-black uppercase tracking-tighter transition-all duration-300",
-                  mobileViewMode === 'translation' 
+                  isFullScreen && "md:px-3 md:py-1.5 md:text-[11px] md:gap-1",
+                  viewMode === 'translation' 
                     ? "bg-white text-indigo-600 shadow-sm" 
                     : "text-slate-500"
                 )}
@@ -5718,6 +5811,14 @@ export default function App() {
 
             {/* Right Actions */}
             <div className="flex items-center gap-0.5 pr-1 shrink-0">
+              {isFullScreen && (
+                <button aria-label="Thoát toàn màn hình" title="Thoát toàn màn hình"
+                  onClick={toggleFullScreen}
+                  className="p-2 rounded-full text-slate-600 active:bg-slate-100 transition-all"
+                >
+                  <Minimize2 className="w-4 h-4" />
+                </button>
+              )}
               <button aria-label="Dịch lại trang này" 
                 onClick={() => translateCurrentPage(currentPage, true)}
                 disabled={isTranslating}
@@ -6077,6 +6178,72 @@ export default function App() {
                         title="Bộ nhớ dịch: tiêu đề đầu trang, tên sách, tên mục đã dịch được dùng lại y hệt ở mọi trang"
                       >Xoá bộ nhớ dịch</button>
                     </div>
+
+                    {/* v11.4: bảng thuật ngữ riêng của tài liệu đang mở */}
+                    <div className="mt-4 pt-3 border-t border-slate-200">
+                      <div className="text-[11px] font-bold text-slate-800">Thuật ngữ riêng của tài liệu này</div>
+                      <p className="text-[10px] text-slate-500 leading-snug mt-1">
+                        AI đọc lớp chữ cả sách (trên máy), lấy các cụm lặp lại và cho cách dịch chuẩn một lần (khoảng 1 lượt gọi AI). Mọi trang sau dùng đúng các cách dịch này, cả dịch thường lẫn giữ định dạng. Bảng chung ở trên luôn được ưu tiên. Lưu trên máy này.
+                      </p>
+                      {!pdfDoc ? (
+                        <p className="text-[10px] text-slate-400 mt-2">Mở một tài liệu PDF để xem / lập bảng.</p>
+                      ) : (
+                        <>
+                          <textarea
+                            key={glossaryDocKey}
+                            id="meditrans-doc-glossary"
+                            value={docGlossaryText}
+                            onChange={e => setDocGlossaryTextState(e.target.value)}
+                            rows={8}
+                            spellCheck={false}
+                            placeholder="Chưa có. Bấm 'Lập tự động bằng AI' hoặc nhập: thuật ngữ tiếng Anh = tiếng Việt"
+                            className="mt-2 w-full px-2.5 py-2 bg-white border border-slate-200 rounded-lg text-[11px] font-mono leading-snug outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                          <div className="flex flex-wrap gap-2 mt-2 items-center">
+                            <button
+                              type="button"
+                              disabled={!!docGlossaryBusy}
+                              onClick={() => { buildDocGlossary(true); }}
+                              className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-[10px] font-bold hover:bg-emerald-700 disabled:opacity-50"
+                            >{docGlossaryBusy ? 'Đang lập…' : (docGlossaryText.trim() ? 'Bổ sung tự động bằng AI' : 'Lập tự động bằng AI')}</button>
+                            <button
+                              type="button"
+                              onClick={() => { setDocGlossaryText(glossaryDocKey, docGlossaryText); showToast('Đã lưu thuật ngữ của tài liệu.', 'success'); }}
+                              className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-[10px] font-bold hover:bg-indigo-700"
+                            >Lưu</button>
+                            <button
+                              type="button"
+                              onClick={() => { setDocGlossaryText(glossaryDocKey, ''); setDocGlossaryTextState(''); showToast('Đã xoá thuật ngữ riêng của tài liệu.', 'info'); }}
+                              className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-[10px] font-bold hover:bg-slate-100"
+                            >Xoá</button>
+                            {docGlossaryBusy && <span className="text-[10px] text-emerald-700">{docGlossaryBusy}</span>}
+                          </div>
+                          <label className="flex items-center gap-2 mt-2 text-[10px] text-slate-600 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={autoDocGlossary}
+                              onChange={e => { setAutoDocGlossary(e.target.checked); localStorage.setItem('mediTrans_autoDocGlossary', String(e.target.checked)); }}
+                            />
+                            Tự lập khi bấm "Dịch toàn bộ" (nếu tài liệu chưa có bảng)
+                          </label>
+                        </>
+                      )}
+                    </div>
+
+                    {/* v11.4: kiểu đặt dấu thanh */}
+                    <div className="mt-4 pt-3 border-t border-slate-200">
+                      <div className="text-[11px] font-bold text-slate-800">Kiểu đặt dấu thanh</div>
+                      <select
+                        value={viToneStyle}
+                        onChange={e => { const v = e.target.value as ViToneStyle; setViToneStyle(v); setViToneStyleState(v); }}
+                        className="mt-2 w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-[11px] outline-none focus:ring-2 focus:ring-indigo-500"
+                      >
+                        <option value="new">Kiểu mới: hóa, thùy, khỏe, thủy (mặc định)</option>
+                        <option value="old">Kiểu cũ: hoá, thuỳ, khoẻ, thuỷ</option>
+                        <option value="off">Giữ nguyên như AI trả về</option>
+                      </select>
+                      <p className="text-[10px] text-slate-500 leading-snug mt-1">Áp dụng cho bản dịch mới và khi dựng lại trang giữ định dạng đã lưu (không tốn token).</p>
+                    </div>
                   </details>
 
                   {autoTranslate && (
@@ -6124,8 +6291,9 @@ export default function App() {
                         </div>
                         <div className="flex flex-col gap-2">
                           <button
-                            onClick={() => {
+                            onClick={async () => {
                               setShowBulkConfirm(false);
+                              await ensureDocGlossary(); // v11.4
                               startBulkTranslation(selectedEngine);
                             }}
                             className="w-full py-2.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase hover:bg-indigo-100 border border-indigo-100 shadow-sm transition-all active:scale-95 flex items-center justify-center gap-2"
@@ -6134,8 +6302,9 @@ export default function App() {
                             Dịch toàn bộ (Cơ bản)
                           </button>
                           <button
-                            onClick={() => {
+                            onClick={async () => {
                               setShowBulkConfirm(false);
+                              await ensureDocGlossary(); // v11.4
                               startBulkTranslation('gemini-3.6-flash');
                             }}
                             className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all active:scale-95 flex items-center justify-center gap-2"
@@ -6144,8 +6313,9 @@ export default function App() {
                             Dịch chuyên sâu (Gemini 3.1 Flash-Lite)
                           </button>
                           <button
-                            onClick={() => {
+                            onClick={async () => {
                               setShowBulkConfirm(false);
+                              await ensureDocGlossary(); // v11.4
                               setShowSettings(false);
                               setTranslationPanelMode('layout');
                               setShowTranslationPanel(true);

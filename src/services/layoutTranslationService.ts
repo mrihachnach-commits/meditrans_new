@@ -4,7 +4,7 @@
  */
 import { pageScopedSignal } from './aiTelemetry';
 import { isReferenceLine, looksLikeProse } from '../utils/translateBoost';
-import { glossaryExact, getGlossaryText } from './medicalGlossary';
+import { glossaryExact, getGlossaryText, glossaryLeftEnglish, applyGlossaryFixes, normalizeViTone, noteDocumentText } from './medicalGlossary';
 import { findColumnChains, joinChainText, splitChainTranslation } from './columnChain';
 import { checkNumeric, describeNumericIssue } from './numericQa';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
@@ -705,6 +705,7 @@ function ocrTranslation(ocr: OcrBlock[], b: LayoutBlock): string | undefined {
   let v = o?.v?.trim();
   if (!v) return undefined;
   if (b.leader) v = v.replace(/\s*(?:[.·…]\s*){3,}\s*(\d{1,4}|[ivxlcdm]{1,6})?\s*$/i, '').trim();
+  if (v && o?.text) v = normalizeViTone(applyGlossaryFixes(o.text, v)); // v11.4
   return v || undefined;
 }
 
@@ -845,6 +846,9 @@ export function polishTranslations(blocks: LayoutBlock[], translations: Record<s
     if (/\.\s*(<\/\d+>)?\s*$/.test(v) && !/[.!?…:;)\]]\s*$/.test(src) && src.split(' ').length <= 12 && b.lineCount <= 2 && !/\.\.\s*$/.test(v)) {
       v = v.replace(/\.(\s*(<\/\d+>)?\s*)$/, '$1');
     }
+    // 4) v11.4: thuật ngữ trong bảng mà bản dịch vẫn để nguyên tiếng Anh ("siêu âm sonoelastography") → cách dịch bắt buộc;
+    //    thống nhất dấu thanh (hóa/hoá, thùy/thuỳ). Chạy cả khi dựng lại trang đã lưu → bản dịch cũ cũng được chuẩn hoá, không tốn token.
+    v = normalizeViTone(applyGlossaryFixes(b.plain, v));
     translations[b.id] = v;
   }
 }
@@ -1260,6 +1264,7 @@ async function translateBlocks(
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   if (!blocks.length) return out;
+  noteDocumentText(blocks.map(b => b.plain).join('\n')); // v11.4: nhớ thuật ngữ của sách (OCR trang scan gửi kèm đúng thuật ngữ này)
   // Tiêu đề mục thông dụng (References, Conclusions…) dịch ngay trên máy, không gửi AI
   const local: Record<string, string> = {};
   let inRefs = false;
@@ -1348,10 +1353,12 @@ async function translateBlocks(
   // Khối AI bỏ sót HOẶC trả nguyên văn tiếng Anh (thỉnh thoảng xảy ra) → dịch bù một lần
   // v11: + khối dịch nửa vời (giữ từ tiếng Anh / thẻ lạ) → dịch lại một lần, chỉ nhận bản mới nếu tốt hơn
   const partial = new Map<string, number>();
+  // v11.4: + thuật ngữ trong bảng bị để nguyên tiếng Anh → cũng dịch lại một lần (prompt nhắc lại thuật ngữ bắt buộc)
+  const badScore = (b: LayoutBlock, v: string) => partialEnglishScore(b.text, v) + glossaryLeftEnglish(b.plain, v).length;
   for (const b of blocks) {
     const v = out[b.id];
     if (!v || chainInfo.has(b.id)) continue;
-    const s = partialEnglishScore(b.text, v);
+    const s = badScore(b, v);
     if (s > 0) partial.set(b.id, s);
   }
   const missing = blocks.filter(b => !out[b.id] || isUntranslated(b.text, out[b.id]) || partial.has(b.id));
@@ -1364,7 +1371,7 @@ async function translateBlocks(
           const b = missing.find(x => x.id === id);
           if (!b) continue;
           const prev = partial.get(id);
-          if (prev !== undefined) { if (!isUntranslated(b.text, v) && partialEnglishScore(b.text, v) < prev) out[id] = v; continue; }
+          if (prev !== undefined) { if (!isUntranslated(b.text, v) && badScore(b, v) < prev) out[id] = v; continue; }
           if (!out[id] || !isUntranslated(b.text, v)) out[id] = v;
         }
       });
