@@ -5,8 +5,10 @@ import { saveAs } from 'file-saver';
 import {
   LayoutTemplate, Play, Square, Download, RefreshCw, AlertTriangle, Loader2, Layers,
   ImageDown, Cloud, HardDrive, Repeat, X, PencilLine, Save, ScanText,
-  BarChart3, MoreHorizontal,
+  BarChart3, MoreHorizontal, Move, ShieldCheck,
 } from 'lucide-react';
+import { ManualLayoutEditor } from './ManualLayoutEditor';
+import { reviewPagePairs, estimateReviewTokens, ISSUE_LABEL, type Reviewer } from '../services/pageReview';
 import {
   LayoutBlockTranslator,
   LayoutPageResult,
@@ -23,6 +25,12 @@ import {
   translatePageWithLayout,
   getLayoutOcrFigures,
   setLayoutOcrFigures,
+  parseReview,
+  parseManual,
+  withManual,
+  withReview,
+  REVIEW_PAIR_KEY,
+  type PageReview,
 } from '../services/layoutTranslationService';
 import { LayoutCloudTarget, loadCloudLayoutPages, saveCloudLayoutPage } from '../services/layoutCloudService';
 import { isFirestoreQuotaBlocked } from '../services/firestoreQuota';
@@ -441,10 +449,17 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
   };
 
   const handleRetranslate = async () => {
-    rebuildFailedRef.current.delete(currentPage);
-    await deleteLayoutPages(docKey, [currentPage]);
-    setResults(prev => { const n = { ...prev }; delete n[currentPage]; return n; });
-    runPages([currentPage], true);
+    const page = currentPage;
+    // v11.5: giữ chỉnh tay bố cục qua lần dịch lại (khoá khối theo câu gốc nên vẫn khớp)
+    const manual = parseManual(resultsRef.current[page]?.pairs || cloudPairsRef.current[page]);
+    rebuildFailedRef.current.delete(page);
+    await deleteLayoutPages(docKey, [page]);
+    setResults(prev => { const n = { ...prev }; delete n[page]; return n; });
+    await runPages([page], true);
+    const fresh = manual ? (await loadLayoutPage(docKey, page))?.pairs : undefined;
+    if (manual && fresh?.length) {
+      try { await applyPairs(page, withManual(fresh, manual), 'chỉnh bố cục', true); } catch (e) { console.warn('[Layout] Không áp lại chỉnh tay sau khi dịch lại:', e); }
+    }
   };
 
   /* -------- v10.8: "Sửa lỗi" từ hộp xuất PDF -------- */
@@ -465,6 +480,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     if (!pairs?.length) { showToast('Trang này chưa có bản dịch để sửa.', 'info'); return; }
     const issues: Record<string, string> = {};
     for (const it of resultsRef.current[currentPage]?.numericIssues || []) issues[it.s] = it.why;
+    // v11.5: lỗi kiểm duyệt còn lại (kèm gợi ý sửa của AI)
+    for (const it of reviewOf(currentPage)?.issues || []) {
+      const why = `Kiểm duyệt – ${ISSUE_LABEL[it.type] || it.type}: ${it.note}${it.fix ? ` · Gợi ý: ${it.fix.replace(/<\/?\d+>/g, '')}` : ''}`;
+      issues[it.s] = issues[it.s] ? `${issues[it.s]} · ${why}` : why;
+    }
     setEditor({
       page: currentPage,
       items: pairs.filter(p => !isOcrKey(p.s)).map(p => ({ ...p })),
@@ -475,11 +495,128 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
     });
   };
 
+  /* -------- v11.5: lưu cặp câu mới của một trang (sửa chữ, chỉnh tay bố cục, kiểm duyệt) → vẽ lại, lưu máy + đám mây -------- */
+  const applyPairs = useCallback(async (page: number, pairs: LayoutPair[], what: string, silent = false) => {
+    const res = await renderPageFromPairs(pdfDoc, page, pairs);
+    await saveLayoutPage(docKey, res);
+    const stored = (await loadLayoutPage(docKey, page)) || res;
+    setResults(prev => ({ ...prev, [page]: stored }));
+    setCloudPairs(prev => ({ ...prev, [page]: res.pairs || pairs }));
+    const synced = cloud?.canWrite ? await pushToCloud(page, res.pairs || pairs, true) : false;
+    if (silent) return res;
+    if (cloud?.canWrite && synced) showToast(`Đã lưu ${what} trang ${page} (đã đồng bộ lên tài khoản).`, 'success');
+    else if (cloud?.canWrite) showToast(`Đã lưu ${what} trang ${page} trên máy này; chưa đồng bộ được lên tài khoản (sẽ thử lại sau).`, 'info');
+    else showToast(`Đã lưu ${what} trang ${page} trên máy này.`, 'success');
+    return res;
+  }, [pdfDoc, docKey, cloud, pushToCloud, showToast]);
+
+  const [layoutEditor, setLayoutEditor] = useState<{ page: number; pairs: LayoutPair[]; widthPt: number } | null>(null);
+  const openLayoutEditor = () => {
+    const r = resultsRef.current[currentPage];
+    const pairs = r?.pairs || cloudPairsRef.current[currentPage];
+    if (!pairs?.length) { showToast('Trang này chưa có bản dịch giữ định dạng để chỉnh.', 'info'); return; }
+    setLayoutEditor({ page: currentPage, pairs, widthPt: r?.widthPt || 595 });
+  };
+
+  /* -------- v11.5: kiểm duyệt bản dịch bằng AI (L2: tự sửa + kiểm lại một lần, học thuật ngữ) -------- */
+  const reviewOf = useCallback((page: number): PageReview | undefined => {
+    const r = resultsRef.current[page];
+    if (r?.review) return r.review;
+    const pairs = r?.pairs || cloudPairsRef.current[page];
+    return parseReview(pairs?.find(p => p.s === REVIEW_PAIR_KEY)?.v);
+  }, []);
+  const [reviewDlg, setReviewDlg] = useState(false);
+  const [reviewScope, setReviewScope] = useState<'page' | 'range' | 'all'>('page');
+  const [reviewRange, setReviewRange] = useState('');
+  const [reviewAgain, setReviewAgain] = useState(false);
+  const [reviewFix, setReviewFix] = useState(() => { try { return localStorage.getItem('mediTrans_reviewFix') !== '0'; } catch { return true; } });
+  const [reviewLearn, setReviewLearn] = useState(() => { try { return localStorage.getItem('mediTrans_reviewLearn') !== '0'; } catch { return true; } });
+  const [reviewModel, setReviewModel] = useState(() => { try { return localStorage.getItem('mediTrans_proxyModelReview') || ''; } catch { return ''; } });
+  const [reviewProg, setReviewProg] = useState<{ done: number; total: number; page: number | null } | null>(null);
+  const [reviewSummary, setReviewSummary] = useState<{ ok: number; fixed: number; issues: number[]; failed: number[]; learned: number; blocksFixed: number; overflow: number[] } | null>(null);
+  const reviewAbort = useRef<AbortController | null>(null);
+
+  const savedPages = useCallback(() => Array.from(new Set([...Object.keys(resultsRef.current), ...Object.keys(cloudPairsRef.current)].map(Number)))
+    .filter(p => (resultsRef.current[p]?.pairs || cloudPairsRef.current[p] || []).some(x => !isOcrKey(x.s))).sort((a, b) => a - b), []);
+  const reviewTargets = (): number[] => {
+    let pages: number[];
+    if (reviewScope === 'page') pages = [currentPage];
+    else if (reviewScope === 'range') pages = parsePageRange(normalizeRangeInput(reviewRange), numPages);
+    else pages = savedPages();
+    const saved = new Set(savedPages());
+    return pages.filter(p => saved.has(p) && (reviewAgain || reviewScope === 'page' || !reviewOf(p)));
+  };
+  const reviewEstimate = (() => {
+    if (!reviewDlg) return 0;
+    const pages = reviewTargets();
+    const t = pages.reduce((n, p) => n + estimateReviewTokens(resultsRef.current[p]?.pairs || cloudPairsRef.current[p] || []), 0);
+    return Math.round(t * (reviewFix ? 1.25 : 1));
+  })();
+
+  const runReview = async () => {
+    const reviewer = translator as unknown as Reviewer;
+    if (!reviewer?.reviewLayoutBlocks) { showToast('Chưa có API Key / bộ dịch để kiểm duyệt.', 'error'); return; }
+    try {
+      if (reviewModel.trim()) localStorage.setItem('mediTrans_proxyModelReview', reviewModel.trim()); else localStorage.removeItem('mediTrans_proxyModelReview');
+      localStorage.setItem('mediTrans_reviewFix', reviewFix ? '1' : '0');
+      localStorage.setItem('mediTrans_reviewLearn', reviewLearn ? '1' : '0');
+    } catch { /* */ }
+    const pages = reviewTargets();
+    if (!pages.length) { showToast('Không có trang nào cần kiểm duyệt trong phạm vi đã chọn (trang chưa dịch hoặc đã duyệt).', 'info'); return; }
+    const ac = new AbortController();
+    reviewAbort.current = ac;
+    const sum = { ok: 0, fixed: 0, issues: [] as number[], failed: [] as number[], learned: 0, blocksFixed: 0, overflow: [] as number[] };
+    setReviewSummary(null);
+    setReviewProg({ done: 0, total: pages.length, page: null });
+    const queue = [...pages];
+    let done = 0;
+    const worker = async () => {
+      while (queue.length && !ac.signal.aborted) {
+        const p = queue.shift()!;
+        setReviewProg(pr => pr && { ...pr, page: p });
+        try {
+          const pairs = resultsRef.current[p]?.pairs || cloudPairsRef.current[p];
+          if (!pairs?.length) continue;
+          const o = await reviewPagePairs(pairs, reviewer, { autoFix: reviewFix, learn: reviewLearn, signal: ac.signal });
+          const res = await applyPairs(p, o.pairs, 'kiểm duyệt', true);
+          if (o.review.status === 'ok') sum.ok++;
+          else if (o.review.status === 'fixed') sum.fixed++;
+          else sum.issues.push(p);
+          sum.learned += o.learned;
+          sum.blocksFixed += o.review.fixed || 0;
+          if (res.overflowCount > 0) sum.overflow.push(p);
+        } catch (e) {
+          if (ac.signal.aborted) break;
+          console.warn(`[Kiểm duyệt] Trang ${p} lỗi:`, e);
+          sum.failed.push(p);
+        } finally {
+          done++;
+          setReviewProg(pr => pr && { ...pr, done });
+        }
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    reviewAbort.current = null;
+    setReviewProg(null);
+    sum.issues.sort((a, b) => a - b); sum.failed.sort((a, b) => a - b); sum.overflow.sort((a, b) => a - b);
+    setReviewSummary(sum);
+    setReviewDlg(true);
+  };
+
   const saveEditor = async () => {
     if (!editor) return;
     setSavingEdit(true);
     try {
-      const pairs = [...editor.ocr, ...editor.items.map(p => ({ s: p.s, v: p.v.replace(/\s*\n\s*/g, ' ').trim() || p.s }))];
+      let pairs = [...editor.ocr, ...editor.items.map(p => ({ s: p.s, v: p.v.replace(/\s*\n\s*/g, ' ').trim() || p.s }))];
+      // v11.5: khối còn lỗi kiểm duyệt mà người dùng đã sửa tay → coi như đã duyệt
+      const rv = parseReview(editor.ocr.find(p => p.s === REVIEW_PAIR_KEY)?.v);
+      if (rv?.issues?.length) {
+        const before = new Map((resultsRef.current[editor.page]?.pairs || cloudPairsRef.current[editor.page] || []).map(p => [p.s, p.v]));
+        const left = rv.issues.filter(it => { const now = pairs.find(p => p.s === it.s)?.v; return now === undefined || now === before.get(it.s); });
+        if (left.length !== rv.issues.length) {
+          pairs = withReview(pairs, { ...rv, issues: left.length ? left : undefined, status: left.length ? 'issues' : (rv.fixed ? 'fixed' : 'ok'), at: Date.now() });
+        }
+      }
       // Vẽ lại từ bản đã sửa — không gọi AI, không tốn token
       const res = await renderPageFromPairs(pdfDoc, editor.page, pairs);
       await saveLayoutPage(docKey, res);
@@ -669,6 +806,23 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
           <Play className="w-3.5 h-3.5" /><span>Dịch tr.{currentPage}</span>
         </button>
       )}
+      {hasSaved && !running && (
+        <button onClick={openLayoutEditor}
+          className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Chỉnh tay bố cục trang này: kéo khối, đổi cỡ khung, cỡ chữ, căn lề, xuống dòng, gộp / tách khối, xoá vùng (không tốn token)">
+          <Move className="w-3.5 h-3.5" /><span className="hidden xl:inline">Bố cục</span>
+        </button>
+      )}
+      {reviewProg ? (
+        <button onClick={() => reviewAbort.current?.abort()}
+          className={`${iconBtn} bg-amber-50 text-amber-700 border border-amber-200`} title="Dừng kiểm duyệt">
+          <Loader2 className="w-3 h-3 animate-spin" /><span>Duyệt {reviewProg.done}/{reviewProg.total}</span>
+        </button>
+      ) : (
+        <button onClick={() => { setReviewSummary(null); setReviewDlg(true); }} disabled={running || !translator}
+          className={`${iconBtn} border border-slate-200 text-slate-600 hover:bg-slate-50`} title="Kiểm duyệt bản dịch bằng AI: đạt thì duyệt, có lỗi thì tự sửa và kiểm lại (L2), học thuật ngữ đã sửa">
+          <ShieldCheck className="w-3.5 h-3.5" /><span className="hidden xl:inline">Kiểm duyệt</span>
+        </button>
+      )}
       <button onClick={() => setShowRange(v => !v)} disabled={running}
         className={`${iconBtn} border ${showRange ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
         title="Dịch / xuất nhiều trang">
@@ -728,6 +882,11 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
               <PencilLine className="w-3.5 h-3.5 text-slate-500" />Sửa bản dịch trang này
             </button>
           )}
+          {hasSaved && !running && (
+            <button onClick={() => { setShowMore(false); openLayoutEditor(); }} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg hover:bg-slate-50 text-left">
+              <Move className="w-3.5 h-3.5 text-slate-500" />Chỉnh tay bố cục trang này
+            </button>
+          )}
           <button onClick={() => { const v = !ocrFigures; setOcrFigures(v); setLayoutOcrFigures(v); }} className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg hover:bg-slate-50 text-left">
             <ScanText className={`w-3.5 h-3.5 ${ocrFigures ? 'text-amber-600' : 'text-slate-500'}`} />
             <span className="flex-1">Dịch chữ trong hình</span>
@@ -744,6 +903,68 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
           <div className={`flex items-center gap-2 px-2.5 py-2 text-[11px] border-t border-slate-100 mt-1 ${cloud?.canWrite ? 'text-emerald-700' : 'text-slate-500'}`}>
             {cloud?.canWrite ? <Cloud className="w-3.5 h-3.5" /> : <HardDrive className="w-3.5 h-3.5" />}
             <span className="leading-snug">{storageTitle}</span>
+          </div>
+        </div>
+      )}
+
+      {/* v11.5: hộp kiểm duyệt bản dịch */}
+      {reviewDlg && (
+        <div className="absolute inset-0 z-40 bg-slate-900/30 flex items-center justify-center p-4" onClick={() => setReviewDlg(false)}>
+          <div className="w-[460px] max-w-full max-h-full overflow-y-auto bg-white rounded-xl shadow-xl border border-slate-200 p-4 space-y-3 text-xs text-slate-700" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-indigo-600" />
+              <span className="text-sm font-bold text-slate-800 flex-1">Kiểm duyệt bản dịch bằng AI</span>
+              <button onClick={() => setReviewDlg(false)} aria-label="Đóng" className="p-1 rounded hover:bg-slate-100 text-slate-400"><X className="w-4 h-4" /></button>
+            </div>
+            {reviewSummary ? (
+              <div className="space-y-2">
+                <div className="font-bold text-slate-800">Kết quả</div>
+                <ul className="space-y-1 leading-relaxed">
+                  <li>✅ Đạt ngay: <b>{reviewSummary.ok}</b> trang</li>
+                  <li>🛠️ Có lỗi, đã tự sửa và kiểm lại đạt: <b>{reviewSummary.fixed}</b> trang ({reviewSummary.blocksFixed} khối)</li>
+                  <li>⚠️ Còn lỗi cần duyệt tay: <b>{reviewSummary.issues.length}</b> trang{reviewSummary.issues.length ? `: ${reviewSummary.issues.join(', ')}` : ''}</li>
+                  {reviewSummary.failed.length > 0 && <li>❌ Lỗi khi gọi AI (thử lại sau): {reviewSummary.failed.join(', ')}</li>}
+                  {reviewSummary.learned > 0 && <li>📚 Đã học {reviewSummary.learned} thuật ngữ vào bảng thuật ngữ riêng của tài liệu (Cài đặt → Bảng thuật ngữ).</li>}
+                  {reviewSummary.overflow.length > 0 && <li>📐 Trang có chữ không vừa khung (nên mở <b>Bố cục</b> để chỉnh tay): {reviewSummary.overflow.join(', ')}</li>}
+                </ul>
+                <p className="text-slate-500">Trang còn lỗi: mở trang đó → thanh cảnh báo "Xem &amp; sửa" hiện lỗi và gợi ý sửa của AI.</p>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setReviewSummary(null)} className={`${iconBtn} border border-slate-200 text-slate-600`}>Kiểm duyệt tiếp</button>
+                  <button onClick={() => setReviewDlg(false)} className={`${iconBtn} bg-indigo-600 text-white`}>Đóng</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <p className="text-slate-500 leading-relaxed">AI (model mạnh hơn model dịch) đối chiếu từng khối gốc ↔ dịch, chỉ bắt <b>lỗi nặng</b>: sai nghĩa, sót / thêm ý, số liệu, phủ định, trái/phải, thuật ngữ, sót tiếng Anh. Trang đạt được đánh dấu <b>Đã duyệt</b>. Không dịch lại trang, không đổi bố cục.</p>
+                <div className="space-y-1.5">
+                  <label className="flex items-center gap-2"><input type="radio" checked={reviewScope === 'page'} onChange={() => setReviewScope('page')} />Trang đang xem ({currentPage})</label>
+                  <label className="flex items-center gap-2"><input type="radio" checked={reviewScope === 'range'} onChange={() => setReviewScope('range')} />Khoảng trang
+                    <input value={reviewRange} onChange={e => { setReviewRange(e.target.value); setReviewScope('range'); }} placeholder="vd. 1-20, 25" className="flex-1 border border-slate-200 rounded-lg px-2 h-7" />
+                  </label>
+                  <label className="flex items-center gap-2"><input type="radio" checked={reviewScope === 'all'} onChange={() => setReviewScope('all')} />Mọi trang đã dịch</label>
+                  <label className="flex items-center gap-2 pl-5 text-slate-500"><input type="checkbox" checked={reviewAgain} onChange={e => setReviewAgain(e.target.checked)} />Kiểm cả trang đã duyệt trước đó</label>
+                </div>
+                <div className="space-y-1.5 border-t border-slate-100 pt-2">
+                  <label className="flex items-start gap-2"><input type="checkbox" className="mt-0.5" checked={reviewFix} onChange={e => setReviewFix(e.target.checked)} /><span><b>Tự sửa (L2)</b>: nhận bản sửa của AI sau khi kiểm lại một lần đạt; không đạt thì giữ bản cũ và đánh dấu cần duyệt.</span></label>
+                  <label className="flex items-start gap-2"><input type="checkbox" className="mt-0.5" checked={reviewLearn} onChange={e => setReviewLearn(e.target.checked)} /><span><b>Học thuật ngữ</b>: lỗi thuật ngữ đã sửa đạt được thêm vào bảng thuật ngữ riêng của tài liệu → các trang dịch sau dùng đúng.</span></label>
+                </div>
+                <label className="block border-t border-slate-100 pt-2">
+                  <span className="font-bold">Model kiểm duyệt</span>
+                  <input list="review-model-list" value={reviewModel} onChange={e => setReviewModel(e.target.value)} placeholder="Mặc định: gpt-4.1-mini" className="mt-1 w-full border border-slate-200 rounded-lg px-2 h-8 font-mono" />
+                  <datalist id="review-model-list">
+                    <option value="gpt-4.1-mini" /><option value="gpt-4.1" /><option value="gemini-3-flash-preview" /><option value="gemini-2.5-flash" /><option value="gpt-6-luna" />
+                  </datalist>
+                  <span className="text-slate-400">Nên mạnh hơn model dịch (mặc định dịch: gpt-4.1-nano). Key hệ thống chỉ nhận model trong danh sách cho phép của máy chủ.</span>
+                </label>
+                <div className="bg-slate-50 rounded-lg p-2 text-slate-600">
+                  {(() => { const n = reviewTargets().length; return n ? <>Sẽ kiểm <b>{n}</b> trang · ước tính ~<b>{reviewEstimate.toLocaleString('vi-VN')}</b> token (≈ {Math.round(reviewEstimate / Math.max(1, n)).toLocaleString('vi-VN')}/trang).</> : <>Không có trang cần kiểm trong phạm vi này (chưa dịch hoặc đã duyệt).</>; })()}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setReviewDlg(false)} className={`${iconBtn} border border-slate-200 text-slate-600`}>Huỷ</button>
+                  <button onClick={() => { setReviewDlg(false); runReview(); }} disabled={!reviewTargets().length} className={`${iconBtn} bg-indigo-600 text-white hover:bg-indigo-700`}><ShieldCheck className="w-3.5 h-3.5" />Bắt đầu kiểm duyệt</button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -844,6 +1065,23 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
             <button onClick={() => setNoticeHidden(currentPage)} aria-label="Ẩn thông báo" title="Ẩn thông báo" className="opacity-60 hover:opacity-100"><X className="w-3 h-3" /></button>
           </div>
         )}
+        {/* v11.5: trạng thái kiểm duyệt của trang */}
+        {(() => {
+          const rv = current && !running ? reviewOf(currentPage) : undefined;
+          if (!rv) return null;
+          if (rv.status === 'issues') return (
+            <div className="pointer-events-auto flex items-center gap-2 px-3 py-2 rounded-xl shadow-md text-[11px] border bg-amber-50 text-amber-800 border-amber-100">
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+              <span className="flex-1">Kiểm duyệt: {rv.issues?.length || 0} khối còn lỗi cần duyệt{rv.fixed ? ` (đã tự sửa ${rv.fixed} khối)` : ''}</span>
+              <button onClick={() => openEditor(true)} className={`${iconBtn} h-6 px-2 bg-amber-600 text-white hover:bg-amber-700`}>Xem &amp; sửa</button>
+            </div>
+          );
+          return (
+            <div className="pointer-events-auto self-end flex items-center gap-1.5 px-2.5 py-1 rounded-full shadow-sm text-[10px] font-bold border bg-emerald-50 text-emerald-700 border-emerald-100" title={`Model ${rv.model} · ${new Date(rv.at).toLocaleString('vi-VN')}`}>
+              <ShieldCheck className="w-3 h-3" />{rv.status === 'fixed' ? `Đã duyệt (tự sửa ${rv.fixed || 0} khối)` : 'Đã duyệt'}
+            </div>
+          );
+        })()}
         {/* v10.4: bản dịch lệch số liệu so với bản gốc → duyệt */}
         {numericHere > 0 && current && !running && (
           <div className="pointer-events-auto flex items-center gap-2 px-3 py-2 rounded-xl shadow-md text-[11px] border bg-rose-50 text-rose-800 border-rose-100">
@@ -868,6 +1106,19 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
       </div>
 
       {/* Bảng sửa bản dịch */}
+      {layoutEditor && (
+        <ManualLayoutEditor
+          pdfDoc={pdfDoc}
+          page={layoutEditor.page}
+          pairs={layoutEditor.pairs}
+          widthPt={layoutEditor.widthPt}
+          onClose={() => setLayoutEditor(null)}
+          onSave={async pairs => {
+            try { await applyPairs(layoutEditor.page, pairs, 'chỉnh bố cục'); }
+            catch (e: any) { showToast(`Không lưu được chỉnh bố cục: ${e?.message || e}`, 'error'); throw e; }
+          }}
+        />
+      )}
       {editor && (
         <div className="absolute inset-0 z-40 bg-slate-900/30 flex items-stretch justify-end" onClick={() => !savingEdit && setEditor(null)}>
           <div className="w-full max-w-[640px] h-full bg-white shadow-2xl flex flex-col" onClick={e => e.stopPropagation()}>
@@ -918,7 +1169,7 @@ export const LayoutTranslatePanel: React.FC<LayoutTranslatePanelProps> = ({
                 {editor.items.length} khối chữ
                 {editor.issues && Object.keys(editor.issues).length > 0 && (
                   <button onClick={() => setEditor(ed => ed && { ...ed, onlyNumeric: !ed.onlyNumeric })} className="ml-2 underline text-rose-600">
-                    {editor.onlyNumeric ? 'Hiện tất cả' : `Chỉ khối lệch số liệu (${Object.keys(editor.issues).length})`}
+                    {editor.onlyNumeric ? 'Hiện tất cả' : `Chỉ khối cần duyệt (${Object.keys(editor.issues).length})`}
                   </button>
                 )}
               </span>

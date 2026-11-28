@@ -1700,6 +1700,103 @@ Return ONLY JSON: {"t":[{"id":"1","v":"thuật ngữ tiếng Việt"}, ...]} —
     throw new Error('Quá số lần thử lại.');
   }
 
+  /* ---------------- v11.5: kiểm duyệt bản dịch bằng model mạnh hơn ---------------- */
+  public static readonly REVIEW_MODEL_DEFAULT = 'gpt-4.1-mini';
+  public static currentReviewModel(): string {
+    const v = (typeof window !== 'undefined' ? localStorage.getItem('mediTrans_proxyModelReview') : null)?.trim() || '';
+    return /^[\w.\-:/]{2,80}$/.test(v) ? v : GeminiService.REVIEW_MODEL_DEFAULT;
+  }
+  public reviewModelName(): string { return GeminiService.currentReviewModel(); }
+
+  /** Gọi một model cụ thể, trả về chuỗi JSON thô (xoay key, thử lại như các lệnh khác). */
+  private async callJsonWithModel(systemInstruction: string, prompt: string, model: string, signal?: AbortSignal, maxTokens = 8192): Promise<string> {
+    const MAX_RETRIES = 4;
+    let retryCount = 0;
+    // key Google: model GPT không dùng được → gemini-2.5-flash (mạnh hơn bản lite dùng để dịch)
+    const googleName = /^gemini-/i.test(model) ? model : 'gemini-2.5-flash';
+    while (retryCount <= MAX_RETRIES) {
+      if (signal?.aborted) throw new Error('Translation aborted');
+      let ai: any, key: string;
+      try { ({ ai, key } = await this.acquireKeyAndInstance()); } catch { throw new Error('Không tìm thấy API Key khả dụng. Vui lòng kiểm tra lại Key trong Cài đặt.'); }
+      try {
+        let raw: string;
+        if (this.isCurrentKeyProxy(key)) {
+          raw = await this.callOpenAINonStream(key, GeminiService.OCR_AS + model, systemInstruction, prompt, '', signal, maxTokens, !GeminiService.jsonModeUnsupported);
+        } else {
+          const gm = this.googleModel(key, googleName);
+          const genModel = ai.getGenerativeModel({
+            model: gm, systemInstruction,
+            generationConfig: GeminiService.genConfig(gm, { temperature: 0, maxOutputTokens: maxTokens, responseMimeType: 'application/json' }),
+          });
+          const res = await genModel.generateContent(prompt, signal ? ({ signal } as any) : undefined);
+          raw = res.response.text();
+        }
+        GeminiService.lastSuccessfulKey = key;
+        return raw;
+      } catch (error: any) {
+        if (signal?.aborted) throw new Error('Translation aborted');
+        if (!this.isCurrentKeyProxy(key)) {
+          if (GeminiService.handleThinkingError(this.googleModel(key, googleName), error)) continue;
+          const ge = this.onGoogleError(key, googleName, error);
+          if (ge === 'retry') continue;
+          if (ge === 'continue') { retryCount++; continue; }
+        }
+        const msg = String(error?.message || '').toLowerCase();
+        if (msg.includes('level 2') || msg.includes('đăng nhập')) throw error;
+        const isQuota = msg.includes('429') || msg.includes('quota') || msg.includes('resource_exhausted') || msg.includes('401');
+        if (retryCount < MAX_RETRIES && this.rotateKey(key, isQuota)) {
+          retryCount++;
+          await sleepAbortable(GeminiService.retryDelay(error, Math.min(8000, Math.pow(1.5, retryCount) * 800 + Math.random() * 500)), signal);
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Quá số lần thử lại.');
+  }
+
+  /**
+   * v11.5: Kiểm duyệt bản dịch: model đối chiếu từng khối gốc ↔ dịch, CHỈ báo lỗi nặng (sai nghĩa, sót/thêm ý, số liệu,
+   * phủ định, trái/phải, thuật ngữ, sót tiếng Anh) kèm bản sửa. Không có lỗi → danh sách rỗng.
+   */
+  async reviewLayoutBlocks(
+    items: { id: string; en: string; vi: string }[], signal?: AbortSignal,
+  ): Promise<{ id: string; type: string; note: string; fix?: string; term_en?: string; term_vi?: string }[]> {
+    if (!items.length) return [];
+    const model = GeminiService.currentReviewModel();
+    let systemInstruction = `You are a senior reviewer of English→Vietnamese medical translations (radiology, ultrasound, oncology, cardiology, endocrinology).
+Input: JSON list of text blocks from ONE book page in reading order: {"id","en" (source),"vi" (translation)}. A sentence may continue from one block into the next; judge fragments together with their neighbours.
+Report ONLY serious errors that change or lose medical information:
+- meaning: wrong meaning, mistranslated term, reversed relation, wrong subject;
+- omission / addition: information in "en" missing from "vi", or added in "vi";
+- number: number, unit, sign, range, percentage, figure/table number differs;
+- negation / laterality: lost or added negation, left↔right, upper↔lower, medial↔lateral swapped;
+- term: a medical term translated against the mandatory glossary below or not as the established Vietnamese term;
+- untranslated: an ordinary English word or phrase left in "vi" (names, abbreviations, drug/gene names, reference entries are fine).
+Do NOT report: style, word order, synonyms that keep the meaning, punctuation, capitalization, tone-mark placement (hóa/hoá), concise wording, or anything acceptable to a Vietnamese doctor. When unsure, do not report.
+For each error give "fix": the corrected FULL Vietnamese translation of that block, changing only what is needed, same length and style, keeping every <n>…</n> tag exactly as in "en" and the same capitalization (ALL-CAPS stays ALL-CAPS). For a term error also give "term_en" (the English term exactly as in "en") and "term_vi" (correct Vietnamese term). "note": the problem in short Vietnamese (≤ 15 words).
+Return ONLY JSON: {"t":[{"id":"…","type":"meaning|omission|addition|number|negation|laterality|term|untranslated","note":"…","fix":"…","term_en":"…","term_vi":"…"}]} — {"t":[]} when every block is correct.`;
+    systemInstruction += '\n' + VI_MEDICAL_STYLE_SHORT + glossaryPrompt(items.map(i => i.en).join('\n'));
+    const prompt = JSON.stringify(items);
+    const raw = await this.callJsonWithModel(systemInstruction, prompt, model, signal, Math.min(16000, 1500 + Math.round(prompt.length / 2)));
+    let arr: any[] = [];
+    try {
+      const txt = (raw || '').replace(/```json|```/gi, '');
+      const a = txt.indexOf('{'), b = txt.lastIndexOf('}');
+      const data = a >= 0 && b > a ? JSON.parse(txt.slice(a, b + 1)) : null;
+      arr = Array.isArray(data) ? data : Array.isArray(data?.t) ? data.t : [];
+    } catch {
+      throw new Error('AI kiểm duyệt trả về dữ liệu không đúng định dạng.');
+    }
+    const ids = new Set(items.map(i => i.id));
+    return arr.filter(x => x && ids.has(String(x.id))).map(x => ({
+      id: String(x.id), type: String(x.type || 'other').toLowerCase(), note: String(x.note || '').slice(0, 200),
+      fix: typeof x.fix === 'string' ? x.fix.replace(/\s+/g, ' ').trim() : undefined,
+      term_en: typeof x.term_en === 'string' ? x.term_en.trim() : undefined,
+      term_vi: typeof x.term_vi === 'string' ? x.term_vi.trim() : undefined,
+    }));
+  }
+
   /**
    * Dịch giữ định dạng: dịch danh sách khối chữ (đã trích từ PDF) sang tiếng Việt.
    * Trả về map id → bản dịch. Khối nào model bỏ sót sẽ không có trong map (giữ nguyên chữ gốc).

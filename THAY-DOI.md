@@ -1053,3 +1053,49 @@ Mã: `src/services/medicalGlossary.ts` (bảng thuật ngữ, văn phong, bảng
 - Chỉ xem bản dịch + "Vừa chiều ngang": trang được phóng theo bề ngang màn hình nên bản dịch giữ định dạng hiện to hết khung.
   Khung PDF bị ẩn không còn làm hỏng mức zoom.
 - Mã: `src/App.tsx`.
+
+## v11.5 — Chỉnh tay bố cục (vị trí khối, dàn chữ) + Kiểm duyệt bản dịch bằng AI (L2, học thuật ngữ)
+
+Làm trên nền v11.4.1 (giữ thuật ngữ v11.4 và thanh toàn màn hình v11.4.1).
+
+### 1. Chỉnh tay bố cục trang dịch giữ định dạng (nút **Bố cục** trên thanh công cụ, hoặc ⋯ → "Chỉnh tay bố cục trang này")
+Mở trang đã dịch ở chế độ chỉnh. Ảnh xem trước được vẽ bằng đúng bộ máy dàn trang, nên thấy thế nào thì xuất PDF ra đúng như vậy.
+- **Di chuyển khối**: bấm chọn khối rồi kéo. **Đổi cỡ khung**: kéo 8 ô vuông ở cạnh/góc. Phím mũi tên dời 2 điểm ảnh (Shift: 10).
+- **Dàn chữ**: sửa chữ trong khung (Enter = xuống dòng), cỡ chữ (pt), giãn dòng, căn trái/giữa/phải/đều, đậm, nghiêng,
+  có chân / không chân, màu chữ, "Tự thu nhỏ chữ nếu không vừa khung", "Tô nền khung" (khi đặt chữ lên ảnh / chữ khác).
+- **Gộp khối**: bật "Chọn nhiều" (hoặc giữ Shift), bấm các khối bị tách rời → "Gộp": chữ nối lại vào một khung bao trọn.
+- **Tách khối**: đặt con trỏ trong ô chữ → "Tách tại con trỏ": phần sau chuyển sang khung mới ngay bên dưới.
+- **Ẩn khối** (xoá chữ, không vẽ lại), **Thêm chữ** (kéo một khung mới, kể cả trên trang scan chưa đọc được chữ),
+  **Xoá vùng** (kéo trên chỗ còn chữ gốc sót / vết bẩn).
+- Hoàn tác (Ctrl+Z), "Khối này về tự động", "Về tự động" (bỏ mọi chỉnh tay của trang). Khung vàng = chữ chưa vừa khung.
+- Lưu: chỉnh tay được lưu thành dữ liệu nhỏ (toạ độ theo tỉ lệ trang) đi cùng bản dịch của trang, trên máy và trên tài khoản
+  (khoá `__manual__` trong cặp câu, giống `__ocr__`). Mở lại / máy khác / cập nhật engine → áp lại, không gọi AI, không tốn token.
+  Khối nhận theo câu gốc nên **Dịch lại** trang vẫn giữ các chỉnh tay. Chữ sửa trong khung cũng cập nhật bản dịch của khối.
+- Mã: `src/components/ManualLayoutEditor.tsx` (mới); `layoutEngine.ts`: `paintTranslatedPage(..., manual)` — khối chỉnh tay vẫn
+  được bộ máy xoá chữ gốc như thường nhưng vẽ vào khung người dùng (`layoutManual`/`drawManual`, dùng chung bộ đo/vẽ chữ),
+  `paintManualLayer` cho trang không có khối chữ, `PaintReport.placed` (vị trí bộ máy đã đặt từng khối);
+  `layoutTranslationService.ts`: `ManualStore`, `parseManual`/`withManual`, `blockKeys`, `PageEditModel` (chỉ trong bộ nhớ).
+- Trang không có chỉnh tay: ảnh dựng ra **giống hệt v11.4.1** (đã so từng byte trên 4 trang mẫu), không đổi ENGINE_VERSION.
+
+### 2. Kiểm duyệt bản dịch bằng AI (nút **Kiểm duyệt**)
+- Phạm vi: trang đang xem / khoảng trang / mọi trang đã dịch (mặc định bỏ qua trang đã duyệt). Hộp hiện **ước tính token** trước khi chạy.
+- Model kiểm duyệt riêng, mặc định **gpt-4.1-mini** (mạnh hơn gpt-4.1-nano dùng để dịch); key Google dùng gemini-2.5-flash nếu nhập model GPT.
+  Lưu ở `mediTrans_proxyModelReview`.
+- Model đối chiếu từng khối gốc ↔ dịch, **chỉ báo lỗi nặng**: sai nghĩa, sót / thêm ý, số liệu, phủ định, trái/phải, thuật ngữ, sót tiếng Anh.
+  Không báo văn phong, từ đồng nghĩa, dấu câu, kiểu đặt dấu thanh. Không lỗi → trang được gắn **Đã duyệt**.
+- **Tự sửa (L2)**: bản sửa của AI phải qua luật trên máy (giữ đủ thẻ màu/đậm `<n>`, khớp số liệu, không thêm con số lạ, độ dài hợp lý),
+  rồi **kiểm lại đúng một lần** (kèm khối liền trước/sau). Đạt → nhận bản sửa; không đạt → giữ bản cũ, gắn "cần duyệt" kèm gợi ý sửa.
+  Không lặp quá một vòng.
+- **Học**: lỗi thuật ngữ đã sửa đạt → thêm "thuật ngữ = cách dịch" vào **bảng thuật ngữ riêng của tài liệu** (dưới dòng
+  "# Học từ kiểm duyệt", sửa/xoá được trong Cài đặt) → các trang dịch sau dùng đúng ngay. Không ghi đè bảng chung, bỏ qua từ quá ngắn/mơ hồ.
+  Bộ nhớ dịch (tiêu đề, chuỗi lặp) được ghi đè bằng bản sửa.
+- Trang còn lỗi: thanh vàng "Kiểm duyệt: n khối còn lỗi" → **Xem & sửa** mở bảng sửa, lọc "Chỉ khối cần duyệt", hiện loại lỗi + gợi ý của AI.
+  Sửa tay các khối đó rồi Lưu → trang tự chuyển sang Đã duyệt.
+- Kết quả cuối: số trang đạt / đã tự sửa / còn lỗi, thuật ngữ đã học, và **trang có chữ không vừa khung** (gợi ý mở Bố cục để chỉnh tay).
+- Kết quả kiểm duyệt lưu cùng trang (khoá `__review__`), đồng bộ tài khoản.
+- Chi phí ước tính: ~2–4 nghìn token/trang chữ dày (+~25% khi có lỗi cần kiểm lại). Chỉ trang đã dịch, không gửi ảnh.
+- Mã: `src/services/pageReview.ts` (mới), `geminiService.ts` (`reviewLayoutBlocks`, `callJsonWithModel`, `currentReviewModel`),
+  `LayoutTranslatePanel.tsx` (nút, hộp kiểm duyệt, thanh trạng thái, gộp lỗi kiểm duyệt vào bảng sửa).
+
+**Giới hạn**: kiểm duyệt chỉ soát chữ (không nhìn ảnh), nên lỗi do OCR đọc sai chữ gốc trên trang scan không bắt được.
+Lỗi bố cục được phát hiện qua "chữ không vừa khung" và sửa bằng tay trong Bố cục; quy tắc dàn trang tự động không tự học.

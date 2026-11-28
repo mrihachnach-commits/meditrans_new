@@ -30,6 +30,12 @@ import {
   findBoxes,
   PaintReport,
   RawTextItem,
+  paintManualLayer,
+  type ManualLayout,
+  type ManualBoxPx,
+  type PlacedBox,
+  type BlockAlign,
+  type RGB,
 } from './layoutEngine';
 
 export interface LayoutBlockTranslator {
@@ -73,7 +79,105 @@ export const OCR_EXTRA_KEY = '__ocr_extra__';
 export const BLANK_PAIR_KEY = '__blank__';
 /** v9.5: AI không tìm thấy chữ trên trang CÓ hình/mực (không phải trang trắng) → giữ trang gốc nhưng cho phép dịch lại. */
 export const NOTEXT_PAIR_KEY = '__notext__';
-export const isOcrKey = (s: string) => s === OCR_PAIR_KEY || s === OCR_EXTRA_KEY || s === BLANK_PAIR_KEY || s === NOTEXT_PAIR_KEY;
+/** v11.5: chỉnh tay bố cục của trang (JSON ManualStore). */
+export const MANUAL_PAIR_KEY = '__manual__';
+/** v11.5: kết quả kiểm duyệt bản dịch của trang (JSON PageReview). */
+export const REVIEW_PAIR_KEY = '__review__';
+export const isOcrKey = (s: string) => s === OCR_PAIR_KEY || s === OCR_EXTRA_KEY || s === BLANK_PAIR_KEY || s === NOTEXT_PAIR_KEY || s === MANUAL_PAIR_KEY || s === REVIEW_PAIR_KEY;
+
+/* ------------------------------------------------------------------ */
+/* v11.5: Chỉnh tay bố cục — dữ liệu lưu (toạ độ theo tỉ lệ khổ trang)  */
+/* ------------------------------------------------------------------ */
+
+/** Một khung chỉnh tay. Toạ độ x theo bề ngang trang (0..1), y theo chiều cao (0..1); cỡ chữ theo bề ngang trang. */
+export interface ManualBoxStore {
+  /** Khoá khối: câu gốc + "#" + lần xuất hiện thứ mấy trên trang. Khung thêm mới: không có. */
+  k?: string;
+  x0: number; y0: number; x1: number; y1: number;
+  fs?: number; lh?: number; al?: BlockAlign; b?: boolean; i?: boolean; sf?: boolean;
+  c?: string | null; t?: string; fill?: boolean; fit?: boolean; hide?: boolean;
+}
+export interface ManualStore {
+  v: 1;
+  boxes: ManualBoxStore[];
+  extras: ManualBoxStore[];
+  erase: { x0: number; y0: number; x1: number; y1: number }[];
+}
+export const emptyManual = (): ManualStore => ({ v: 1, boxes: [], extras: [], erase: [] });
+export const manualIsEmpty = (m?: ManualStore | null) => !m || (!m.boxes.length && !m.extras.length && !m.erase.length);
+
+export function parseManual(pairs?: LayoutPair[] | null): ManualStore | null {
+  const e = pairs?.find(p => p.s === MANUAL_PAIR_KEY);
+  if (!e) return null;
+  try {
+    const v = JSON.parse(e.v);
+    if (!v || typeof v !== 'object') return null;
+    return { v: 1, boxes: Array.isArray(v.boxes) ? v.boxes : [], extras: Array.isArray(v.extras) ? v.extras : [], erase: Array.isArray(v.erase) ? v.erase : [] };
+  } catch { return null; }
+}
+
+/** Gắn / thay / bỏ dữ liệu chỉnh tay trong danh sách cặp câu của trang. */
+export function withManual(pairs: LayoutPair[], m: ManualStore | null): LayoutPair[] {
+  const rest = pairs.filter(p => p.s !== MANUAL_PAIR_KEY);
+  return manualIsEmpty(m) ? rest : [...rest, { s: MANUAL_PAIR_KEY, v: JSON.stringify(m) }];
+}
+
+const hexToRgb = (h?: string | null): RGB | null | undefined => {
+  if (h === null) return null;
+  if (!h || !/^#?[0-9a-f]{6}$/i.test(h)) return undefined;
+  const n = parseInt(h.replace('#', ''), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+};
+export const rgbToHex = (c?: RGB | null) => c ? '#' + [c.r, c.g, c.b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('') : null;
+
+/** Khoá ổn định của từng khối trên trang (câu gốc + thứ tự xuất hiện) — vẫn đúng khi mã khối đổi giữa các phiên bản. */
+export function blockKeys(blocks: { text: string }[]): string[] {
+  const seen = new Map<string, number>();
+  return blocks.map(b => {
+    const k = normKey(b.text);
+    const n = seen.get(k) || 0;
+    seen.set(k, n + 1);
+    return `${k}#${n}`;
+  });
+}
+
+function boxToPx(s: ManualBoxStore, W: number, H: number): ManualBoxPx {
+  return {
+    x0: s.x0 * W, x1: s.x1 * W, top: s.y0 * H, bottom: s.y1 * H,
+    size: s.fs ? s.fs * W : undefined, lineRatio: s.lh, align: s.al, bold: s.b, italic: s.i, serif: s.sf,
+    color: hexToRgb(s.c), text: s.t, fill: s.fill, fit: s.fit, hide: s.hide,
+  };
+}
+
+function manualToPx(store: ManualStore | null | undefined, blocks: LayoutBlock[], W: number, H: number): ManualLayout | null {
+  if (manualIsEmpty(store)) return null;
+  const keys = blockKeys(blocks);
+  const byKey = new Map<string, LayoutBlock>();
+  keys.forEach((k, i) => byKey.set(k, blocks[i]));
+  const boxes: Record<string, ManualBoxPx> = {};
+  for (const s of store!.boxes) {
+    const b = s.k ? byKey.get(s.k) : undefined;
+    if (b) boxes[b.id] = boxToPx(s, W, H);
+  }
+  return {
+    boxes,
+    extras: store!.extras.filter(e => (e.t || '').trim()).map(e => boxToPx(e, W, H)),
+    erase: store!.erase.map(e => ({ x0: e.x0 * W, x1: e.x1 * W, top: e.y0 * H, bottom: e.y1 * H })),
+  };
+}
+
+/** Dữ liệu cho trình chỉnh tay: khối của trang + vị trí bộ máy đã đặt (toạ độ điểm ảnh canvas). Không lưu. */
+export interface PageEditModel {
+  W: number; H: number;
+  /** Khối / khung chỉnh tay không vừa chữ (kể cả khung thêm mới "manual-n"). */
+  overflow: string[];
+  blocks: {
+    id: string; key: string; src: string; v: string;
+    x0: number; top: number; x1: number; bottom: number;
+    size: number; align: BlockAlign; bold: boolean; italic: boolean; serif: boolean; color: string | null;
+    placed?: PlacedBox; editable: boolean;
+  }[];
+}
 
 /* ------------------------------------------------------------------ */
 /* Nhận diện số cột (tự động; AI hỗ trợ khi mơ hồ)                     */
@@ -216,6 +320,33 @@ export interface LayoutPageResult {
   numericRetried?: number;
   /** v10.4: khối có bản dịch lệch số liệu / đơn vị / dấu so với bản gốc (s = câu gốc như trong pairs). */
   numericIssues?: { s: string; why: string }[];
+  /** v11.5: số chỉnh tay đã áp dụng trên trang. */
+  manualCount?: number;
+  /** v11.5: kết quả kiểm duyệt bản dịch bằng AI. */
+  review?: PageReview;
+  /** v11.5: dữ liệu cho trình chỉnh tay (chỉ trong bộ nhớ, không lưu). */
+  edit?: PageEditModel;
+}
+
+export function parseReview(v?: string): PageReview | undefined {
+  if (!v) return undefined;
+  try { const r = JSON.parse(v); return r && typeof r.status === 'string' ? r : undefined; } catch { return undefined; }
+}
+export function withReview(pairs: LayoutPair[], r: PageReview | null): LayoutPair[] {
+  const rest = pairs.filter(p => p.s !== REVIEW_PAIR_KEY);
+  return r ? [...rest, { s: REVIEW_PAIR_KEY, v: JSON.stringify(r) }] : rest;
+}
+
+/** v11.5: kết quả kiểm duyệt một trang. */
+export interface PageReview {
+  /** ok = đạt; fixed = có lỗi, đã sửa tự động và kiểm lại đạt; issues = còn lỗi cần người duyệt. */
+  status: 'ok' | 'fixed' | 'issues';
+  model: string;
+  at: number;
+  /** Lỗi còn lại (s = câu gốc như trong pairs). */
+  issues?: { s: string; type: string; note: string; fix?: string }[];
+  /** Số khối đã sửa tự động. */
+  fixed?: number;
 }
 
 // v9.4: 2100 px ≈ 270–300 dpi với khổ sách 7–7,7 inch (trước 1700 px ≈ 220 dpi, in kém nét)
@@ -861,18 +992,20 @@ async function finishPage(
   extraOcr?: OcrBlock[],
   signal?: AbortSignal,
   notes?: Record<string, string>,
+  manualStore?: ManualStore | null,
 ): Promise<LayoutPageResult> {
   try {
     return await withCpu(async () => {
       const { canvas, ctx, blocks, scanned, widthPt, heightPt } = analyzed;
       let report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [] };
+      const manual = manualToPx(manualStore, scanned ? [] : blocks, canvas.width, canvas.height);
       let numericIssues: { s: string; why: string }[] = [];
       const pairs: LayoutPair[] = [];
       if (ocr?.length) pairs.push({ s: OCR_PAIR_KEY, v: JSON.stringify(slimOcr(ocr)) });
       if (extraOcr?.length) pairs.push({ s: OCR_EXTRA_KEY, v: JSON.stringify(slimOcr(extraOcr)) });
       if (!scanned) {
         polishTranslations(blocks, translations);
-        report = paintTranslatedPage(ctx, blocks, translations, analyzed.clean, analyzed.img);
+        report = paintTranslatedPage(ctx, blocks, translations, analyzed.clean, analyzed.img, manual);
         // v10.4: câu gốc lặp lại ở nhiều vị trí trên trang mà bản dịch KHÁC nhau → lưu đủ từng bản theo thứ tự xuất hiện
         // (trước đây chỉ lưu bản đầu, mở lại thì mọi vị trí dùng chung bản đầu)
         const seen = new Set<string>();
@@ -886,7 +1019,21 @@ async function finishPage(
           pairs.push({ s: key, v: normKey(v) });
         }
         numericIssues = findNumericIssues(blocks, translations, notes);
+      } else if (manual) {
+        report = paintManualLayer(ctx, manual); // v11.5: trang chưa đọc được chữ: chỉ vùng xoá + khung chữ thêm tay
       }
+      if (manual && !manualIsEmpty(manualStore)) pairs.push({ s: MANUAL_PAIR_KEY, v: JSON.stringify(manualStore) });
+      const W = canvas.width, H = canvas.height;
+      const placedById = new Map((report.placed || []).map(p => [p.id, p]));
+      const keys = blockKeys(scanned ? [] : blocks);
+      const edit: PageEditModel = {
+        W, H, overflow: report.overflowIds || [],
+        blocks: (scanned ? [] : blocks).map((b, i) => ({
+          id: b.id, key: keys[i], src: b.plain, v: (translations[b.id] || '').replace(/\u200b/g, ''),
+          x0: b.x0, top: b.top, x1: b.x1, bottom: b.bottom, size: b.size, align: b.align, bold: b.bold, italic: b.italic, serif: b.serif,
+          color: rgbToHex(b.baseStyle?.color), placed: placedById.get(b.id), editable: !b.rotate && !b.formula,
+        })),
+      };
       await yieldToUI();
       const blob: Blob = await new Promise((resolve, reject) =>
         canvas.toBlob(b => (b ? resolve(b) : reject(new Error('Không tạo được ảnh trang'))), 'image/jpeg', JPEG_QUALITY),
@@ -911,6 +1058,8 @@ async function finishPage(
         ocr: !!ocr?.length || !!extraOcr?.length,
         numericIssues: numericIssues.length ? numericIssues : undefined,
         numericRetried: Object.values(notes || {}).filter(n => /bản mới khớp/.test(n)).length || undefined,
+        manualCount: manual ? Object.keys(manual.boxes).length + manual.extras.length + manual.erase.length : undefined,
+        edit,
       };
     }, signal);
   } finally {
@@ -1584,6 +1733,16 @@ function tmSave() {
 }
 /** Người dùng sửa bản dịch một khối → cập nhật bộ nhớ dịch để các trang sau theo bản sửa. */
 export function rememberLayoutTranslation(b: LayoutBlock, v: string) { tmPut(b, v); tmSave(); }
+/** v11.5: bản dịch của một câu gốc vừa được kiểm duyệt sửa → nếu bộ nhớ dịch đang giữ bản cũ (hoặc chuỗi ngắn) thì ghi bản mới. */
+export function rememberSourceTranslation(src: string, v: string) {
+  const k = tmNorm(src);
+  const m = tmLoad();
+  if (!m.has(k) && (k.length < 3 || k.length > 160 || k.split(' ').length > 20 || !/\p{L}{3}/u.test(k))) return;
+  if (m.get(k) === v) return;
+  m.delete(k); m.set(k, v); tmDirty = true;
+  while (m.size > TM_MAX) m.delete(m.keys().next().value as string);
+  tmSave();
+}
 /** Xoá bộ nhớ dịch (Cài đặt). */
 export function clearLayoutTranslationMemory() { tm = new Map(); try { localStorage.removeItem(TM_KEY); } catch { /* */ } }
 export function layoutTranslationMemorySize(): number { return tmLoad().size; }
@@ -1772,6 +1931,15 @@ export async function renderPageFromPairs(
 ): Promise<LayoutPageResult & { retranslated?: number; composed?: number; untranslated?: number }> {
   await ensureLayoutFonts();
   let analyzed = await analyzePage(pdfDoc, pageNumber, translator, signal);
+  // v11.5: chỉnh tay + kết quả kiểm duyệt đi theo trang qua mọi lần dựng lại
+  const manualStore = parseManual(pairs);
+  const reviewPair = pairs.find(p => p.s === REVIEW_PAIR_KEY);
+  const keep = <T extends LayoutPageResult>(r: T): T => {
+    let out = r.pairs || [];
+    if (manualStore && !out.some(p => p.s === MANUAL_PAIR_KEY)) out = withManual(out, manualStore);
+    if (reviewPair && !out.some(p => p.s === REVIEW_PAIR_KEY)) out = [...out, reviewPair];
+    return { ...r, pairs: out, review: reviewPair ? parseReview(reviewPair.v) : r.review };
+  };
   try {
     const parseOcr = (key: string): OcrBlock[] | undefined => {
       const e = pairs.find(p => p.s === key);
@@ -1779,7 +1947,7 @@ export async function renderPageFromPairs(
       try { const v = JSON.parse(e.v); return Array.isArray(v) && v.length ? v : undefined; } catch { return undefined; }
     };
     if (analyzed.scanned && isBlankCanvas(analyzed.canvas)) {
-      return blankResult(await finishPage({ ...analyzed, blocks: [] }, pageNumber, {}, undefined, undefined, signal));
+      return keep(blankResult(await finishPage({ ...analyzed, blocks: [] }, pageNumber, {}, undefined, undefined, signal, undefined, manualStore)));
     }
     // v9.5: bản lưu cũ đánh dấu "trang trắng" / "không có chữ" cho trang thật ra có hình + chữ (lỗi AI trả rỗng)
     // → dịch lại trang bằng OCR (nếu có bộ dịch), không còn hiện bản gốc y nguyên mãi mãi.
@@ -1793,7 +1961,7 @@ export async function renderPageFromPairs(
         const fresh = await translatePageWithLayout(pdfDoc, pageNumber, translator, signal);
         return { ...fresh, retranslated: Math.max(1, fresh.blockCount) };
       }
-      return noTextResult(await finishPage({ ...analyzed, blocks: [] }, pageNumber, {}, undefined, undefined, signal), pairs.some(p => p.s === NOTEXT_PAIR_KEY && p.v === '2'));
+      return keep(noTextResult(await finishPage({ ...analyzed, blocks: [] }, pageNumber, {}, undefined, undefined, signal, undefined, manualStore), pairs.some(p => p.s === NOTEXT_PAIR_KEY && p.v === '2')));
     }
     const ocr = parseOcr(OCR_PAIR_KEY);
     let extraOcr = parseOcr(OCR_EXTRA_KEY);
@@ -1870,7 +2038,7 @@ export async function renderPageFromPairs(
       }
     }
     checkAbort(signal);
-    const res = await finishPage(analyzed, pageNumber, translations, ocr, ocr ? undefined : extraOcr, signal, notes);
+    const res = keep(await finishPage(analyzed, pageNumber, translations, ocr, ocr ? undefined : extraOcr, signal, notes, manualStore));
     return { ...res, retranslated, composed, untranslated: translator ? 0 : missing.length };
   } catch (e) {
     releaseAnalyzed(analyzed);
@@ -2100,7 +2268,8 @@ export async function saveLayoutPage(docKey: string, result: LayoutPageResult): 
     const db = await openLayoutDB();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put(result, cacheKey(docKey, result.pageNumber));
+      const { edit: _edit, ...stored } = result; // dữ liệu trình chỉnh tay không lưu
+      tx.objectStore(STORE).put(stored, cacheKey(docKey, result.pageNumber));
       if (result.pairs?.length) {
         tx.objectStore(STORE).put({ pairs: result.pairs, savedAt: Date.now() }, pairsKey(docKey, result.pageNumber));
       }

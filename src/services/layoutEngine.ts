@@ -146,6 +146,8 @@ export interface PaintReport {
   shrunkIds: string[];
   /** v9.4: các dòng chữ đã vẽ (toạ độ điểm ảnh của canvas) → lớp chữ ẩn trong PDF xuất ra (tìm kiếm / sao chép được). */
   textRuns?: TextRun[];
+  /** v11.5: vị trí bộ máy đã đặt từng khối (cho trình chỉnh tay). */
+  placed?: PlacedBox[];
 }
 
 /** Một dòng chữ trên trang: x, y = điểm bắt đầu trên đường chân chữ (px), w = độ rộng (px), size = cỡ chữ (px). */
@@ -2602,6 +2604,144 @@ function eraseLabel(ctx: CanvasRenderingContext2D, xa: number, ya: number, rw: n
   ctx.putImageData(part, xa, ya);
 }
 
+/* ------------------------------------------------------------------ */
+/* v11.5: Chỉnh tay bố cục (vị trí khối, cỡ chữ, căn lề, xuống dòng)   */
+/* ------------------------------------------------------------------ */
+
+/** Một khung chữ do người dùng đặt tay (toạ độ điểm ảnh của canvas trang). */
+export interface ManualBoxPx {
+  x0: number; top: number; x1: number; bottom: number;
+  /** Cỡ chữ (px). Không có → cỡ chữ khối gốc. */
+  size?: number;
+  /** Khoảng cách dòng / cỡ chữ (mặc định 1.18). */
+  lineRatio?: number;
+  align?: BlockAlign;
+  bold?: boolean;
+  italic?: boolean;
+  serif?: boolean;
+  color?: RGB | null;
+  /** Chữ vẽ trong khung (có thể có "\n" để xuống dòng, thẻ <n> như bản dịch). Không có → bản dịch của khối. */
+  text?: string;
+  /** Tô nền trước khi vẽ (đặt khung lên ảnh / vùng có chữ khác). */
+  fill?: boolean;
+  /** Tự thu nhỏ chữ nếu không vừa khung (không dưới 50%). */
+  fit?: boolean;
+  /** Xoá khối, không vẽ gì. */
+  hide?: boolean;
+}
+
+export interface ManualLayout {
+  /** Theo mã khối của trang. */
+  boxes: Record<string, ManualBoxPx>;
+  /** Khung chữ thêm mới (không có trong bản gốc). */
+  extras: ManualBoxPx[];
+  /** Vùng xoá thêm (chữ gốc còn sót, vết bẩn). */
+  erase: { x0: number; top: number; x1: number; bottom: number }[];
+}
+
+/** Khung chữ đã vẽ (để trình chỉnh tay biết khối đang nằm ở đâu, cỡ chữ bao nhiêu). */
+export interface PlacedBox { id: string; x0: number; top: number; width: number; height: number; size: number; lineRatio: number; align: BlockAlign; }
+
+export function hasManual(m?: ManualLayout | null): boolean {
+  return !!m && (Object.keys(m.boxes).length > 0 || m.extras.length > 0 || m.erase.length > 0);
+}
+
+/**
+ * Dàn chữ một khung chỉnh tay: mỗi dòng "\n" là một đoạn, ngắt dòng tự động theo bề ngang khung.
+ * Dùng đúng bộ đo / vẽ của bộ máy dàn trang nên chữ giống hệt các khối tự động.
+ */
+function layoutManual(m: Measurer, box: ManualBoxPx, src: LayoutBlock, base0: RunStyle, text: string) {
+  const width = Math.max(4, box.x1 - box.x0);
+  const height = Math.max(4, box.bottom - box.top);
+  const base: RunStyle = {
+    ...base0,
+    bold: box.bold ?? base0.bold,
+    italic: box.italic ?? base0.italic,
+    color: box.color !== undefined ? box.color : base0.color,
+  };
+  const ratio = box.lineRatio && box.lineRatio > 0.6 && box.lineRatio < 4 ? box.lineRatio : 1.18;
+  const run = (size: number) => {
+    const b: LayoutBlock = {
+      ...src, size, align: box.align || src.align || 'left', firstOffset: 0, restOffset: 0,
+      dropCap: undefined, leader: undefined, bodyRight: undefined, breakOnStyle: false, labelLines: false,
+      serif: box.serif ?? src.serif, bold: base.bold, italic: base.italic, baseStyle: base, hScale: src.hScale || 1,
+    };
+    // kiểu riêng của khung (đậm/nghiêng) áp cho mọi đoạn chữ không có thẻ; đoạn có thẻ giữ kiểu thẻ
+    const paras = text.replace(/\r/g, '').split('\n');
+    const los = paras.map(p => p.trim() ? layoutWords(m, parseRich(p, b, base), b, base, width, size, ratio, false) : null);
+    const lineH = size * ratio;
+    let h = 0;
+    los.forEach((lo, i) => { h += lo ? lo.lines.length * lineH : lineH; if (i === los.length - 1) h -= lineH - size * 1.2; });
+    return { b, los, lineH, height: Math.max(h, size * 1.2), size };
+  };
+  const want = box.size && box.size > 2 ? box.size : src.size;
+  let r = run(want);
+  if (box.fit !== false && r.height > height + 0.5) {
+    for (let k = 0.97; k >= 0.5 && r.height > height + 0.5; k -= 0.03) r = run(want * k);
+  }
+  return { ...r, base, width, overflow: r.height > height + 0.5 };
+}
+
+function drawManual(
+  ctx: CanvasRenderingContext2D, m: Measurer, box: ManualBoxPx, src: LayoutBlock, base: RunStyle, text: string, bg: RGB | null,
+): boolean {
+  if (box.fill && bg) {
+    ctx.save();
+    ctx.fillStyle = rgbCss(bg);
+    ctx.fillRect(box.x0, box.top, box.x1 - box.x0, box.bottom - box.top);
+    ctx.restore();
+  }
+  if (box.hide || !text.trim()) return false;
+  const r = layoutManual(m, box, src, base, text);
+  let y = box.top;
+  ctx.save();
+  r.los.forEach(lo => {
+    if (!lo) { y += r.lineH; return; }
+    drawLaidOut(ctx, m, { ...lo, lineH: r.lineH }, r.b, r.base, box.x0, r.width, y);
+    y += lo.lines.length * r.lineH;
+  });
+  ctx.restore();
+  return r.overflow;
+}
+
+/** Khối giả cho khung chữ thêm mới. */
+function syntheticBlock(id: string, box: ManualBoxPx, text: string): LayoutBlock {
+  const size = box.size && box.size > 2 ? box.size : 22;
+  const base: RunStyle = { bold: !!box.bold, italic: !!box.italic, color: box.color ?? null } as RunStyle;
+  return {
+    id, text, plain: text, styles: [], baseStyle: base, x0: box.x0, x1: box.x1, top: box.top, bottom: box.bottom,
+    size, leading: size * 1.18, lineCount: 1, firstOffset: 0, restOffset: 0, bold: !!box.bold, italic: !!box.italic,
+    serif: box.serif ?? true, align: box.align || 'left', translatable: true, hScale: 1,
+  };
+}
+
+/**
+ * Trang không có khối chữ (trang scan chưa đọc được chữ): chỉ vẽ các vùng xoá + khung chữ thêm tay.
+ * Trả về các dòng chữ đã vẽ (lớp chữ ẩn của PDF xuất ra).
+ */
+export function paintManualLayer(ctx: CanvasRenderingContext2D, manual: ManualLayout): PaintReport {
+  const report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [], textRuns: [] };
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const img = ctx.getImageData(0, 0, W, H);
+  const m = new Measurer(ctx);
+  for (const e of manual.erase) {
+    const bg = regionStats(img, e.x0 - 4, e.top - 4, e.x1 + 4, e.bottom + 4).bg;
+    ctx.fillStyle = rgbCss(bg);
+    ctx.fillRect(e.x0, e.top, e.x1 - e.x0, e.bottom - e.top);
+  }
+  textSink = report.textRuns!;
+  try {
+    manual.extras.forEach((box, i) => {
+      const t = box.text || '';
+      const b = syntheticBlock(`manual-${i}`, box, t);
+      const bg = regionStats(img, box.x0, box.top, box.x1, box.bottom).bg;
+      if (drawManual(ctx, m, box, b, b.baseStyle, t, bg)) report.overflowIds.push(b.id);
+      report.painted++;
+    });
+  } finally { textSink = null; }
+  return report;
+}
+
 export function paintTranslatedPage(
   ctx: CanvasRenderingContext2D,
   allBlocks: LayoutBlock[],
@@ -2610,8 +2750,11 @@ export function paintTranslatedPage(
   clean?: ImageData | null,
   /** Ảnh trang gốc đã đọc sẵn lúc phân tích (tránh đọc lại toàn trang — tốn ~15 MB và thời gian). */
   pageImg?: ImageData | null,
+  /** v11.5: chỉnh tay của người dùng (vị trí khung, cỡ chữ, căn lề…). */
+  manual?: ManualLayout | null,
 ): PaintReport {
-  const report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [], textRuns: [] };
+  const report: PaintReport = { painted: 0, overflowIds: [], shrunkIds: [], textRuns: [], placed: [] };
+  const manualBoxes = manual?.boxes || {};
   textSink = null;
   const W = ctx.canvas.width, H = ctx.canvas.height;
   const img = pageImg && pageImg.width === W && pageImg.height === H ? pageImg : ctx.getImageData(0, 0, W, H);
@@ -2863,7 +3006,15 @@ export function paintTranslatedPage(
     return b.rotate && b.translatable && t && norm(t) && norm(t) !== b.plain;
   });
 
-  const changed = (b: LayoutBlock) => { const t = translations[b.id]; return b.translatable && !!t && !!norm(t) && norm(t) !== b.plain; };
+  // v11.5: khối chỉnh tay luôn được xoá chữ gốc (kể cả khối giữ nguyên chữ / chưa dịch); bộ máy vẫn tính chỗ như thường
+  // nhưng không vẽ — chữ được vẽ vào khung người dùng đặt ở cuối
+  for (const b of allBlocks) {
+    if (!manualBoxes[b.id] || b.formula) continue;
+    if (b.rotate) { delete manualBoxes[b.id]; continue; }
+    const t = translations[b.id];
+    if (!t || !norm(t) || norm(t) === b.plain) translations = { ...translations, [b.id]: (t && norm(t) ? t : b.text) + '\u200b' };
+  }
+  const changed = (b: LayoutBlock) => { const t = translations[b.id]; return (b.translatable || !!manualBoxes[b.id]) && !!t && !!norm(t) && norm(t) !== b.plain; };
   // v10.0: mục danh sách giữ nguyên chữ ("TDLUs", "ASL", "US", tên riêng) nằm GIỮA các mục được dịch cùng cột → cũng
   // vẽ lại (cùng chữ) để chảy theo danh sách; trước đây đứng yên tại chỗ cũ → danh sách bị hở / đè lên nhau
   const sameKept = new Set<string>();
@@ -3535,6 +3686,22 @@ export function paintTranslatedPage(
   }
   for (const m of moves) ctx.putImageData(m.c.patch, m.c.x, m.c.y + m.shift); // lượt 2: đặt vào vị trí mới
 
+  /* --- v11.5: vùng xoá tay + xoá chữ gốc của khối chỉnh tay mà bộ máy không đụng tới --- */
+  if (manual) {
+    const planned = new Set(plans.map(p => p.orig.id));
+    for (const e of manual.erase) {
+      const st = regionStats(img, e.x0 - 4, e.top - 4, e.x1 + 4, e.bottom + 4);
+      erase(e.x0, e.top, e.x1 - e.x0, e.bottom - e.top, st.bg, 0, false);
+      // bản không-chữ không có ở vùng này (chữ trong ảnh / trang scan) → tô màu nền
+      if (!cleanOk) { ctx.fillStyle = rgbCss(st.bg); ctx.fillRect(e.x0, e.top, e.x1 - e.x0, e.bottom - e.top); }
+    }
+    for (const b of blocks) {
+      if (!manualBoxes[b.id] || planned.has(b.id)) continue;
+      const st = regionStats(img, b.x0 - 4, b.top - 4, b.x1 + 4, b.bottom + 4);
+      erase(b.x0 - 0.15 * b.size, b.top - 0.1 * b.size, b.x1 - b.x0 + 0.3 * b.size, b.bottom - b.top + 0.25 * b.size, st.bg, b.size);
+    }
+  }
+
   /* --- Vẽ --- */
   textSink = report.textRuns!;
   // Khối giữ nguyên chữ gốc (tài liệu tham khảo, số, tên riêng…) cũng đưa vào lớp chữ ẩn để tìm kiếm được
@@ -3569,6 +3736,8 @@ export function paintTranslatedPage(
   try {
   for (const p of plans) {
     const inf = info.get(p.b.id)!;
+    report.placed!.push({ id: p.orig.id, x0: p.x0, top: p.top, width: p.width, height: p.lo.height, size: p.lo.size, lineRatio: p.lo.lineH / p.lo.size, align: p.b.align });
+    if (manualBoxes[p.orig.id]) continue; // v11.5: vẽ theo khung chỉnh tay bên dưới
     ctx.save();
     drawLaidOut(ctx, m, p.lo, p.b, inf.base, p.x0, p.width, p.top);
     if (inf.capChar && p.b.dropCap) {
@@ -3581,6 +3750,25 @@ export function paintTranslatedPage(
     }
     ctx.restore();
     report.painted++;
+  }
+  // v11.5: khối chỉnh tay + khung chữ thêm mới
+  if (manual) {
+    for (const b of blocks) {
+      const box = manualBoxes[b.id];
+      if (!box) continue;
+      const base = info.get(b.id)?.base ?? b.baseStyle;
+      const text = (box.text ?? translations[b.id] ?? b.text).replace(/\u200b/g, '');
+      const bg = box.fill ? regionStats(img, box.x0 - 6, box.top - 6, box.x1 + 6, box.bottom + 6).bg : null;
+      if (drawManual(ctx, m, box, b, base, text, bg)) report.overflowIds.push(b.id);
+      report.painted++;
+    }
+    manual.extras.forEach((box, i) => {
+      const t = box.text || '';
+      const sb = syntheticBlock(`manual-${i}`, box, t);
+      const bg = box.fill ? regionStats(img, box.x0 - 6, box.top - 6, box.x1 + 6, box.bottom + 6).bg : null;
+      if (drawManual(ctx, m, box, sb, sb.baseStyle, t, bg)) report.overflowIds.push(sb.id);
+      report.painted++;
+    });
   }
   } finally {
     textSink = null; // chữ xoay không đưa vào lớp chữ (toạ độ đã bị xoay)
